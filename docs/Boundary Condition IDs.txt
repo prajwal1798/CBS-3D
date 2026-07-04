@@ -1,0 +1,14 @@
+500 : adiabatic with prescribed velocity
+501 : constant temperature wall, T = 1, no-slip
+502 : constant temperature wall, T = 0, no-slip
+503 : legacy prescribed velocity inlet, u=1, v=0
+506 : velocity symmetry
+507 : legacy backward-facing-step parabolic inlet
+508 : rectangular-block benchmark parabolic inlet
+510 : prescribed velocity inlet + prescribed T
+511 : mass-flow inlet + prescribed T
+520 : pressure outlet
+530 : no-slip adiabatic wall
+532 : no-slip heat-flux wall
+901 : no-slip CHT interface
+902 : heat-flux marker only

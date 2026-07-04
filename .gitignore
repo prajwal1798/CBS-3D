@@ -1,0 +1,15 @@
+.vs/
+build/
+out/
+
+*.exe
+*.obj
+*.pdb
+*.log
+*.err
+*.out
+
+CMakeCache.txt
+CMakeFiles/
+
+input/blanket/partitions/40/

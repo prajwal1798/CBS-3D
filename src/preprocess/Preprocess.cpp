@@ -1,0 +1,1245 @@
+//=============================================================================
+// CBS3D++_SI
+//
+// Finite-element preprocessing for the three-dimensional semi-implicit
+// Characteristic-Based Split solver.
+//
+// The routines in this file prepare the mesh geometry, mass coefficients,
+// boundary-face data and nodal boundary lists required before the CBS
+// iterations begin. The spatial discretisation uses four-node linear
+// tetrahedral elements with one-based element and node numbering.
+//=============================================================================
+
+#include "cbs/preprocess/Preprocess.hpp"
+
+#include <algorithm>
+#include <array>
+#include <cmath>
+#include <iostream>
+#include <limits>
+#include <set>
+#include <stdexcept>
+#include <string>
+#include <vector>
+
+namespace cbs
+{
+    namespace
+    {
+        // Boundary identifiers recognised by the current solver. The identifiers
+        // below 511 are retained for legacy validation cases. The CHT blanket
+        // cases primarily use 511, 520, 530, 532 and 901.
+        //
+        // BC 902 is a legacy heat-flux marker. It is not a fluid-solid interface.
+        constexpr Int BC_MOVING_WALL = 500;
+        constexpr Int BC_T_HOT_WALL  = 501;
+        constexpr Int BC_T_COLD_WALL = 502;
+        constexpr Int BC_LEGACY_VEL  = 503;
+        constexpr Int BC_PRESSURE    = 504;
+        constexpr Int BC_SYMMETRY    = 506;
+        constexpr Int BC_BFS_INLET   = 507;
+        constexpr Int BC_PARAB_INLET = 508;
+        constexpr Int BC_VEL_TEMP    = 510;
+        constexpr Int BC_INLET       = 511;
+        constexpr Int BC_OUTLET      = 520;
+        constexpr Int BC_ADIABATIC   = 530;
+        constexpr Int BC_HEATFLUX    = 532;
+        constexpr Int BC_INTERFACE   = 901;
+        constexpr Int BC_HFLUX_MARK  = 902;
+
+        //-------------------------------------------------------------------------
+        // Returns true when the boundary identifier is recognised by the solver.
+        //
+        // This function only classifies identifiers. The physical action
+        // associated with each identifier is applied later by Boundary and the
+        // CBS assembly routines.
+        //-------------------------------------------------------------------------
+        bool is_supported_cbs3d_bc(Int bc)
+        {
+            switch (bc)
+            {
+                case BC_MOVING_WALL:
+                case BC_T_HOT_WALL:
+                case BC_T_COLD_WALL:
+                case BC_LEGACY_VEL:
+                case BC_PRESSURE:
+                case BC_SYMMETRY:
+                case BC_BFS_INLET:
+                case BC_PARAB_INLET:
+                case BC_VEL_TEMP:
+                case BC_INLET:
+                case BC_OUTLET:
+                case BC_ADIABATIC:
+                case BC_HEATFLUX:
+                case BC_INTERFACE:
+                case BC_HFLUX_MARK:
+                    return true;
+
+                default:
+                    return false;
+            }
+        }
+
+        // Returns true for the pressure-outlet boundary used to prescribe
+        // the pressure correction/reference value.
+        bool is_pressure_outlet_bc(Int bc)
+        {
+            return bc == BC_OUTLET;
+        }
+
+        // Returns true for the inlet where the velocity magnitude is obtained
+        // from the prescribed mass-flow rate.
+        bool is_mass_flow_inlet_bc(Int bc)
+        {
+            return bc == BC_INLET;
+        }
+
+        //-------------------------------------------------------------------------
+        // Identifies boundary faces whose nodes belong to the strict no-slip list.
+        //
+        // Moving-wall BC 500 is deliberately excluded because its non-zero
+        // velocity is imposed separately by Boundary::applyVelocity().
+        //-------------------------------------------------------------------------
+        bool is_no_slip_wall_bc(Int bc)
+        {
+            return bc == BC_T_HOT_WALL ||
+                   bc == BC_T_COLD_WALL ||
+                   bc == BC_ADIABATIC ||
+                   bc == BC_HEATFLUX ||
+                   bc == BC_INTERFACE;
+        }
+
+        //-------------------------------------------------------------------------
+        // Identifies faces on which velocity is imposed strongly.
+        //
+        // fedge = 1  prescribed-velocity face
+        // fedge = 2  other exterior face
+        // fedge = 0  interior face
+        //-------------------------------------------------------------------------
+        bool is_prescribed_velocity_face_bc(Int bc)
+        {
+            return bc == BC_MOVING_WALL ||
+                   bc == BC_T_HOT_WALL ||
+                   bc == BC_T_COLD_WALL ||
+                   bc == BC_LEGACY_VEL ||
+                   bc == BC_BFS_INLET ||
+                   bc == BC_PARAB_INLET ||
+                   bc == BC_VEL_TEMP ||
+                   bc == BC_INLET ||
+                   bc == BC_ADIABATIC ||
+                   bc == BC_HEATFLUX ||
+                   bc == BC_INTERFACE;
+        }
+
+        //-------------------------------------------------------------------------
+        // Converts (element, Cartesian direction, local node) into the one-based
+        // storage position used by dNkdx.
+        //
+        // For each element, the array stores:
+        //
+        //     dN_1/dx ... dN_4/dx
+        //     dN_1/dy ... dN_4/dy
+        //     dN_1/dz ... dN_4/dz
+        //-------------------------------------------------------------------------
+        Int dNkdx_index(
+            const CBSStateSI& s,
+            Int ie,
+            Int dim,
+            Int local_node)
+        {
+            return (ie - 1) * s.cfg.ndim * s.cfg.nep
+                + (dim - 1) * s.cfg.nep
+                + local_node;
+        }
+
+        // Converts (element, local node) into the one-based position used by
+        // element-node arrays such as elcoe_e.
+        Int element_node_index(
+            const CBSStateSI& s,
+            Int ie,
+            Int local_node)
+        {
+            return (ie - 1) * s.cfg.nep + local_node;
+        }
+
+        // Returns the three global node numbers of a triangular face in
+        // ascending order so that face matching is independent of orientation.
+        std::array<Int, 3> sorted_face_nodes(
+            Int a,
+            Int b,
+            Int c)
+        {
+            std::array<Int, 3> nodes = { a, b, c };
+            std::sort(nodes.begin(), nodes.end());
+            return nodes;
+        }
+
+        // Returns true when two sorted triangular faces contain the same nodes.
+        bool same_face_nodes(
+            const std::array<Int, 3>& a,
+            const std::array<Int, 3>& b)
+        {
+            return a[0] == b[0] && a[1] == b[1] && a[2] == b[2];
+        }
+
+        //-------------------------------------------------------------------------
+        // Calculates the determinant of a 3 x 3 matrix:
+        //
+        //     |a11 a12 a13|
+        //     |a21 a22 a23|
+        //     |a31 a32 a33|
+        //
+        // The determinant is used to calculate det(J) for a tetrahedral element.
+        //-------------------------------------------------------------------------
+        Real determinant3(
+            Real a11, Real a12, Real a13,
+            Real a21, Real a22, Real a23,
+            Real a31, Real a32, Real a33)
+        {
+            return a11 * (a22 * a33 - a23 * a32)
+                - a12 * (a21 * a33 - a23 * a31)
+                + a13 * (a21 * a32 - a22 * a31);
+        }
+
+        //-------------------------------------------------------------------------
+        // Verifies the fixed topology used by the present discretisation:
+        //
+        //     spatial dimensions             ndim   = 3
+        //     nodes per tetrahedron           nep    = 4
+        //     faces per tetrahedron           nsid   = 4
+        //     nodes per triangular face       nsidp  = 3
+        //     face-normal entries             ndim1  = 4
+        //     node pairs per tetrahedron      gsdim  = 6
+        //     boundary-face record entries    bsid   = 6
+        //-------------------------------------------------------------------------
+        void validate_core_dimensions(const CBSStateSI& s)
+        {
+            if (s.cfg.ndim != 3 ||
+                s.cfg.nep != 4 ||
+                s.cfg.nsid != 4 ||
+                s.cfg.nsidp != 3 ||
+                s.cfg.ndim1 != 4 ||
+                s.cfg.gsdim != 6 ||
+                s.cfg.bsid != 6)
+            {
+                throw std::runtime_error(
+                    "Preprocess - CBS3D CHT preprocess requires ndim=3, nep=4, nsid=4, nsidp=3, ndim1=4, gsdim=6, bsid=6");
+            }
+        }
+
+        // Adds a node to a one-based list only if it has not already been added.
+        void add_unique_node(
+            Array1D<Int>& node_list,
+            Int& count,
+            std::vector<Int>& marker,
+            Int ip)
+        {
+            if (ip < 1 || ip >= static_cast<Int>(marker.size()))
+            {
+                throw std::runtime_error(
+                    "Preprocess - node index out of range while building unique node list");
+            }
+
+            if (marker[static_cast<Size>(ip)] != 0)
+            {
+                return;
+            }
+
+            ++count;
+            node_list(count) = ip;
+            marker[static_cast<Size>(ip)] = 1;
+        }
+
+        //-------------------------------------------------------------------------
+        // Determines whether each node is connected to fluid and/or solid
+        // elements.
+        //
+        // Material convention:
+        //
+        //     mat_elem(e) = 0   fluid element
+        //     mat_elem(e) > 0   solid/material element
+        //
+        // A conformal CHT interface node is touched by at least one fluid
+        // element and at least one solid element.
+        //-------------------------------------------------------------------------
+        void build_material_node_touch_masks(
+            const CBSStateSI& s,
+            std::vector<char>& touches_fluid,
+            std::vector<char>& touches_solid)
+        {
+            touches_fluid.assign(static_cast<Size>(s.cfg.npoin) + 1U, 0);
+            touches_solid.assign(static_cast<Size>(s.cfg.npoin) + 1U, 0);
+
+            for (Int ie = 1; ie <= s.cfg.nelem; ++ie)
+            {
+                const bool fluid_element = (s.mat_elem(ie) == 0);
+
+                for (Int in = 1; in <= s.cfg.nep; ++in)
+                {
+                    const Int ip = s.intma(in, ie);
+
+                    if (ip < 1 || ip > s.cfg.npoin)
+                    {
+                        throw std::runtime_error(
+                            "Preprocess - material node mask found element node out of range");
+                    }
+
+                    if (fluid_element)
+                    {
+                        touches_fluid[static_cast<Size>(ip)] = 1;
+                    }
+                    else
+                    {
+                        touches_solid[static_cast<Size>(ip)] = 1;
+                    }
+                }
+            }
+        }
+
+        // Returns true when the node belongs to at least one fluid element.
+        bool touches_fluid_domain(
+            const std::vector<char>& touches_fluid,
+            Int ip)
+        {
+            return touches_fluid[static_cast<Size>(ip)] != 0;
+        }
+
+        // Returns true when the node is shared by fluid and solid elements.
+        bool is_conformal_fluid_solid_interface_node(
+            const std::vector<char>& touches_fluid,
+            const std::vector<char>& touches_solid,
+            Int ip)
+        {
+            return touches_fluid[static_cast<Size>(ip)] != 0 &&
+                   touches_solid[static_cast<Size>(ip)] != 0;
+        }
+    }
+
+    //=========================================================================
+    // Validates the fixed tetrahedral dimensions and checks every boundary ID.
+    //
+    // Unknown identifiers are reported once and are left without a strong
+    // boundary constraint. They therefore receive the natural finite-element
+    // boundary treatment in the downstream assembly.
+    //
+    // Input:
+    //     s.iside(bsid, ib)   solver boundary identifier of boundary face ib
+    //
+    // Output:
+    //     No solver array is modified.
+    //=========================================================================
+    void Preprocess::validateBoundaryFlags(CBSStateSI& s)
+    {
+        validate_core_dimensions(s);
+
+        for (Int ib = 1; ib <= s.cfg.nboun; ++ib)
+        {
+            const Int bc = s.iside(s.cfg.bsid, ib);
+
+            if (!is_supported_cbs3d_bc(bc))
+            {
+                // Report each unknown identifier once. The downstream solver
+                // applies no strong boundary condition to an unknown identifier,
+                // so it receives the natural finite-element boundary treatment.
+                static std::set<Int> warned;
+                if (warned.insert(bc).second)
+                {
+                    std::cerr << "WARNING: Preprocess::validateBoundaryFlags - unrecognized BC_ID "
+                              << bc << " (first seen at boundary face " << ib
+                              << "). It will receive the default natural boundary treatment. "
+                                 "Recognized CBS3D BC_IDs: 500, 501, 502, 503, 504, 506, 507, 508, "
+                                 "510, 511, 520, 530, 532, 901, 902.\n";
+                }
+            }
+        }
+    }
+
+    //=========================================================================
+    // Calculates the shape-function gradients and Jacobian determinant for
+    // every four-node linear tetrahedral element.
+    //
+    // The physical coordinates are obtained from the reference tetrahedron by
+    //
+    //     x = x_1 + J [xi, eta, zeta]^T
+    //
+    // with
+    //
+    //         |x_2-x_1  x_3-x_1  x_4-x_1|
+    //     J = |y_2-y_1  y_3-y_1  y_4-y_1|
+    //         |z_2-z_1  z_3-z_1  z_4-z_1|
+    //
+    // The physical gradients of the P1 shape functions are constant within
+    // each tetrahedron:
+    //
+    //     grad(N_2) = row 1 of J^(-1)
+    //     grad(N_3) = row 2 of J^(-1)
+    //     grad(N_4) = row 3 of J^(-1)
+    //     grad(N_1) = -grad(N_2) - grad(N_3) - grad(N_4)
+    //
+    // The element volume is
+    //
+    //     V_e = det(J_e) / 6
+    //
+    // A positive det(J) is required, so the tetrahedral connectivity must use
+    // a consistent positive orientation.
+    //
+    // Output:
+    //     s.dNkdx   Cartesian shape-function gradients
+    //     s.detJ    Jacobian determinant, equal to 6 V_e
+    //=========================================================================
+    void Preprocess::shapeFunctionDerivatives(CBSStateSI& s)
+    {
+        validate_core_dimensions(s);
+
+        Real max_volume = 0.0;
+        Real min_volume = std::numeric_limits<Real>::max();
+
+        for (Int ie = 1; ie <= s.cfg.nelem; ++ie)
+        {
+            const Int i1 = s.intma(1, ie);
+            const Int i2 = s.intma(2, ie);
+            const Int i3 = s.intma(3, ie);
+            const Int i4 = s.intma(4, ie);
+
+            const Real x1 = s.coord(1, i1);
+            const Real y1 = s.coord(2, i1);
+            const Real z1 = s.coord(3, i1);
+
+            const Real x2 = s.coord(1, i2);
+            const Real y2 = s.coord(2, i2);
+            const Real z2 = s.coord(3, i2);
+
+            const Real x3 = s.coord(1, i3);
+            const Real y3 = s.coord(2, i3);
+            const Real z3 = s.coord(3, i3);
+
+            const Real x4 = s.coord(1, i4);
+            const Real y4 = s.coord(2, i4);
+            const Real z4 = s.coord(3, i4);
+
+            const Real j11 = x2 - x1;
+            const Real j21 = y2 - y1;
+            const Real j31 = z2 - z1;
+
+            const Real j12 = x3 - x1;
+            const Real j22 = y3 - y1;
+            const Real j32 = z3 - z1;
+
+            const Real j13 = x4 - x1;
+            const Real j23 = y4 - y1;
+            const Real j33 = z4 - z1;
+
+            const Real detJ = determinant3(
+                j11, j12, j13,
+                j21, j22, j23,
+                j31, j32, j33);
+
+            if (detJ <= 0.0 || !std::isfinite(detJ))
+            {
+                throw std::runtime_error(
+                    "Preprocess::shapeFunctionDerivatives - non-positive tetrahedron volume at element "
+                    + std::to_string(ie)
+                    + ". Tetrahedral connectivity must be consistently positively oriented.");
+            }
+
+            const Real inv_det = 1.0 / detJ;
+
+            const Real inv11 = (j22 * j33 - j23 * j32) * inv_det;
+            const Real inv12 = (j13 * j32 - j12 * j33) * inv_det;
+            const Real inv13 = (j12 * j23 - j13 * j22) * inv_det;
+
+            const Real inv21 = (j23 * j31 - j21 * j33) * inv_det;
+            const Real inv22 = (j11 * j33 - j13 * j31) * inv_det;
+            const Real inv23 = (j13 * j21 - j11 * j23) * inv_det;
+
+            const Real inv31 = (j21 * j32 - j22 * j31) * inv_det;
+            const Real inv32 = (j12 * j31 - j11 * j32) * inv_det;
+            const Real inv33 = (j11 * j22 - j12 * j21) * inv_det;
+
+            const Real gx2 = inv11;
+            const Real gy2 = inv12;
+            const Real gz2 = inv13;
+
+            const Real gx3 = inv21;
+            const Real gy3 = inv22;
+            const Real gz3 = inv23;
+
+            const Real gx4 = inv31;
+            const Real gy4 = inv32;
+            const Real gz4 = inv33;
+
+            const Real gx1 = -(gx2 + gx3 + gx4);
+            const Real gy1 = -(gy2 + gy3 + gy4);
+            const Real gz1 = -(gz2 + gz3 + gz4);
+
+            s.dNkdx(dNkdx_index(s, ie, 1, 1)) = gx1;
+            s.dNkdx(dNkdx_index(s, ie, 2, 1)) = gy1;
+            s.dNkdx(dNkdx_index(s, ie, 3, 1)) = gz1;
+
+            s.dNkdx(dNkdx_index(s, ie, 1, 2)) = gx2;
+            s.dNkdx(dNkdx_index(s, ie, 2, 2)) = gy2;
+            s.dNkdx(dNkdx_index(s, ie, 3, 2)) = gz2;
+
+            s.dNkdx(dNkdx_index(s, ie, 1, 3)) = gx3;
+            s.dNkdx(dNkdx_index(s, ie, 2, 3)) = gy3;
+            s.dNkdx(dNkdx_index(s, ie, 3, 3)) = gz3;
+
+            s.dNkdx(dNkdx_index(s, ie, 1, 4)) = gx4;
+            s.dNkdx(dNkdx_index(s, ie, 2, 4)) = gy4;
+            s.dNkdx(dNkdx_index(s, ie, 3, 4)) = gz4;
+
+            s.detJ(ie) = detJ;
+
+            const Real volume = detJ / 6.0;
+            max_volume = std::max(max_volume, volume);
+            min_volume = std::min(min_volume, volume);
+        }
+
+        std::cout << "Maximum Volume      " << max_volume << "\n";
+        std::cout << "Minimum Volume      " << min_volume << "\n";
+
+        if (min_volume > 0.0)
+        {
+            std::cout << "Ratio of Max to Min " << (max_volume / min_volume) << "\n";
+        }
+    }
+
+    //=========================================================================
+    // Matches each triangular boundary face to one local face of its parent
+    // tetrahedral element.
+    //
+    // The three boundary node numbers are sorted and compared with the four
+    // local tetrahedral faces defined by ippn1. Sorting removes any dependence
+    // on the node order used in the input boundary-face record.
+    //
+    // Input:
+    //     s.iside(1:3, ib)     boundary-face node numbers
+    //     s.iside(nsidpe, ib)  parent tetrahedral element
+    //     s.intma              tetrahedral connectivity
+    //
+    // Output:
+    //     s.iside(nsidpl, ib)  matched local face number, 1 to 4
+    //=========================================================================
+    void Preprocess::assignBoundaryFaceNumbers(CBSStateSI& s)
+    {
+        validate_core_dimensions(s);
+        validateBoundaryFlags(s);
+
+        for (Int ib = 1; ib <= s.cfg.nboun; ++ib)
+        {
+            const Int parent = s.iside(s.cfg.nsidpe, ib);
+
+            if (parent < 1 || parent > s.cfg.nelem)
+            {
+                throw std::runtime_error(
+                    "Preprocess::assignBoundaryFaceNumbers - invalid parent tetrahedron at boundary face "
+                    + std::to_string(ib));
+            }
+
+            const std::array<Int, 3> boundary_face =
+                sorted_face_nodes(
+                    s.iside(1, ib),
+                    s.iside(2, ib),
+                    s.iside(3, ib));
+
+            Int matched_face = 0;
+
+            for (Int is = 1; is <= s.cfg.nsid; ++is)
+            {
+                const Int p1 = s.intma(s.ippn1(is, 1), parent);
+                const Int p2 = s.intma(s.ippn1(is, 2), parent);
+                const Int p3 = s.intma(s.ippn1(is, 3), parent);
+
+                const std::array<Int, 3> element_face =
+                    sorted_face_nodes(p1, p2, p3);
+
+                if (same_face_nodes(boundary_face, element_face))
+                {
+                    matched_face = is;
+                    break;
+                }
+            }
+
+            if (matched_face == 0)
+            {
+                throw std::runtime_error(
+                    "Preprocess::assignBoundaryFaceNumbers - boundary face "
+                    + std::to_string(ib)
+                    + " does not match any face of parent tetrahedron "
+                    + std::to_string(parent));
+            }
+
+            s.iside(s.cfg.nsidpl, ib) = matched_face;
+        }
+    }
+
+    //=========================================================================
+    // Calculates outward area-weighted normals and areas for tetrahedral faces.
+    //
+    // For face nodes x_1, x_2 and x_3:
+    //
+    //     a = x_2 - x_1
+    //     b = x_3 - x_1
+    //     c = a x b
+    //
+    // The triangle area is
+    //
+    //     A_f = |c| / 2
+    //
+    // and the area-weighted normal is
+    //
+    //     n_A = c / 2 = A_f n
+    //
+    // where n is the unit normal. The sign is reversed when c points towards
+    // the tetrahedral node opposite the face, ensuring an outward direction.
+    //
+    // Output:
+    //     s.annxf(1:3, face, element)  area-weighted outward normal
+    //     s.annxf(4,   face, element)  face area
+    //     s.face_norm(:, boundary)     corresponding boundary-face values
+    //=========================================================================
+    void Preprocess::getNormals(CBSStateSI& s)
+    {
+        validate_core_dimensions(s);
+
+        for (Int ie = 1; ie <= s.cfg.nelem; ++ie)
+        {
+            for (Int is = 1; is <= s.cfg.nsid; ++is)
+            {
+                const Int p1 = s.intma(s.ippn1(is, 1), ie);
+                const Int p2 = s.intma(s.ippn1(is, 2), ie);
+                const Int p3 = s.intma(s.ippn1(is, 3), ie);
+                const Int popp = s.intma(is, ie);
+
+                const Real e1x = s.coord(1, p2) - s.coord(1, p1);
+                const Real e1y = s.coord(2, p2) - s.coord(2, p1);
+                const Real e1z = s.coord(3, p2) - s.coord(3, p1);
+
+                const Real e2x = s.coord(1, p3) - s.coord(1, p1);
+                const Real e2y = s.coord(2, p3) - s.coord(2, p1);
+                const Real e2z = s.coord(3, p3) - s.coord(3, p1);
+
+                Real ax = e1y * e2z - e1z * e2y;
+                Real ay = e1z * e2x - e1x * e2z;
+                Real az = e1x * e2y - e1y * e2x;
+
+                const Real amag = std::sqrt(ax * ax + ay * ay + az * az);
+
+                if (amag <= 0.0 || !std::isfinite(amag))
+                {
+                    throw std::runtime_error(
+                        "Preprocess::getNormals - zero-area face at element "
+                        + std::to_string(ie)
+                        + ", face "
+                        + std::to_string(is));
+                }
+
+                const Real fx =
+                    (s.coord(1, p1) + s.coord(1, p2) + s.coord(1, p3)) / 3.0;
+                const Real fy =
+                    (s.coord(2, p1) + s.coord(2, p2) + s.coord(2, p3)) / 3.0;
+                const Real fz =
+                    (s.coord(3, p1) + s.coord(3, p2) + s.coord(3, p3)) / 3.0;
+
+                const Real vx = s.coord(1, popp) - fx;
+                const Real vy = s.coord(2, popp) - fy;
+                const Real vz = s.coord(3, popp) - fz;
+
+                if (ax * vx + ay * vy + az * vz > 0.0)
+                {
+                    ax = -ax;
+                    ay = -ay;
+                    az = -az;
+                }
+
+                s.annxf(1, is, ie) = 0.5 * ax;
+                s.annxf(2, is, ie) = 0.5 * ay;
+                s.annxf(3, is, ie) = 0.5 * az;
+                s.annxf(4, is, ie) = 0.5 * amag;
+            }
+        }
+
+        for (Int ib = 1; ib <= s.cfg.nboun; ++ib)
+        {
+            const Int parent = s.iside(s.cfg.nsidpe, ib);
+            const Int local_face = s.iside(s.cfg.nsidpl, ib);
+
+            if (parent < 1 || parent > s.cfg.nelem ||
+                local_face < 1 || local_face > s.cfg.nsid)
+            {
+                throw std::runtime_error(
+                    "Preprocess::getNormals - boundary local face numbers must be assigned before boundary normal extraction");
+            }
+
+            for (Int idim = 1; idim <= s.cfg.ndim1; ++idim)
+            {
+                s.face_norm(idim, ib) = s.annxf(idim, local_face, parent);
+            }
+        }
+    }
+
+    //=========================================================================
+    // Assembles nodal lumped mass, thermal capacitance and the correction
+    // between lumped and consistent P1 tetrahedral mass matrices.
+    //
+    // The consistent scalar element mass matrix is
+    //
+    //     M_ij^(e) = integral(V_e) N_i N_j dV
+    //
+    // For a four-node linear tetrahedron:
+    //
+    //     M_ii^(e) = V_e / 10 = det(J_e) / 60
+    //     M_ij^(e) = V_e / 20 = det(J_e) / 120,  i != j
+    //
+    // The code stores the lumped nodal contribution as
+    //
+    //     m_i^(e) = det(J_e) * mass_factor
+    //
+    // With the standard value mass_factor = 1/24, this gives V_e/4.
+    //
+    // Thermal capacitance is
+    //
+    //     c_i^(e) = (rho cp)_e m_i^(e)
+    //
+    // The arrays M_diag and Mconsist store the matrix correction
+    //
+    //     M_L - M_C
+    //
+    // used by the characteristic formulation:
+    //
+    //     diagonal     m_i^(e) - V_e/10
+    //     off-diagonal            -V_e/20
+    //
+    // Output:
+    //     s.Mdiag_real  assembled lumped nodal mass
+    //     s.elcoe_e     element-node lumped mass contribution
+    //     s.elcoe2      inverse lumped nodal mass
+    //     s.elcoe2p     inverse lumped nodal thermal capacitance
+    //     s.M_diag      diagonal of M_L - M_C
+    //     s.Mconsist    off-diagonals of M_L - M_C
+    //=========================================================================
+    void Preprocess::massMatrix(CBSStateSI& s)
+    {
+        validate_core_dimensions(s);
+
+        s.Mdiag_real.fill(0.0);
+        s.elcoe_e.fill(0.0);
+        s.elcoe2.fill(0.0);
+        s.elcoe2p.fill(0.0);
+        s.M_diag.fill(0.0);
+        s.Mconsist.fill(0.0);
+
+        Array1D<Real> thermal_lumped;
+        thermal_lumped.resize(s.cfg.npoin);
+        thermal_lumped.fill(0.0);
+
+        for (Int ie = 1; ie <= s.cfg.nelem; ++ie)
+        {
+            if (s.detJ(ie) <= 0.0 || !std::isfinite(s.detJ(ie)))
+            {
+                throw std::runtime_error(
+                    "Preprocess::massMatrix - invalid detJ at element "
+                    + std::to_string(ie));
+            }
+
+            if (s.rho_cp_e(ie) <= 0.0 || !std::isfinite(s.rho_cp_e(ie)))
+            {
+                throw std::runtime_error(
+                    "Preprocess::massMatrix - invalid rho*cp at element "
+                    + std::to_string(ie));
+            }
+
+            const Real nodal_mass = s.detJ(ie) * s.cfg.mass_factor;
+            const Real nodal_capacity = s.rho_cp_e(ie) * nodal_mass;
+
+            for (Int in = 1; in <= s.cfg.nep; ++in)
+            {
+                const Int ip = s.intma(in, ie);
+
+                s.Mdiag_real(ip) += nodal_mass;
+                thermal_lumped(ip) += nodal_capacity;
+                s.elcoe_e(element_node_index(s, ie, in)) = nodal_mass;
+            }
+        }
+
+        for (Int ip = 1; ip <= s.cfg.npoin; ++ip)
+        {
+            if (s.Mdiag_real(ip) <= 0.0 || !std::isfinite(s.Mdiag_real(ip)))
+            {
+                throw std::runtime_error(
+                    "Preprocess::massMatrix - non-positive lumped mass at node "
+                    + std::to_string(ip));
+            }
+
+            if (thermal_lumped(ip) <= 0.0 || !std::isfinite(thermal_lumped(ip)))
+            {
+                throw std::runtime_error(
+                    "Preprocess::massMatrix - non-positive thermal capacitance at node "
+                    + std::to_string(ip));
+            }
+
+            s.elcoe2(ip) = 1.0 / s.Mdiag_real(ip);
+            s.elcoe2p(ip) = 1.0 / thermal_lumped(ip);
+        }
+
+        Int isky = 0;
+
+        for (Int ie = 1; ie <= s.cfg.nelem; ++ie)
+        {
+            const Real consistent_diag = s.detJ(ie) / 60.0;
+            const Real correction_off = -s.detJ(ie) / 120.0;
+
+            for (Int in = 1; in <= s.cfg.nep; ++in)
+            {
+                const Int ip = s.intma(in, ie);
+                s.M_diag(ip) += consistent_diag;
+            }
+
+            for (Int ig = 1; ig <= s.cfg.gsdim; ++ig)
+            {
+                ++isky;
+                s.Mconsist(isky) = correction_off;
+            }
+        }
+
+        for (Int ip = 1; ip <= s.cfg.npoin; ++ip)
+        {
+            s.M_diag(ip) = s.Mdiag_real(ip) - s.M_diag(ip);
+        }
+    }
+
+    //=========================================================================
+    // Classifies every tetrahedral face for the CBS boundary correction terms.
+    //
+    //     fedge = 0   interior face
+    //     fedge = 1   exterior face with strongly prescribed velocity
+    //     fedge = 2   other exterior face
+    //
+    // Only faces listed in the boundary-face array are changed from zero.
+    //=========================================================================
+    void Preprocess::classifyFaceEdges(CBSStateSI& s)
+    {
+        validate_core_dimensions(s);
+        validateBoundaryFlags(s);
+
+        s.fedge.fill(0);
+
+        for (Int ib = 1; ib <= s.cfg.nboun; ++ib)
+        {
+            const Int parent = s.iside(s.cfg.nsidpe, ib);
+            const Int local_face = s.iside(s.cfg.nsidpl, ib);
+            const Int bc = s.iside(s.cfg.bsid, ib);
+
+            if (parent < 1 || parent > s.cfg.nelem ||
+                local_face < 1 || local_face > s.cfg.nsid)
+            {
+                throw std::runtime_error(
+                    "Preprocess::classifyFaceEdges - boundary face number not assigned");
+            }
+
+            s.fedge(local_face, parent) =
+                is_prescribed_velocity_face_bc(bc) ? 1 : 2;
+        }
+    }
+
+    //=========================================================================
+    // Calculates the characteristic length of every tetrahedral element.
+    //
+    // For each face f, the altitude from the opposite vertex is
+    //
+    //     h_f = 3 V_e / A_f
+    //
+    // Since det(J_e) = 6 V_e, the code evaluates
+    //
+    //     h_f = [det(J_e) / 2] / A_f
+    //
+    // The element length is the minimum of the four altitudes:
+    //
+    //     h_e = min_f(h_f)
+    //
+    // Output:
+    //     s.alen_e(e)  minimum tetrahedral altitude
+    //=========================================================================
+    void Preprocess::elementSize(CBSStateSI& s)
+    {
+        validate_core_dimensions(s);
+
+        for (Int ie = 1; ie <= s.cfg.nelem; ++ie)
+        {
+            if (s.detJ(ie) <= 0.0 || !std::isfinite(s.detJ(ie)))
+            {
+                throw std::runtime_error(
+                    "Preprocess::elementSize - invalid element volume at element "
+                    + std::to_string(ie));
+            }
+
+            const Real three_volume = 0.5 * s.detJ(ie);
+            Real hmin = std::numeric_limits<Real>::max();
+
+            for (Int is = 1; is <= s.cfg.nsid; ++is)
+            {
+                const Real face_area = s.annxf(4, is, ie);
+
+                if (face_area <= 0.0 || !std::isfinite(face_area))
+                {
+                    throw std::runtime_error(
+                        "Preprocess::elementSize - invalid face area at element "
+                        + std::to_string(ie)
+                        + ", face "
+                        + std::to_string(is));
+                }
+
+                const Real h = three_volume / face_area;
+                hmin = std::min(hmin, h);
+            }
+
+            if (hmin <= 0.0 || !std::isfinite(hmin))
+            {
+                throw std::runtime_error(
+                    "Preprocess::elementSize - invalid characteristic length at element "
+                    + std::to_string(ie));
+            }
+
+            s.alen_e(ie) = hmin;
+        }
+    }
+
+    //=========================================================================
+    // Builds the nodal no-slip list from physical wall faces and the conformal
+    // fluid-solid material interface.
+    //
+    // Boundary-wall nodes are collected from no-slip boundary faces. Their
+    // area-weighted face normals are summed and then normalised:
+    //
+    //     n_i = [sum_f A_f n_f] / |sum_f A_f n_f|
+    //
+    // A conformal CHT interface is an internal mesh surface and therefore may
+    // not appear in the external boundary-face list. Interface nodes are also
+    // detected from material adjacency:
+    //
+    //     interface node = touches fluid AND touches solid
+    //
+    // These nodes are added to wall_node_list so that the fluid velocity is
+    // constrained to zero at the solid surface. Internal interface nodes do
+    // not have one unique external wall normal, so only their no-slip status is
+    // required here.
+    //
+    // Output:
+    //     s.wall_node_list
+    //     s.wall_node_norm
+    //     s.cfg.npoin_wall
+    //=========================================================================
+    void Preprocess::wallDetermination(CBSStateSI& s)
+    {
+        validate_core_dimensions(s);
+        validateBoundaryFlags(s);
+
+        std::vector<Int> node_is_wall(static_cast<Size>(s.cfg.npoin) + 1U, 0);
+
+        s.cfg.npoin_wall = 0;
+        s.wall_node_list.fill(0);
+        s.wall_node_norm.fill(0.0);
+
+        for (Int ib = 1; ib <= s.cfg.nboun; ++ib)
+        {
+            const Int bc = s.iside(s.cfg.bsid, ib);
+
+            if (!is_no_slip_wall_bc(bc))
+            {
+                continue;
+            }
+
+            const Real area = s.face_norm(4, ib);
+
+            if (area <= 0.0 || !std::isfinite(area))
+            {
+                throw std::runtime_error(
+                    "Preprocess::wallDetermination - invalid boundary face area");
+            }
+
+            for (Int in = 1; in <= s.cfg.nsidp; ++in)
+            {
+                const Int ip = s.iside(in, ib);
+
+                if (ip < 1 || ip > s.cfg.npoin)
+                {
+                    throw std::runtime_error(
+                        "Preprocess::wallDetermination - wall node out of range");
+                }
+
+                if (node_is_wall[static_cast<Size>(ip)] == 0)
+                {
+                    ++s.cfg.npoin_wall;
+                    s.wall_node_list(s.cfg.npoin_wall) = ip;
+                    node_is_wall[static_cast<Size>(ip)] = s.cfg.npoin_wall;
+                }
+
+                const Int iw = node_is_wall[static_cast<Size>(ip)];
+
+                s.wall_node_norm(1, iw) += s.face_norm(1, ib);
+                s.wall_node_norm(2, iw) += s.face_norm(2, ib);
+                s.wall_node_norm(3, iw) += s.face_norm(3, ib);
+            }
+        }
+
+        // Conformal CHT interfaces are internal mesh faces, not .plt boundary
+        // faces.  Therefore they do not appear as BC 901 in the boundary-face
+        // list.  They are detected by material adjacency instead: a node
+        // touched by both fluid and solid elements is a no-slip interface node.
+        std::vector<char> touches_fluid;
+        std::vector<char> touches_solid;
+        build_material_node_touch_masks(s, touches_fluid, touches_solid);
+
+        Int conformal_interface_nodes_added = 0;
+
+        for (Int ip = 1; ip <= s.cfg.npoin; ++ip)
+        {
+            if (!is_conformal_fluid_solid_interface_node(touches_fluid, touches_solid, ip))
+            {
+                continue;
+            }
+
+            if (node_is_wall[static_cast<Size>(ip)] == 0)
+            {
+                ++s.cfg.npoin_wall;
+                s.wall_node_list(s.cfg.npoin_wall) = ip;
+                node_is_wall[static_cast<Size>(ip)] = s.cfg.npoin_wall;
+                ++conformal_interface_nodes_added;
+            }
+        }
+
+        for (Int iw = 1; iw <= s.cfg.npoin_wall; ++iw)
+        {
+            const Real nx = s.wall_node_norm(1, iw);
+            const Real ny = s.wall_node_norm(2, iw);
+            const Real nz = s.wall_node_norm(3, iw);
+
+            const Real len = std::sqrt(nx * nx + ny * ny + nz * nz);
+
+            if (len > 0.0)
+            {
+                s.wall_node_norm(1, iw) /= len;
+                s.wall_node_norm(2, iw) /= len;
+                s.wall_node_norm(3, iw) /= len;
+            }
+        }
+
+        std::cout << "Wall/interface no-slip nodes detected: "
+                  << s.cfg.npoin_wall << "\n";
+        std::cout << "Conformal material-interface nodes added to no-slip list: "
+                  << conformal_interface_nodes_added << "\n";
+    }
+
+    //=========================================================================
+    // Converts a prescribed inlet mass-flow rate into velocity magnitude.
+    //
+    // The total inlet area is the sum of all BC 511 face areas:
+    //
+    //     A_in = sum_f A_f
+    //
+    // Conservation of mass gives
+    //
+    //     m_dot = rho_in A_in U_in
+    //
+    // and therefore
+    //
+    //     U_in = m_dot / (rho_in A_in)
+    //
+    // This routine calculates only the magnitude. The inlet direction and
+    // nodal velocity components are imposed later by Boundary::applyVelocity().
+    //
+    // Output:
+    //     s.cfg.inlet_u_from_massflow
+    //=========================================================================
+    void Preprocess::computeMassFlowInletVelocity(CBSStateSI& s)
+    {
+        validateBoundaryFlags(s);
+
+        if (s.cfg.mass_flow_inlet_enabled < 1)
+        {
+            return;
+        }
+
+        if (s.cfg.inlet_density <= 0.0 || !std::isfinite(s.cfg.inlet_density))
+        {
+            throw std::runtime_error(
+                "Preprocess::computeMassFlowInletVelocity - inlet density must be positive");
+        }
+
+        Real inlet_area = 0.0;
+        Int inlet_faces = 0;
+
+        for (Int ib = 1; ib <= s.cfg.nboun; ++ib)
+        {
+            const Int bc = s.iside(s.cfg.bsid, ib);
+
+            if (!is_mass_flow_inlet_bc(bc))
+            {
+                continue;
+            }
+
+            const Real area = s.face_norm(4, ib);
+
+            if (area <= 0.0 || !std::isfinite(area))
+            {
+                throw std::runtime_error(
+                    "Preprocess::computeMassFlowInletVelocity - invalid inlet face area");
+            }
+
+            inlet_area += area;
+            ++inlet_faces;
+        }
+
+        if (inlet_faces < 1)
+        {
+            throw std::runtime_error(
+                "Preprocess::computeMassFlowInletVelocity - mass-flow inlet enabled but no BC_ID 511 faces were found");
+        }
+
+        if (inlet_area <= 0.0 || !std::isfinite(inlet_area))
+        {
+            throw std::runtime_error(
+                "Preprocess::computeMassFlowInletVelocity - total inlet area is invalid");
+        }
+
+        s.cfg.inlet_u_from_massflow =
+            s.cfg.inlet_mass_flow_rate / (s.cfg.inlet_density * inlet_area);
+
+        std::cout << "Mass-flow inlet faces: " << inlet_faces << "\n";
+        std::cout << "Mass-flow inlet area : " << inlet_area << "\n";
+        std::cout << "Mass-flow velocity magnitude: "
+                  << s.cfg.inlet_u_from_massflow << "\n";
+    }    //=========================================================================
+    // Initialises the scalar nodal velocity magnitude:
+    //
+    //     |u_i| = sqrt(u_i^2 + v_i^2 + w_i^2 + epsilon)
+    //
+    // where epsilon = 10^(-16) prevents an exactly zero square-root argument.
+    // The same value is copied to velocity_old for the first residual update.
+    //=========================================================================
+    void Preprocess::initialiseVelocityMagnitude(CBSStateSI& s)
+    {
+        for (Int ip = 1; ip <= s.cfg.npoin; ++ip)
+        {
+            s.velocity(ip) = std::sqrt(
+                s.unkno(1, ip) * s.unkno(1, ip) +
+                s.unkno(2, ip) * s.unkno(2, ip) +
+                s.unkno(3, ip) * s.unkno(3, ip) +
+                1.0e-16);
+
+            s.velocity_old(ip) = s.velocity(ip);
+        }
+    }
+
+    //=========================================================================
+    // Builds the list of nodes with prescribed pressure.
+    //
+    // All nodes on BC 520 pressure-outlet faces are added once, provided they
+    // are connected to the fluid domain. Their prescribed value is
+    //
+    //     p_i = outlet_pressure_gauge
+    //
+    // If the mesh contains no pressure-outlet face, one fluid-connected node
+    // is selected to remove the constant-pressure null space. The requested
+    // pnode is used when valid; otherwise the first fluid-connected node is
+    // selected.
+    //
+    // Output:
+    //     s.bc_list
+    //     s.bc_values
+    //     s.cfg.bc_fixed
+    //=========================================================================
+    void Preprocess::detectPressureBoundaryNodes(CBSStateSI& s)
+    {
+        validateBoundaryFlags(s);
+
+        std::vector<char> touches_fluid;
+        std::vector<char> touches_solid;
+        build_material_node_touch_masks(s, touches_fluid, touches_solid);
+
+        std::vector<Int> node_is_fixed(static_cast<Size>(s.cfg.npoin) + 1U, 0);
+
+        s.cfg.bc_fixed = 0;
+        s.bc_list.fill(0);
+        s.bc_values.fill(0.0);
+
+        for (Int ib = 1; ib <= s.cfg.nboun; ++ib)
+        {
+            const Int bc = s.iside(s.cfg.bsid, ib);
+
+            if (!is_pressure_outlet_bc(bc))
+            {
+                continue;
+            }
+
+            for (Int in = 1; in <= s.cfg.nsidp; ++in)
+            {
+                const Int ip = s.iside(in, ib);
+
+                if (ip < 1 || ip > s.cfg.npoin)
+                {
+                    throw std::runtime_error(
+                        "Preprocess::detectPressureBoundaryNodes - pressure node out of range");
+                }
+
+                if (!touches_fluid_domain(touches_fluid, ip))
+                {
+                    throw std::runtime_error(
+                        "Preprocess::detectPressureBoundaryNodes - pressure outlet node "
+                        + std::to_string(ip)
+                        + " is not connected to any fluid element");
+                }
+
+                const Int old_count = s.cfg.bc_fixed;
+
+                add_unique_node(
+                    s.bc_list,
+                    s.cfg.bc_fixed,
+                    node_is_fixed,
+                    ip);
+
+                if (s.cfg.bc_fixed > old_count)
+                {
+                    s.bc_values(s.cfg.bc_fixed) = s.cfg.outlet_pressure_gauge;
+                }
+            }
+        }
+
+        if (s.cfg.bc_fixed < 1)
+        {
+            Int ip = s.cfg.pnode;
+
+            if (ip < 1 || ip > s.cfg.npoin || !touches_fluid_domain(touches_fluid, ip))
+            {
+                ip = 0;
+
+                for (Int candidate = 1; candidate <= s.cfg.npoin; ++candidate)
+                {
+                    if (touches_fluid_domain(touches_fluid, candidate))
+                    {
+                        ip = candidate;
+                        break;
+                    }
+                }
+            }
+
+            if (ip < 1 || ip > s.cfg.npoin)
+            {
+                throw std::runtime_error(
+                    "Preprocess::detectPressureBoundaryNodes - no fluid-connected node available for pressure reference");
+            }
+
+            s.cfg.bc_fixed = 1;
+            s.bc_list(1) = ip;
+            s.bc_values(1) = s.cfg.outlet_pressure_gauge;
+
+            std::cout << "Pressure reference fallback node selected: "
+                      << ip << "\n";
+        }
+
+        std::cout << "Number of pressure outlet/fixed nodes: "
+                  << s.cfg.bc_fixed << "\n";
+    }
+
+
+}

@@ -1,0 +1,19 @@
+We are moving towards testing of the CBS3D++_SI for LidDrivenCavity problem to attach this into the results of Beamer TeX code and further develop this document for our Weekly report. I'll be attaching a .tex document called "EngD_Notes", where you can fundamentally go through what kind of formatting style of documentation we follow, quite necessary to follow, like we use \scriptsize everywhere, becuase our content is always loaded and must compressed in defaulty font size. 
+
+
+// ===============================================
+// FIX 1
+// ===============================================
+Now fundamentally, we are facing issues in setting the .par file for Re = 100. There are tweaks that we have to make interms of setting the CG tolernace for relative and absolute error and stuff. If you observe the first 10 iteration runs and analyse the time taken to complete the calculation for almost 0.2 million tets, its almost a minute. Before these MPI/PETSc update, it was doing better than this I guess. But lets fix our code if we have done anything. 
+
+// ===============================================
+// FIX 2
+// ==============================================
+Its not producing any VTU outputs, so please look into that. Also lets make sure that we plot the residuals like an official numerical methods style of LaTeX font in Python. I think we have a code in our tools library!  I'll attach the .py code but we must attach these results now for our document.
+
+// ===============================================
+// FIX 3
+// ==============================================  
+Showcasing via Convergence plots that PETSc's AMG Pre-conditioning is faster than Jacobi pre-conditioning for CG through reduced iteration count for CG to attain convergence faster. We must show all data, this will be into creating paper. 
+
+

@@ -1,0 +1,11 @@
+Document ID,File,Revision,Issue Date,Status,Owner,Purpose
+CBS3D-SUNBIRD-RUN-001,CBS3D_Sunbird_Runbook.tex,0.1,2026-07-03,Controlled Draft,Prajwal Bharadwaj,"Primary controlled Sunbird installation, build and execution runbook"
+CBS3D-SUNBIRD-RUN-001-PDF,CBS3D_Sunbird_Runbook.pdf,0.1,2026-07-03,Controlled Draft,Prajwal Bharadwaj,Rendered copy of the controlled runbook
+CBS3D-SUNBIRD-ENV-001,sunbird_modules.sh,Site-specific,To be recorded,Working Controlled File,Prajwal Bharadwaj,"Exact compiler, MPI and PETSc module loads used for reproducible builds"
+CBS3D-SUNBIRD-CHK-001,sunbird_preflight.sh,0.1,2026-07-03,Issued,Prajwal Bharadwaj,"Identity, storage, Slurm, compiler, MPI and PETSc preflight checks"
+CBS3D-SUNBIRD-INS-001,install_phase1.sh,0.1,2026-07-03,Issued,Prajwal Bharadwaj,Back up current source and install Phase 1 files
+CBS3D-SUNBIRD-BLD-001,build_phase1.sh,0.1,2026-07-03,Issued,Prajwal Bharadwaj,Build the Phase 1 DMPlex executable
+CBS3D-SUNBIRD-JOB-001,phase1_test.slurm,0.1,2026-07-03,Issued,Prajwal Bharadwaj,"One-, two- and four-rank Phase 1 acceptance job"
+CBS3D-SUNBIRD-JOB-002,serial_openmp.slurm,0.1,2026-07-03,Issued,Prajwal Bharadwaj,Current serial/OpenMP or serial PETSc solver job
+CBS3D-SUNBIRD-PETSC-001,build_petsc_fallback.sh,0.1,2026-07-03,Conditional,Prajwal Bharadwaj,Fallback PETSc source build when no compatible module exists
+CBS3D-PHASE1-PKG-001,CBS3D_Phase1_PETSc_DMPlex.zip,0.1,2026-07-03,Issued,Prajwal Bharadwaj,Phase 1 PETSc DMPlex source and build package
