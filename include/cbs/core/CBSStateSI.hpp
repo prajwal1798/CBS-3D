@@ -174,6 +174,44 @@ namespace cbs
         Array1D<Real> alpha_e;
         Array1D<Real> Qvol_e;
 
+
+        // --------------------------------------------------------------------
+        // Spalart-Allmaras turbulence state
+        // --------------------------------------------------------------------
+        // nu_tilde is the transported SA working variable.  nu_t and mu_t are
+        // derived quantities and must never be prescribed independently.
+        Array1D<Real> nu_tilde;
+        Array1D<Real> nu_tilde1;
+        Array1D<Real> nu_t;
+        Array1D<Real> mu_t;
+
+        // True minimum distance from a fluid node to the nearest physical
+        // no-slip wall triangle.  This is geometric data, not a mesh-line
+        // index or nearest-wall-node approximation.
+        Array1D<Real> wall_distance;
+
+        // SA nodal assembly and diagnostics.
+        Array1D<Real> sa_rhs;
+        Array1D<Real> sa_source;
+        Array1D<Real> sa_production;
+        Array1D<Real> sa_destruction;
+        Array1D<Real> sa_diffusion;
+        Array1D<Real> sa_residual;
+
+        // Nodal turbulence classification flags.
+        Array1D<Int> sa_active_node;
+        Array1D<Int> sa_wall_node;
+        Array1D<Int> sa_inlet_node;
+
+        // Element-averaged turbulence quantities and effective properties used
+        // by momentum and energy assemblies.  Molecular values remain stored in
+        // mu_e and k_e and are not overwritten.
+        Array1D<Real> nu_tilde_e;
+        Array1D<Real> nu_t_e;
+        Array1D<Real> mu_t_e;
+        Array1D<Real> mu_eff_e;
+        Array1D<Real> k_eff_e;
+
         // --------------------------------------------------------------------
         // Right-hand sides and correction arrays
         // --------------------------------------------------------------------
@@ -525,6 +563,32 @@ namespace cbs
             alpha_e.resize(cfg.nelem);
             Qvol_e.resize(cfg.nelem);
 
+
+            // Spalart-Allmaras nodal fields.
+            nu_tilde.resize(cfg.npoin);
+            nu_tilde1.resize(cfg.npoin);
+            nu_t.resize(cfg.npoin);
+            mu_t.resize(cfg.npoin);
+            wall_distance.resize(cfg.npoin);
+
+            sa_rhs.resize(cfg.npoin);
+            sa_source.resize(cfg.npoin);
+            sa_production.resize(cfg.npoin);
+            sa_destruction.resize(cfg.npoin);
+            sa_diffusion.resize(cfg.npoin);
+            sa_residual.resize(cfg.npoin);
+
+            sa_active_node.resize(cfg.npoin);
+            sa_wall_node.resize(cfg.npoin);
+            sa_inlet_node.resize(cfg.npoin);
+
+            // Spalart-Allmaras element fields.
+            nu_tilde_e.resize(cfg.nelem);
+            nu_t_e.resize(cfg.nelem);
+            mu_t_e.resize(cfg.nelem);
+            mu_eff_e.resize(cfg.nelem);
+            k_eff_e.resize(cfg.nelem);
+
             // Default values before the input files are read.
             fedge.fill(0);
             mat_elem.fill(0);
@@ -536,6 +600,30 @@ namespace cbs
             rho_cp_e.fill(1.0);
             alpha_e.fill(1.0);
             Qvol_e.fill(0.0);
+
+
+            nu_tilde.fill(0.0);
+            nu_tilde1.fill(0.0);
+            nu_t.fill(0.0);
+            mu_t.fill(0.0);
+            wall_distance.fill(1.0e300);
+
+            sa_rhs.fill(0.0);
+            sa_source.fill(0.0);
+            sa_production.fill(0.0);
+            sa_destruction.fill(0.0);
+            sa_diffusion.fill(0.0);
+            sa_residual.fill(0.0);
+
+            sa_active_node.fill(0);
+            sa_wall_node.fill(0);
+            sa_inlet_node.fill(0);
+
+            nu_tilde_e.fill(0.0);
+            nu_t_e.fill(0.0);
+            mu_t_e.fill(0.0);
+            mu_eff_e.fill(0.0);
+            k_eff_e.fill(1.0);
 
             deltp.fill(0.0);
             deltp1.fill(0.0);

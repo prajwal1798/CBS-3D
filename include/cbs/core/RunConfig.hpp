@@ -223,6 +223,40 @@ namespace cbs
         Real source_solid = 1.0;
         Real heat_flux_bc = 0.0;
 
+
+        // --------------------------------------------------------------------
+        // Spalart-Allmaras turbulence controls
+        // --------------------------------------------------------------------
+        // turbulence_on:
+        //     0  laminar solver path; all turbulence arrays remain passive
+        //     1  solve and apply the selected one-equation turbulence model
+        //
+        // turbulence_model:
+        //     0  standard Spalart-Allmaras model
+        //     1  SA-neg compatible branch, reserved for the robust variant
+        //
+        // turbulent_thermal_diffusivity_on:
+        //     0  turbulent viscosity affects momentum only
+        //     1  fluid thermal conductivity receives rho*cp*nu_t/Pr_t
+        Int turbulence_on = 0;
+        Int turbulence_model = 0;
+        Int turbulent_thermal_diffusivity_on = 0;
+
+        // Fully turbulent inlet/farfield working-variable ratio:
+        //     nu_tilde_inlet = sa_inlet_ratio * nu_molecular
+        Real sa_inlet_ratio = 3.0;
+
+        // Turbulent Prandtl number used only for fluid heat-transfer coupling.
+        Real sa_prandtl_t = 0.90;
+
+        // Numerical protections for the first non-negative SA implementation.
+        Real sa_min_wall_distance = 1.0e-14;
+        Real sa_min_stilde = 1.0e-14;
+        Real sa_nu_tilde_floor = 0.0;
+
+        Int sa_use_stilde_limiter = 1;
+        Int sa_implicit_destruction = 1;
+
         Real nusselt_Tinf = 25.0;
         Real nusselt_Tref = 100.0;
         Real nusselt_diameter = 1.0;

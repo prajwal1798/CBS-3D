@@ -419,6 +419,12 @@ namespace cbs
                 s.k_e(ie) = 1.0;
                 s.alpha_e(ie) = 1.0;
                 s.Qvol_e(ie) = 0.0;
+
+                s.mu_eff_e(ie) = s.mu_e(ie);
+                s.k_eff_e(ie) = s.k_e(ie);
+                s.nu_tilde_e(ie) = 0.0;
+                s.nu_t_e(ie) = 0.0;
+                s.mu_t_e(ie) = 0.0;
             }
         }
 
@@ -1691,6 +1697,12 @@ namespace cbs
                 s.k_e(ie) = 1.0;
                 s.alpha_e(ie) = 1.0;
                 s.Qvol_e(ie) = 0.0;
+
+                s.mu_eff_e(ie) = s.mu_e(ie);
+                s.k_eff_e(ie) = s.k_e(ie);
+                s.nu_tilde_e(ie) = 0.0;
+                s.nu_t_e(ie) = 0.0;
+                s.mu_t_e(ie) = 0.0;
             }
         }
 

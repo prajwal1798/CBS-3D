@@ -40,6 +40,13 @@ set(CBS3D_SOURCES
     src/assembly/MomentumAssembly.cpp
     src/assembly/EnergyAssembly.cpp
 
+    src/assembly/SpalartAllmarasAssembly.cpp
+
+    src/turbulence/SpalartAllmaras.cpp
+    src/turbulence/WallDistance.cpp
+
+    src/boundary/TurbulenceBoundary.cpp
+
     src/utils/SolverProfiler.cpp
 
     src/parallel/PartitionMetadata.cpp
