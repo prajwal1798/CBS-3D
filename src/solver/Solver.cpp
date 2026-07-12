@@ -30,6 +30,7 @@
 #include "cbs/solver/Convergence.hpp"
 #include "cbs/solver/Steps.hpp"
 #include "cbs/timestep/TimeStep.hpp"
+#include "cbs/turbulence/TurbulencePreprocess.hpp"
 
 #include <cmath>
 #include <cstdint>
@@ -238,6 +239,7 @@ namespace cbs
     //     6. Classify walls, pressure boundaries and special face edges.
     //     7. Build OpenMP element-colouring groups.
     //     8. Apply the initial velocity, pressure and temperature conditions.
+//     9. If requested, preprocess the Spalart-Allmaras turbulence model.
     //=========================================================================
     void Solver::initialise()
     {
@@ -299,6 +301,23 @@ namespace cbs
         Boundary::applyPressure(s_);
         updateVelocityMagnitude();
         Post::printStageDone("Initial boundary values", "initial field constrained");
+
+
+        // Precompute all geometry-dependent Spalart-Allmaras quantities before
+        // the CBS time loop.  In the current milestone this includes the
+        // OpenMP wall-distance search and the initial eddy-viscosity field.
+        if (s_.cfg.turbulence_on > 0)
+        {
+            Post::printStage(
+                "Turbulence preprocessing",
+                "Spalart-Allmaras wall distance");
+
+            TurbulencePreprocess::prepareSpalartAllmaras(s_);
+
+            Post::printStageDone(
+                "Turbulence preprocessing",
+                "SA wall distance ready");
+        }
     }
 
 
