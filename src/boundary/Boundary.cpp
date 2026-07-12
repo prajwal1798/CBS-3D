@@ -350,7 +350,8 @@ namespace cbs
             Real ny = 0.0;
             Real nz = 0.0;
 
-            if (bc == s.cfg.bc_massflow_temperature_inlet)
+            if (bc == s.cfg.bc_massflow_temperature_inlet &&
+                s.cfg.mass_flow_inlet_enabled > 0)
             {
                 // Mass-flow inlet in 3D uses the inward normal direction.
                 // face_norm is outward from the domain, so inflow is -n.
@@ -439,12 +440,28 @@ namespace cbs
                 // -------------------------------------------------------------
                 else if (bc == s.cfg.bc_massflow_temperature_inlet)
                 {
-                    set_velocity(
-                        s,
-                        ip,
-                        -s.cfg.inlet_u_from_massflow * nx,
-                        -s.cfg.inlet_u_from_massflow * ny,
-                        -s.cfg.inlet_u_from_massflow * nz);
+                    if (s.cfg.mass_flow_inlet_enabled > 0)
+                    {
+                        set_velocity(
+                            s,
+                            ip,
+                            -s.cfg.inlet_u_from_massflow * nx,
+                            -s.cfg.inlet_u_from_massflow * ny,
+                            -s.cfg.inlet_u_from_massflow * nz);
+                    }
+                    else
+                    {
+                        // Flow-only benchmarks, such as the turbulent flat plate,
+                        // often use BC 511 as a uniform velocity inlet without a
+                        // prescribed mass-flow rate.  In that case the velocity
+                        // components are read directly from the .par file.
+                        set_velocity(
+                            s,
+                            ip,
+                            s.cfg.inlet_u,
+                            s.cfg.inlet_v,
+                            s.cfg.inlet_w);
+                    }
                 }
 
                 // -------------------------------------------------------------
