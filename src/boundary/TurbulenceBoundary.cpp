@@ -7,28 +7,44 @@ namespace cbs
 {
     namespace
     {
-        [[nodiscard]] bool is_fluid_element(const CBSStateSI& s, const Int ie)
+        bool is_fluid_element(const CBSStateSI& s, Int ie)
         {
             return s.mat_elem(ie) == 0;
         }
 
-        [[nodiscard]] bool is_wall_bc(const CBSStateSI& s, const Int bc)
+        bool is_wall_bc(const CBSStateSI& s, Int bc)
         {
             return bc == s.cfg.bc_noslip_adiabatic_wall
                 || bc == s.cfg.bc_noslip_heatflux_wall
                 || bc == s.cfg.bc_cht_interface;
         }
 
-        [[nodiscard]] bool is_inlet_bc(const CBSStateSI& s, const Int bc)
+        bool is_inlet_bc(const CBSStateSI& s, Int bc)
         {
             return bc == s.cfg.bc_velocity_temperature_inlet
                 || bc == s.cfg.bc_massflow_temperature_inlet;
         }
 
-        [[nodiscard]] Real nodal_molecular_nu(
+        //=====================================================================
+        // Returns an averaged molecular kinematic viscosity at one node.
+        //
+        // The SA inlet value is prescribed as
+        //
+        //     nu_tilde_inlet = sa_inlet_ratio * nu
+        //
+        // where nu is the molecular kinematic viscosity.  Material data are
+        // stored per element, while the SA working variable is nodal.  Therefore
+        // the nodal molecular viscosity is obtained by averaging all fluid
+        // elements touching the node.
+        //
+        // This is a simple serial implementation.  It is acceptable for the
+        // initial turbulence scaffold and will be replaced by a precomputed nodal
+        // material field when the full SA equation is coupled to the solver.
+        //=====================================================================
+        Real nodal_molecular_nu(
             const CBSStateSI& s,
-            const Int ip,
-            const std::vector<Int>& count)
+            Int ip,
+            const std::vector<Int>& fluid_touch_count)
         {
             Real sum = 0.0;
 
@@ -39,23 +55,49 @@ namespace cbs
                     continue;
                 }
 
-                bool touches_node = false;
+                bool element_touches_node = false;
+
                 for (Int in = 1; in <= s.cfg.nep; ++in)
                 {
-                    touches_node = touches_node || (s.intma(in, ie) == ip);
+                    if (s.intma(in, ie) == ip)
+                    {
+                        element_touches_node = true;
+                    }
                 }
 
-                if (touches_node && s.rho_e(ie) > 0.0)
+                if (element_touches_node && s.rho_e(ie) > 0.0)
                 {
                     sum += s.mu_e(ie) / s.rho_e(ie);
                 }
             }
 
-            const Int n = count[static_cast<std::size_t>(ip)];
-            return n > 0 ? sum / static_cast<Real>(n) : 0.0;
+            const Int count = fluid_touch_count[static_cast<std::size_t>(ip)];
+
+            if (count > 0)
+            {
+                return sum / static_cast<Real>(count);
+            }
+
+            return 0.0;
         }
     }
 
+    //=========================================================================
+    // Classifies nodes for the Spalart-Allmaras boundary treatment.
+    //
+    // A node is SA-active when it belongs to at least one fluid element.  The SA
+    // equation is not solved in pure solid regions.
+    //
+    // Wall nodes are nodes on no-slip physical walls and on the conformal CHT
+    // interface.  These nodes receive
+    //
+    //     nu_tilde = 0
+    //
+    // because the SA working variable vanishes at no-slip walls.
+    //
+    // Inlet nodes receive a prescribed fully turbulent inlet value.  Partition
+    // interfaces are not physical boundaries and are not classified here.
+    //=========================================================================
     void TurbulenceBoundary::classifyNodes(CBSStateSI& s)
     {
         s.sa_active_node.fill(0);
@@ -71,7 +113,8 @@ namespace cbs
 
             for (Int in = 1; in <= s.cfg.nep; ++in)
             {
-                s.sa_active_node(s.intma(in, ie)) = 1;
+                const Int ip = s.intma(in, ie);
+                s.sa_active_node(ip) = 1;
             }
         }
 
@@ -101,6 +144,17 @@ namespace cbs
         }
     }
 
+    //=========================================================================
+    // Initialises the transported SA working variable.
+    //
+    // The first value is deliberately simple:
+    //
+    //     nu_tilde = sa_inlet_ratio * nu
+    //
+    // for active non-wall fluid nodes.  Wall and solid-only nodes are kept at
+    // zero.  Inlet nodes are then overwritten by the same prescribed inlet rule
+    // to make the boundary condition explicit.
+    //=========================================================================
     void TurbulenceBoundary::initialiseNuTilde(CBSStateSI& s)
     {
         classifyNodes(s);
@@ -115,7 +169,9 @@ namespace cbs
             return;
         }
 
-        std::vector<Int> fluid_touch_count(static_cast<std::size_t>(s.cfg.npoin + 1), 0);
+        std::vector<Int> fluid_touch_count(
+            static_cast<std::size_t>(s.cfg.npoin + 1),
+            0);
 
         for (Int ie = 1; ie <= s.cfg.nelem; ++ie)
         {
@@ -126,7 +182,8 @@ namespace cbs
 
             for (Int in = 1; in <= s.cfg.nep; ++in)
             {
-                ++fluid_touch_count[static_cast<std::size_t>(s.intma(in, ie))];
+                const Int ip = s.intma(in, ie);
+                ++fluid_touch_count[static_cast<std::size_t>(ip)];
             }
         }
 
@@ -146,6 +203,18 @@ namespace cbs
         applyInletValues(s);
     }
 
+    //=========================================================================
+    // Applies the wall condition for the SA working variable.
+    //
+    // At all no-slip turbulence walls:
+    //
+    //     nu_tilde = 0
+    //     nu_t     = 0
+    //     mu_t     = 0
+    //
+    // The CHT interface is included here for turbulence because the fluid sees a
+    // no-slip solid wall.  This does not alter the thermal continuity treatment.
+    //=========================================================================
     void TurbulenceBoundary::applyWallValues(CBSStateSI& s)
     {
         for (Int ip = 1; ip <= s.cfg.npoin; ++ip)
@@ -160,6 +229,17 @@ namespace cbs
         }
     }
 
+    //=========================================================================
+    // Applies the inlet condition for the SA working variable.
+    //
+    // The prescribed value is
+    //
+    //     nu_tilde_inlet = sa_inlet_ratio * nu
+    //
+    // Wall nodes are not overwritten by the inlet rule.  If a node is both an
+    // inlet node and a wall node due to boundary-face adjacency, the wall value
+    // remains dominant.
+    //=========================================================================
     void TurbulenceBoundary::applyInletValues(CBSStateSI& s)
     {
         if (s.cfg.turbulence_on < 1)
@@ -167,7 +247,9 @@ namespace cbs
             return;
         }
 
-        std::vector<Int> fluid_touch_count(static_cast<std::size_t>(s.cfg.npoin + 1), 0);
+        std::vector<Int> fluid_touch_count(
+            static_cast<std::size_t>(s.cfg.npoin + 1),
+            0);
 
         for (Int ie = 1; ie <= s.cfg.nelem; ++ie)
         {
@@ -178,7 +260,8 @@ namespace cbs
 
             for (Int in = 1; in <= s.cfg.nep; ++in)
             {
-                ++fluid_touch_count[static_cast<std::size_t>(s.intma(in, ie))];
+                const Int ip = s.intma(in, ie);
+                ++fluid_touch_count[static_cast<std::size_t>(ip)];
             }
         }
 
