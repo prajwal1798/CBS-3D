@@ -89,29 +89,51 @@ namespace cbs
         }
 
 
-        // Returns the momentum diffusivity used in the viscous term.
+        // Returns the kinematic viscosity used in the Step-1 viscous term.
         //
-        // Dimensional material mode:
+        // Laminar dimensional mode:
         //
         //     nu_e = mu_e / rho_e
         //
-        // Non-dimensional mode:
+        // Spalart-Allmaras dimensional mode:
         //
-        //     nu_e = ani
+        //     nu_eff,e = mu_eff_e / rho_e
+        //
+        // where:
+        //
+        //     mu_eff_e = mu_e + mu_t_e
+        //
+        // Non-dimensional laminar mode continues to use ani.  The first SA
+        // implementation is intended for dimensional material cases, where rho
+        // and mu are available element by element.
         Real momentum_diffusivity(
             const CBSStateSI& s,
             Int ie)
         {
             if (s.cfg.dimensional_mode > 0 && s.cfg.material_properties_enabled > 0)
             {
-                if (s.rho_e(ie) <= 0.0 || s.mu_e(ie) < 0.0)
+                if (s.rho_e(ie) <= 0.0 || !std::isfinite(s.rho_e(ie)))
                 {
                     throw std::runtime_error(
-                        "MomentumAssembly::assembleStep1Rhs - invalid fluid rho/mu at element "
+                        "MomentumAssembly::assembleStep1Rhs - invalid fluid density at element "
                         + std::to_string(ie));
                 }
 
-                return s.mu_e(ie) / s.rho_e(ie);
+                Real mu = s.mu_e(ie);
+
+                if (s.cfg.turbulence_on > 0)
+                {
+                    mu = s.mu_eff_e(ie);
+                }
+
+                if (mu < 0.0 || !std::isfinite(mu))
+                {
+                    throw std::runtime_error(
+                        "MomentumAssembly::assembleStep1Rhs - invalid effective viscosity at element "
+                        + std::to_string(ie));
+                }
+
+                return mu / s.rho_e(ie);
             }
 
             return s.cfg.ani;

@@ -634,6 +634,14 @@ namespace cbs
         s_.pres1 = s_.pres;
         s_.temperature1 = s_.temperature;
 
+        // Store the SA working variable at the beginning of the current
+        // iteration.  The SA residual assembly is explicit in nu_tilde and
+        // therefore uses nu_tilde1 as q^n.
+        if (s_.cfg.turbulence_on > 0)
+        {
+            s_.nu_tilde1 = s_.nu_tilde;
+        }
+
         // Calculate the physical or pseudo-time step used by this iteration.
         {
             auto timer = profiler_.time(SolverProfiler::Section::TimeStepCompute);
@@ -677,6 +685,16 @@ namespace cbs
         {
             auto timer = profiler_.time(SolverProfiler::Section::Step3VelocityCorrection);
             Steps::step3(s_);
+        }
+
+        // Optional Spalart-Allmaras transport step.  It is placed after
+        // Step 3 because the SA advection and production terms use the corrected
+        // velocity field.  It is placed before Step 4 so that the energy equation
+        // can use the updated turbulent thermal conductivity.
+        if (s_.cfg.turbulence_on > 0)
+        {
+            auto timer = profiler_.time(SolverProfiler::Section::StepSpalartAllmaras);
+            Steps::stepSpalartAllmaras(s_);
         }
 
         // CBS Step 4: advance the energy equation when temperature is enabled.

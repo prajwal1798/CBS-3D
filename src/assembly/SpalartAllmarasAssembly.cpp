@@ -461,6 +461,16 @@ namespace cbs
                 Real local_diffusion[5] = {};
                 Real local_source[5] = {};
 
+                // local_destruction_lhs stores the nodal coefficient added to
+                // the left-hand side when positive destruction is treated
+                // semi-implicitly:
+                //
+                //     D = C_D q^2  ->  C_D q_old q_new
+                //
+                // The global temporary storage is sa_residual during assembly.
+                // It is overwritten by the actual nodal update after updateNuTilde().
+                Real local_destruction_lhs[5] = {};
+
                 for (Int a = 1; a <= s.cfg.nep; ++a)
                 {
                     const Int ip = s.intma(a, ie);
@@ -486,8 +496,29 @@ namespace cbs
                     local_rhs[a] += advection;
                     local_rhs[a] += diffusion;
                     local_rhs[a] += production_rhs;
-                    local_rhs[a] -= destruction_rhs;
                     local_rhs[a] += nonlinear_rhs;
+
+                    // Destruction is stiff near the wall because it contains
+                    // (nu_tilde/d)^2.  If sa_implicit_destruction is enabled and
+                    // the destruction coefficient is positive, use the standard
+                    // first-order linearisation:
+                    //
+                    //     C_D q^2  ->  C_D q_old q_new
+                    //
+                    // The term C_D q_old is therefore added to the nodal
+                    // mass/time diagonal.  Negative C_D is not a destruction
+                    // sink; it is kept explicit in the RHS with the correct sign.
+                    if (s.cfg.sa_implicit_destruction > 0 &&
+                        destruction_coefficient > 0.0 &&
+                        q_average > 0.0)
+                    {
+                        local_destruction_lhs[a] +=
+                            nodal_volume * destruction_coefficient * q_average;
+                    }
+                    else
+                    {
+                        local_rhs[a] -= destruction_rhs;
+                    }
 
                     local_production[a] += production_rhs;
                     local_destruction[a] += destruction_rhs;
@@ -504,6 +535,7 @@ namespace cbs
                     s.sa_destruction(ip) += local_destruction[a];
                     s.sa_diffusion(ip) += local_diffusion[a];
                     s.sa_source(ip) += local_source[a];
+                    s.sa_residual(ip) += local_destruction_lhs[a];
                 }
             }
         }
@@ -565,7 +597,20 @@ namespace cbs
             }
 
             const Real old_value = s.nu_tilde1(ip);
-            Real new_value = old_value + s.elcoe2(ip) * s.sa_rhs(ip);
+
+            Real denominator = 1.0;
+            if (s.cfg.sa_implicit_destruction > 0)
+            {
+                denominator += s.elcoe2(ip) * s.sa_residual(ip);
+            }
+
+            if (denominator <= 0.0 || !std::isfinite(denominator))
+            {
+                denominator = 1.0;
+            }
+
+            Real new_value =
+                (old_value + s.elcoe2(ip) * s.sa_rhs(ip)) / denominator;
 
             if (!std::isfinite(new_value))
             {
