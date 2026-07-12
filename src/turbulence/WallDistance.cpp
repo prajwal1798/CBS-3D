@@ -14,9 +14,11 @@ namespace cbs
             std::array<Real, 3> node_point(const CBSStateSI& s, Int ip)
             {
                 std::array<Real, 3> p;
+
                 p[0] = s.coord(1, ip);
                 p[1] = s.coord(2, ip);
                 p[2] = s.coord(3, ip);
+
                 return p;
             }
 
@@ -32,9 +34,11 @@ namespace cbs
                 const std::array<Real, 3>& b)
             {
                 std::array<Real, 3> result;
+
                 result[0] = a[0] - b[0];
                 result[1] = a[1] - b[1];
                 result[2] = a[2] - b[2];
+
                 return result;
             }
 
@@ -44,9 +48,11 @@ namespace cbs
                 Real scale)
             {
                 std::array<Real, 3> result;
+
                 result[0] = a[0] + scale * b[0];
                 result[1] = a[1] + scale * b[1];
                 result[2] = a[2] + scale * b[2];
+
                 return result;
             }
 
@@ -63,6 +69,48 @@ namespace cbs
             {
                 const std::array<Real, 3> d = subtract_points(a, b);
                 return dot_product(d, d);
+            }
+
+            void check_wall_triangle_list(
+                const std::vector<WallTriangle>& wall_triangles,
+                const char* routine_name)
+            {
+                if (wall_triangles.empty())
+                {
+                    throw std::runtime_error(
+                        std::string(routine_name)
+                        + " - no physical no-slip wall triangles found");
+                }
+            }
+
+            void compute_one_node_distance(
+                CBSStateSI& s,
+                Int ip,
+                const std::vector<WallTriangle>& wall_triangles)
+            {
+                if (s.sa_active_node(ip) == 0)
+                {
+                    return;
+                }
+
+                if (s.sa_wall_node(ip) != 0)
+                {
+                    s.wall_distance(ip) = s.cfg.sa_min_wall_distance;
+                    return;
+                }
+
+                const std::array<Real, 3> p = node_point(s, ip);
+                Real d_min = std::numeric_limits<Real>::max();
+
+                for (Size i = 0; i < wall_triangles.size(); ++i)
+                {
+                    const Real distance =
+                        WallDistance::pointTriangleDistance(p, wall_triangles[i]);
+
+                    d_min = std::min(d_min, distance);
+                }
+
+                s.wall_distance(ip) = std::max(d_min, s.cfg.sa_min_wall_distance);
             }
         }
 
@@ -90,6 +138,7 @@ namespace cbs
                 }
 
                 WallTriangle tri;
+
                 tri.a = node_point(s, s.iside(1, ib));
                 tri.b = node_point(s, s.iside(2, ib));
                 tri.c = node_point(s, s.iside(3, ib));
@@ -190,53 +239,60 @@ namespace cbs
         }
 
         //=====================================================================
-        // Computes wall distance for every SA-active node.
+        // Computes wall distance for every SA-active node using OpenMP.
+        //
+        // The input wall triangles are fixed after boundary preprocessing.  Each
+        // nodal distance is independent of every other nodal distance.  Therefore
+        // the outer node loop is safe to parallelise: every thread writes to a
+        // different wall_distance(ip) entry, and the wall-triangle list is only
+        // read.
         //
         // Wall nodes receive the small positive lower bound specified by
         // sa_min_wall_distance.  This avoids division by zero in the SA
         // destruction term while still representing the wall boundary value.
         //
         // Non-wall active fluid nodes receive the minimum distance to all
-        // physical wall triangles.  This serial implementation is O(Nnode Nwall)
-        // and is intended as the first verifiable version before an AABB tree is
+        // physical wall triangles.  This implementation is O(Nnode Nwall).  It
+        // is deliberately simple and verifiable before a spatial search tree is
         // introduced.
+        //=====================================================================
+        void WallDistance::compute(CBSStateSI& s)
+        {
+            const std::vector<WallTriangle> wall_triangles =
+                collectPhysicalWallTriangles(s);
+
+            check_wall_triangle_list(wall_triangles, "WallDistance::compute");
+
+            s.wall_distance.fill(std::numeric_limits<Real>::max());
+
+#ifdef CBS3D_USE_OPENMP
+#pragma omp parallel for schedule(dynamic)
+#endif
+            for (Int ip = 1; ip <= s.cfg.npoin; ++ip)
+            {
+                compute_one_node_distance(s, ip, wall_triangles);
+            }
+        }
+
+        //=====================================================================
+        // Serial reference version of the wall-distance calculation.
+        //
+        // This routine is retained to allow direct comparison with the OpenMP
+        // version during debugging.  It performs exactly the same geometric
+        // calculation but uses one thread only.
         //=====================================================================
         void WallDistance::computeSerial(CBSStateSI& s)
         {
             const std::vector<WallTriangle> wall_triangles =
                 collectPhysicalWallTriangles(s);
 
-            if (wall_triangles.empty())
-            {
-                throw std::runtime_error(
-                    "WallDistance::computeSerial - no physical no-slip wall triangles found");
-            }
+            check_wall_triangle_list(wall_triangles, "WallDistance::computeSerial");
 
             s.wall_distance.fill(std::numeric_limits<Real>::max());
 
             for (Int ip = 1; ip <= s.cfg.npoin; ++ip)
             {
-                if (s.sa_active_node(ip) == 0)
-                {
-                    continue;
-                }
-
-                if (s.sa_wall_node(ip) != 0)
-                {
-                    s.wall_distance(ip) = s.cfg.sa_min_wall_distance;
-                    continue;
-                }
-
-                const std::array<Real, 3> p = node_point(s, ip);
-                Real d_min = std::numeric_limits<Real>::max();
-
-                for (Size i = 0; i < wall_triangles.size(); ++i)
-                {
-                    const Real distance = pointTriangleDistance(p, wall_triangles[i]);
-                    d_min = std::min(d_min, distance);
-                }
-
-                s.wall_distance(ip) = std::max(d_min, s.cfg.sa_min_wall_distance);
+                compute_one_node_distance(s, ip, wall_triangles);
             }
         }
     }
