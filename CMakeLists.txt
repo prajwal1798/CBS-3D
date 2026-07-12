@@ -44,6 +44,7 @@ set(CBS3D_SOURCES
 
     src/turbulence/SpalartAllmaras.cpp
     src/turbulence/WallDistance.cpp
+    src/turbulence/TurbulencePreprocess.cpp
 
     src/boundary/TurbulenceBoundary.cpp
 
