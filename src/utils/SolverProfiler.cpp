@@ -1,20 +1,7 @@
 //=============================================================================
 // CBS3D++_SI
 //
-// Per-iteration wall-clock profiler for the main CBS solver stages.
-//
-// Each ScopedTimer measures:
-//
-//     elapsed time = finish time - start time
-//
-// The measured duration is accumulated in the selected solver section. The
-// final report prints:
-//
-//     total measured time = sum_s time_s
-//
-//     percentage_s = 100 time_s / total measured time
-//
-// together with the number of times each section was entered.
+// Per-iteration wall-clock profiler for the main solver stages.
 //=============================================================================
 
 #include "cbs/utils/SolverProfiler.hpp"
@@ -42,9 +29,6 @@ namespace cbs
 
     //=========================================================================
     // Transfers ownership of an active timer.
-    //
-    // The moved-from timer is disabled so that the same elapsed interval is
-    // not added twice.
     //=========================================================================
     SolverProfiler::ScopedTimer::ScopedTimer(ScopedTimer&& other) noexcept
         : profiler_(other.profiler_),
@@ -90,8 +74,7 @@ namespace cbs
 
 
     //=========================================================================
-    // Clears all timing and Pressure CG information before the next CBS
-    // iteration begins.
+    // Clears all timing and Pressure CG information before the next iteration.
     //=========================================================================
     void SolverProfiler::resetIteration()
     {
@@ -116,12 +99,6 @@ namespace cbs
 
     //=========================================================================
     // Adds one measured duration to a profiling section.
-    //
-    // For section s:
-    //
-    //     seconds_s <- seconds_s + elapsed
-    //
-    //     calls_s   <- calls_s + 1
     //=========================================================================
     void SolverProfiler::addElapsed(
         const Section section,
@@ -139,37 +116,24 @@ namespace cbs
     }
 
 
-    //=========================================================================
-    // Stores the number of Pressure CG iterations completed during the current
-    // CBS iteration.
-    //=========================================================================
     void SolverProfiler::setCgIterations(const Int iterations) noexcept
     {
         cg_iterations_ = iterations;
     }
 
 
-    //=========================================================================
-    // Stores the initial Pressure CG L2 residual.
-    //=========================================================================
     void SolverProfiler::setCgInitialResidual(const Real value) noexcept
     {
         cg_initial_residual_ = value;
     }
 
 
-    //=========================================================================
-    // Stores the final Pressure CG L2 residual.
-    //=========================================================================
     void SolverProfiler::setCgFinalResidual(const Real value) noexcept
     {
         cg_final_residual_ = value;
     }
 
 
-    //=========================================================================
-    // Stores the final relative Pressure CG residual.
-    //=========================================================================
     void SolverProfiler::setCgRelativeResidual(const Real value) noexcept
     {
         cg_relative_residual_ = value;
@@ -177,11 +141,7 @@ namespace cbs
 
 
     //=========================================================================
-    // Returns the total measured time for the current CBS iteration:
-    //
-    //     total = sum_s seconds_s
-    //
-    // Only explicitly timed sections contribute to this total.
+    // Returns the total measured time for the current solver iteration.
     //=========================================================================
     double SolverProfiler::totalMeasuredSeconds() const noexcept
     {
@@ -217,6 +177,8 @@ namespace cbs
             return "Steps::step2 pressure solve";
         case Section::Step3VelocityCorrection:
             return "Steps::step3 velocity correction";
+        case Section::StepSpalartAllmaras:
+            return "Steps::stepSpalartAllmaras";
         case Section::Step4Energy:
             return "Steps::step4 energy";
         case Section::VelocityMagnitude:
@@ -235,21 +197,6 @@ namespace cbs
 
     //=========================================================================
     // Prints the timing profile at the requested iteration interval.
-    //
-    // A report is produced only when:
-    //
-    //     print_every > 0
-    //
-    // and:
-    //
-    //     iteration mod print_every = 0
-    //
-    // For each active section:
-    //
-    //     percentage_s =
-    //         100 seconds_s / total measured seconds
-    //
-    // Sections with zero calls are omitted.
     //=========================================================================
     void SolverProfiler::printIteration(
         std::ostream& os,
