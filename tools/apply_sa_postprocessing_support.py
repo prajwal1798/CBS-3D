@@ -12,7 +12,7 @@ def write(path, text):
 
 
 def insert_after(text, anchor, insertion, label):
-    if insertion in text:
+    if insertion.strip() in text:
         print(f"[skip] {label}")
         return text
 
@@ -23,9 +23,25 @@ def insert_after(text, anchor, insertion, label):
     return text.replace(anchor, anchor + insertion, 1)
 
 
+def insert_before_any(text, anchors, insertion, label):
+    if insertion.strip() in text:
+        print(f"[skip] {label}")
+        return text
+
+    for anchor in anchors:
+        pos = text.find(anchor)
+        if pos >= 0:
+            print(f"[patch] {label}")
+            return text[:pos] + insertion + text[pos:]
+
+    raise SystemExit(f"Patch anchor not found: {label}")
+
+
 def patch_post_cpp():
     path = ROOT / "src" / "io" / "Post.cpp"
     text = read(path)
+
+    helper_name = "build_nodal_fluid_molecular_viscosity"
 
     helper_anchor = """        // Tests whether velocity is physically active at one node.
         bool velocity_active_node(
@@ -98,27 +114,16 @@ def patch_post_cpp():
         }
 """
 
-    text = insert_after(
-        text,
-        helper_anchor,
-        helper_insertion,
-        "Post.cpp: add nodal molecular-viscosity diagnostic helper")
-
-    output_anchor = """        out << "        <DataArray type=\"Float64\" Name=\"velocity_magnitude\" NumberOfComponents=\"1\" format=\"ascii\">\n";
-        for (Int ip = 1; ip <= s.cfg.npoin; ++ip)
-        {
-            const Real velocity_magnitude =
-                velocity_active_node(masks, ip)
-                    ? safe_value(s.velocity(ip))
-                    : 0.0;
-
-            out << "          " << velocity_magnitude << '\n';
-        }
-        out << "        </DataArray>\n";
-"""
+    if helper_name in text:
+        print("[skip] Post.cpp: add nodal molecular-viscosity diagnostic helper")
+    else:
+        text = insert_after(
+            text,
+            helper_anchor,
+            helper_insertion,
+            "Post.cpp: add nodal molecular-viscosity diagnostic helper")
 
     output_insertion = """
-
         if (s.cfg.turbulence_on > 0)
         {
             const std::vector<Real> nodal_mu = build_nodal_fluid_molecular_viscosity(s);
@@ -227,13 +232,24 @@ def patch_post_cpp():
             }
             out << "        </DataArray>\n";
         }
+
 """
 
-    text = insert_after(
-        text,
-        output_anchor,
-        output_insertion,
-        "Post.cpp: write SA point diagnostics")
+    if "Name=\"nu_tilde\"" in text:
+        print("[skip] Post.cpp: write SA point diagnostics")
+    else:
+        # Insert before the domain/debug masks.  This is intentionally less
+        # brittle than matching the entire velocity_magnitude block, because that
+        # block may differ slightly between local branches.
+        anchors = [
+            "        out << \"        <DataArray type=\\\"Int32\\\" Name=\\\"node_domain_kind\\\" NumberOfComponents=\\\"1\\\" format=\\\"ascii\\\">\\n\";\n",
+            "        out << \"      </PointData>\\n\";\n",
+        ]
+        text = insert_before_any(
+            text,
+            anchors,
+            output_insertion,
+            "Post.cpp: write SA point diagnostics")
 
     write(path, text)
 
