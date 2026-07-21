@@ -38,6 +38,11 @@ namespace cbs
         // CBS equations. This is the first distributed-MPI integration stage.
         void runPartitionInitialisation();
 
+        // Executes rank-local geometric preprocessing and reconciles shared
+        // nodal mass quantities across MPI partition interfaces. CBS Steps
+        // 1 to 4 and the pressure solve are not advanced by this milestone.
+        void runDistributedPreprocessing();
+
         // Returns read-only access to the complete solver state.
         [[nodiscard]] const CBSStateSI& state() const noexcept;
 
@@ -70,6 +75,10 @@ namespace cbs
 
         // Verifies the integrated owner-to-ghost halo communication.
         void auditPartitionHalo() const;
+
+        // Verifies that distributed nodal mass and thermal capacitance agree
+        // with independently integrated rank-local element contributions.
+        void auditDistributedPreprocessing() const;
 
         // Builds the element and global pressure operators used in CBS Step 2.
         void preparePressureSystem();

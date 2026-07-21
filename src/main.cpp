@@ -239,9 +239,9 @@ int main(int argc, char** argv)
 #ifdef CBS3D_USE_MPI
         if (mpi_size > 1)
         {
-            // Stage 1 verifies rank-local input, ownership metadata and halo
-            // communication. CBS Steps 1 to 4 are intentionally not advanced.
-            solver.runPartitionInitialisation();
+            // Reconcile the first distributed numerical preprocessing arrays.
+            // CBS Steps 1 to 4 are intentionally not advanced yet.
+            solver.runDistributedPreprocessing();
         }
         else
 #endif

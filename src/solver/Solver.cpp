@@ -128,6 +128,44 @@ namespace cbs
     }
 
 
+
+    //=========================================================================
+    // Executes the fir
+    //
+    // Geometric quantities are calculated independently from each rank's owned
+    // tetrahedra. Shared nodal mass quantities are reconciled by massMatrix().
+    //
+    // This milestone intentionally stops before pressure assembly and CBS
+    // Steps 1 to 4.
+    //=========================================================================
+    void Solver::runDistributedPreprocessing()
+    {
+        if (!s_.mpi_enabled)
+        {
+            throw std::runtime_error(
+                "Solver::runDistributedPreprocessing requires more than one MPI rank");
+        }
+
+        MeshIO::readAll(case_name_, s_);
+        readPartitionMetadata();
+
+        // Validate partition ownership and the basic forward halo operation.
+        auditPartitionHalo();
+
+        // These operations use only owned tetrahedra or rank-local physical
+        // boundary faces.
+        Preprocess::validateBoundaryFlags(s_);
+        Preprocess::shapeFunctionDerivatives(s_);
+        Preprocess::assignBoundaryFaceNumbers(s_);
+        Preprocess::getNormals(s_);
+
+        // The first numerically meaningful reverse-add and forward halo stage.
+        Preprocess::massMatrix(s_);
+
+        auditDistributedPreprocessing();
+    }
+
+
     //=========================================================================
     // Executes the complete CBS solution procedure.
     //
@@ -593,6 +631,152 @@ namespace cbs
 #else
         throw std::runtime_error(
             "Solver::auditPartitionHalo requires an MPI build");
+#endif
+    }
+
+
+
+    //=========================================================================
+    // Verifies distributed lumped-mass and thermal-capacitance reconciliation.
+    //
+    // Each element contributes:
+    //
+    //     nep * detJ * mass_factor
+    //
+    // to the total scalar lumped mass. Summing only owned nodal entries avoids
+    // counting replicated ghost values.
+    //=========================================================================
+    void Solver::auditDistributedPreprocessing() const
+    {
+#ifdef CBS3D_USE_MPI
+        Real local_element_mass = 0.0;
+        Real local_element_capacity = 0.0;
+
+        for (Int ie = 1; ie <= s_.cfg.nelem; ++ie)
+        {
+            if (s_.detJ(ie) <= 0.0 ||
+                !std::isfinite(s_.detJ(ie)))
+            {
+                throw std::runtime_error(
+                    "Distributed preprocessing audit found invalid detJ");
+            }
+
+            const Real element_lumped_mass =
+                static_cast<Real>(s_.cfg.nep)
+                * s_.detJ(ie)
+                * s_.cfg.mass_factor;
+
+            local_element_mass += element_lumped_mass;
+
+            local_element_capacity +=
+                s_.rho_cp_e(ie) * element_lumped_mass;
+        }
+
+        Real local_owned_mass = 0.0;
+        Real local_owned_capacity = 0.0;
+
+        for (const Int ip : s_.owned_nodes)
+        {
+            if (s_.Mdiag_real(ip) <= 0.0 ||
+                !std::isfinite(s_.Mdiag_real(ip)) ||
+                s_.elcoe2p(ip) <= 0.0 ||
+                !std::isfinite(s_.elcoe2p(ip)))
+            {
+                throw std::runtime_error(
+                    "Distributed preprocessing audit found an invalid owned-node coefficient");
+            }
+
+            local_owned_mass +=
+                s_.Mdiag_real(ip);
+
+            local_owned_capacity +=
+                1.0 / s_.elcoe2p(ip);
+        }
+
+        Real global_element_mass = 0.0;
+        Real global_element_capacity = 0.0;
+        Real global_owned_mass = 0.0;
+        Real global_owned_capacity = 0.0;
+
+        checkMpi(
+            MPI_Allreduce(
+                &local_element_mass,
+                &global_element_mass,
+                1,
+                MPI_DOUBLE,
+                MPI_SUM,
+                MPI_COMM_WORLD),
+            "MPI_Allreduce element lumped mass");
+
+        checkMpi(
+            MPI_Allreduce(
+                &local_element_capacity,
+                &global_element_capacity,
+                1,
+                MPI_DOUBLE,
+                MPI_SUM,
+                MPI_COMM_WORLD),
+            "MPI_Allreduce element thermal capacity");
+
+        checkMpi(
+            MPI_Allreduce(
+                &local_owned_mass,
+                &global_owned_mass,
+                1,
+                MPI_DOUBLE,
+                MPI_SUM,
+                MPI_COMM_WORLD),
+            "MPI_Allreduce owned nodal mass");
+
+        checkMpi(
+            MPI_Allreduce(
+                &local_owned_capacity,
+                &global_owned_capacity,
+                1,
+                MPI_DOUBLE,
+                MPI_SUM,
+                MPI_COMM_WORLD),
+            "MPI_Allreduce owned nodal thermal capacity");
+
+        const auto nearly_equal = [](const Real a, const Real b)
+        {
+            const Real scale =
+                std::fmax(
+                    1.0,
+                    std::fmax(std::fabs(a), std::fabs(b)));
+
+            return std::fabs(a - b) <= 1.0e-9 * scale;
+        };
+
+        if (!nearly_equal(global_owned_mass, global_element_mass) ||
+            !nearly_equal(
+                global_owned_capacity,
+                global_element_capacity))
+        {
+            throw std::runtime_error(
+                "Distributed preprocessing mass reconciliation failed");
+        }
+
+        if (s_.mpi_rank == 0)
+        {
+            std::cout
+                << "============================================================\n"
+                << "CBS3D DISTRIBUTED PREPROCESSING\n"
+                << "============================================================\n"
+                << "MPI ranks                    : " << s_.mpi_size << "\n"
+                << "element lumped mass          : " << global_element_mass << "\n"
+                << "unique owned nodal mass      : " << global_owned_mass << "\n"
+                << "element thermal capacity     : " << global_element_capacity << "\n"
+                << "owned nodal thermal capacity : " << global_owned_capacity << "\n"
+                << "mass reconciliation          : PASS\n"
+                << "thermal reconciliation       : PASS\n"
+                << "CBS Steps 1 to 4             : NOT STARTED\n"
+                << "RESULT                        : PASS\n"
+                << "============================================================\n";
+        }
+#else
+        throw std::runtime_error(
+            "Solver::auditDistributedPreprocessing requires an MPI build");
 #endif
     }
 

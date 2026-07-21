@@ -12,6 +12,10 @@
 
 #include "cbs/preprocess/Preprocess.hpp"
 
+#ifdef CBS3D_USE_MPI
+#include "cbs/parallel/HaloExchange.hpp"
+#endif
+
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -733,6 +737,8 @@ namespace cbs
         thermal_lumped.resize(s.cfg.npoin);
         thermal_lumped.fill(0.0);
 
+        // Every rank stores only owned tetrahedra. Therefore each element
+        // contribution is assembled exactly once globally.
         for (Int ie = 1; ie <= s.cfg.nelem; ++ie)
         {
             if (s.detJ(ie) <= 0.0 || !std::isfinite(s.detJ(ie)))
@@ -749,8 +755,17 @@ namespace cbs
                     + std::to_string(ie));
             }
 
-            const Real nodal_mass = s.detJ(ie) * s.cfg.mass_factor;
-            const Real nodal_capacity = s.rho_cp_e(ie) * nodal_mass;
+            const Real nodal_mass =
+                s.detJ(ie) * s.cfg.mass_factor;
+
+            const Real nodal_capacity =
+                s.rho_cp_e(ie) * nodal_mass;
+
+            const Real consistent_diag =
+                s.detJ(ie) / 60.0;
+
+            const Real correction_off =
+                -s.detJ(ie) / 120.0;
 
             for (Int in = 1; in <= s.cfg.nep; ++in)
             {
@@ -758,53 +773,87 @@ namespace cbs
 
                 s.Mdiag_real(ip) += nodal_mass;
                 thermal_lumped(ip) += nodal_capacity;
-                s.elcoe_e(element_node_index(s, ie, in)) = nodal_mass;
+                s.M_diag(ip) += consistent_diag;
+
+                s.elcoe_e(
+                    element_node_index(s, ie, in)) = nodal_mass;
+            }
+
+            const Int first_pair =
+                (ie - 1) * s.cfg.gsdim + 1;
+
+            for (Int ig = 0; ig < s.cfg.gsdim; ++ig)
+            {
+                s.Mconsist(first_pair + ig) = correction_off;
             }
         }
 
+#ifdef CBS3D_USE_MPI
+        if (s.mpi_enabled)
+        {
+            // A rank-owned tetrahedron can contribute to a node owned by a
+            // neighbouring rank. Such contributions are stored temporarily
+            // in the local ghost-node entries and must be added to the owner.
+            HaloExchange::sumGhostContributionsToOwners(
+                s.Mdiag_real,
+                s.partition_metadata);
+
+            HaloExchange::sumGhostContributionsToOwners(
+                thermal_lumped,
+                s.partition_metadata);
+
+            HaloExchange::sumGhostContributionsToOwners(
+                s.M_diag,
+                s.partition_metadata);
+
+            // The owner now contains the complete shared-node coefficient.
+            // Broadcast it back so all ghost copies contain identical values.
+            HaloExchange::broadcastOwnedToGhosts(
+                s.Mdiag_real,
+                s.partition_metadata);
+
+            HaloExchange::broadcastOwnedToGhosts(
+                thermal_lumped,
+                s.partition_metadata);
+
+            HaloExchange::broadcastOwnedToGhosts(
+                s.M_diag,
+                s.partition_metadata);
+        }
+#else
+        if (s.mpi_enabled)
+        {
+            throw std::runtime_error(
+                "Preprocess::massMatrix - MPI state requires an MPI-enabled build");
+        }
+#endif
+
         for (Int ip = 1; ip <= s.cfg.npoin; ++ip)
         {
-            if (s.Mdiag_real(ip) <= 0.0 || !std::isfinite(s.Mdiag_real(ip)))
+            if (s.Mdiag_real(ip) <= 0.0 ||
+                !std::isfinite(s.Mdiag_real(ip)))
             {
                 throw std::runtime_error(
                     "Preprocess::massMatrix - non-positive lumped mass at node "
                     + std::to_string(ip));
             }
 
-            if (thermal_lumped(ip) <= 0.0 || !std::isfinite(thermal_lumped(ip)))
+            if (thermal_lumped(ip) <= 0.0 ||
+                !std::isfinite(thermal_lumped(ip)))
             {
                 throw std::runtime_error(
                     "Preprocess::massMatrix - non-positive thermal capacitance at node "
                     + std::to_string(ip));
             }
 
-            s.elcoe2(ip) = 1.0 / s.Mdiag_real(ip);
-            s.elcoe2p(ip) = 1.0 / thermal_lumped(ip);
-        }
+            s.elcoe2(ip) =
+                1.0 / s.Mdiag_real(ip);
 
-        Int isky = 0;
+            s.elcoe2p(ip) =
+                1.0 / thermal_lumped(ip);
 
-        for (Int ie = 1; ie <= s.cfg.nelem; ++ie)
-        {
-            const Real consistent_diag = s.detJ(ie) / 60.0;
-            const Real correction_off = -s.detJ(ie) / 120.0;
-
-            for (Int in = 1; in <= s.cfg.nep; ++in)
-            {
-                const Int ip = s.intma(in, ie);
-                s.M_diag(ip) += consistent_diag;
-            }
-
-            for (Int ig = 1; ig <= s.cfg.gsdim; ++ig)
-            {
-                ++isky;
-                s.Mconsist(isky) = correction_off;
-            }
-        }
-
-        for (Int ip = 1; ip <= s.cfg.npoin; ++ip)
-        {
-            s.M_diag(ip) = s.Mdiag_real(ip) - s.M_diag(ip);
+            s.M_diag(ip) =
+                s.Mdiag_real(ip) - s.M_diag(ip);
         }
     }
 
