@@ -51,6 +51,15 @@ namespace cbs
 {
     struct CBSStateSI
     {
+        // Nodal material-connectivity mask bits.
+        //
+        //     0  invalid/unclassified
+        //     1  touches at least one fluid element
+        //     2  touches at least one solid element
+        //     3  conformal fluid-solid interface
+        static constexpr Int node_touches_fluid = 1;
+        static constexpr Int node_touches_solid = 2;
+
         // --------------------------------------------------------------------
         // Problem configuration
         // --------------------------------------------------------------------
@@ -70,6 +79,7 @@ namespace cbs
 
         Array2D<Real> coord;      // Nodal coordinates: (ndim, npoin)
         Array1D<Int> mat_elem;    // Element material: 0 fluid, greater than 0 solid
+        Array1D<Int> node_material_mask; // Nodal fluid/solid connectivity bits
 
         // --------------------------------------------------------------------
         // Primary solution variables
@@ -502,6 +512,7 @@ namespace cbs
             wall_node_list.resize(cfg.npoin);
             bc_values.resize(cfg.npoin);
             bc_list.resize(cfg.npoin);
+            node_material_mask.resize(cfg.npoin);
 
             // Element geometry and coefficients.
             dNkdx.resize(cfg.ndim * cfg.nep * cfg.nelem);
@@ -592,6 +603,7 @@ namespace cbs
             // Default values before the input files are read.
             fedge.fill(0);
             mat_elem.fill(0);
+            node_material_mask.fill(0);
 
             rho_e.fill(1.0);
             cp_e.fill(1.0);

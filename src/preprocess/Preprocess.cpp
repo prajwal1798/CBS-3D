@@ -858,6 +858,80 @@ namespace cbs
     }
 
     //=========================================================================
+    // Builds the persistent nodal material-connectivity mask.
+    //
+    // Each owned tetrahedron contributes one bit to all four of its nodes:
+    //
+    //     node_touches_fluid = 1   mat_elem(e) == 0
+    //     node_touches_solid = 2   mat_elem(e) > 0
+    //
+    // A conformal fluid-solid interface node therefore has mask 3.
+    //
+    // In distributed memory, a shared node may see its fluid tetrahedra on
+    // one rank and its solid tetrahedra on another rank. Ghost contributions
+    // are therefore combined on the owner with bitwise OR and the completed
+    // owner value is subsequently broadcast to all ghost copies.
+    //=========================================================================
+    void Preprocess::buildMaterialNodeMasks(CBSStateSI& s)
+    {
+        validate_core_dimensions(s);
+
+        s.node_material_mask.fill(0);
+
+        for (Int ie = 1; ie <= s.cfg.nelem; ++ie)
+        {
+            const Int material_bit =
+                s.mat_elem(ie) == 0
+                    ? CBSStateSI::node_touches_fluid
+                    : CBSStateSI::node_touches_solid;
+
+            for (Int in = 1; in <= s.cfg.nep; ++in)
+            {
+                const Int ip = s.intma(in, ie);
+
+                if (ip < 1 || ip > s.cfg.npoin)
+                {
+                    throw std::runtime_error(
+                        "Preprocess::buildMaterialNodeMasks - "
+                        "element node is outside the local node range");
+                }
+
+                s.node_material_mask(ip) |= material_bit;
+            }
+        }
+
+#ifdef CBS3D_USE_MPI
+        if (s.mpi_enabled)
+        {
+            HaloExchange::orGhostMasksToOwners(
+                s.node_material_mask,
+                s.partition_metadata);
+
+            HaloExchange::broadcastOwnedToGhosts(
+                s.node_material_mask,
+                s.partition_metadata);
+        }
+#endif
+
+        for (Int ip = 1; ip <= s.cfg.npoin; ++ip)
+        {
+            const Int mask = s.node_material_mask(ip);
+
+            if (mask < CBSStateSI::node_touches_fluid ||
+                mask >
+                    (CBSStateSI::node_touches_fluid |
+                     CBSStateSI::node_touches_solid))
+            {
+                throw std::runtime_error(
+                    "Preprocess::buildMaterialNodeMasks - "
+                    "invalid reconciled material mask at node "
+                    + std::to_string(ip));
+            }
+        }
+    }
+
+
+    //=========================================================================
     // Classifies every tetrahedral face for the CBS boundary correction terms.
     //
     //     fedge = 0   interior face

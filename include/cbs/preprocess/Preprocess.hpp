@@ -56,6 +56,9 @@ namespace cbs
         // lumped-minus-consistent mass correction.
         static void massMatrix(CBSStateSI& s);
 
+        // Build and reconcile each node's fluid/solid connectivity mask.
+        static void buildMaterialNodeMasks(CBSStateSI& s);
+
         // Mark exterior faces as prescribed-velocity or other boundary faces.
         static void classifyFaceEdges(CBSStateSI& s);
 

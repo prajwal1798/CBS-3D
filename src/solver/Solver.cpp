@@ -162,7 +162,11 @@ namespace cbs
         // The first numerically meaningful reverse-add and forward halo stage.
         Preprocess::massMatrix(s_);
 
+        // Reconcile the fluid/solid classification of every shared node.
+        Preprocess::buildMaterialNodeMasks(s_);
+
         auditDistributedPreprocessing();
+        auditDistributedMaterialMasks();
     }
 
 
@@ -777,6 +781,222 @@ namespace cbs
 #else
         throw std::runtime_error(
             "Solver::auditDistributedPreprocessing requires an MPI build");
+#endif
+    }
+
+
+    //=========================================================================
+    // Independently verifies the distributed nodal material masks.
+    //
+    // A global reference mask is constructed directly from the owned
+    // tetrahedra using MPI_BOR over global node IDs. This reference does not
+    // depend on the neighbour halo maps, so it provides an independent check
+    // of the reverse-OR and forward-broadcast implementation.
+    //=========================================================================
+    void Solver::auditDistributedMaterialMasks() const
+    {
+#ifdef CBS3D_USE_MPI
+        const Int global_npoin =
+            static_cast<Int>(s_.partition_metadata.global_npoin);
+
+        if (global_npoin < 1)
+        {
+            throw std::runtime_error(
+                "Distributed material-mask audit found invalid global node count");
+        }
+
+        std::vector<Int> local_reference(
+            static_cast<Size>(global_npoin) + 1U,
+            0);
+
+        std::vector<Int> global_reference(
+            static_cast<Size>(global_npoin) + 1U,
+            0);
+
+        // Construct the independent rank-local contribution in global-node
+        // numbering directly from the owned tetrahedra.
+        for (Int ie = 1; ie <= s_.cfg.nelem; ++ie)
+        {
+            const Int material_bit =
+                s_.mat_elem(ie) == 0
+                    ? CBSStateSI::node_touches_fluid
+                    : CBSStateSI::node_touches_solid;
+
+            for (Int in = 1; in <= s_.cfg.nep; ++in)
+            {
+                const Int ip = s_.intma(in, ie);
+
+                if (ip < 1 || ip > s_.cfg.npoin)
+                {
+                    throw std::runtime_error(
+                        "Distributed material-mask audit found invalid local node");
+                }
+
+                const Size local_index = static_cast<Size>(ip);
+
+                if (local_index >= s_.local_to_global_node.size())
+                {
+                    throw std::runtime_error(
+                        "Distributed material-mask audit found incomplete "
+                        "local-to-global node map");
+                }
+
+                const Int global_id =
+                    s_.local_to_global_node[local_index];
+
+                if (global_id < 1 || global_id > global_npoin)
+                {
+                    throw std::runtime_error(
+                        "Distributed material-mask audit found invalid global node ID");
+                }
+
+                local_reference[static_cast<Size>(global_id)] |=
+                    material_bit;
+            }
+        }
+
+        checkMpi(
+            MPI_Allreduce(
+                local_reference.data(),
+                global_reference.data(),
+                global_npoin + 1,
+                MPI_INT,
+                MPI_BOR,
+                MPI_COMM_WORLD),
+            "MPI_Allreduce global material-mask reference");
+
+        Int local_copy_mismatches = 0;
+
+        for (Int ip = 1; ip <= s_.cfg.npoin; ++ip)
+        {
+            const Size local_index = static_cast<Size>(ip);
+
+            if (local_index >= s_.local_to_global_node.size())
+            {
+                ++local_copy_mismatches;
+                continue;
+            }
+
+            const Int global_id =
+                s_.local_to_global_node[local_index];
+
+            if (global_id < 1 || global_id > global_npoin)
+            {
+                ++local_copy_mismatches;
+                continue;
+            }
+
+            if (s_.node_material_mask(ip) !=
+                global_reference[static_cast<Size>(global_id)])
+            {
+                ++local_copy_mismatches;
+            }
+        }
+
+        Int global_copy_mismatches = 0;
+
+        checkMpi(
+            MPI_Allreduce(
+                &local_copy_mismatches,
+                &global_copy_mismatches,
+                1,
+                MPI_INT,
+                MPI_SUM,
+                MPI_COMM_WORLD),
+            "MPI_Allreduce material-mask mismatches");
+
+        Int local_owned_counts[4] = {0, 0, 0, 0};
+
+        for (const Int ip : s_.owned_nodes)
+        {
+            const Int mask = s_.node_material_mask(ip);
+
+            if (mask >= 0 && mask <= 3)
+            {
+                ++local_owned_counts[mask];
+            }
+            else
+            {
+                ++local_owned_counts[0];
+            }
+        }
+
+        Int global_owned_counts[4] = {0, 0, 0, 0};
+
+        checkMpi(
+            MPI_Allreduce(
+                local_owned_counts,
+                global_owned_counts,
+                4,
+                MPI_INT,
+                MPI_SUM,
+                MPI_COMM_WORLD),
+            "MPI_Allreduce owned material-mask counts");
+
+        Int reference_counts[4] = {0, 0, 0, 0};
+
+        for (Int global_id = 1;
+             global_id <= global_npoin;
+             ++global_id)
+        {
+            const Int mask =
+                global_reference[static_cast<Size>(global_id)];
+
+            if (mask >= 0 && mask <= 3)
+            {
+                ++reference_counts[mask];
+            }
+            else
+            {
+                ++reference_counts[0];
+            }
+        }
+
+        const Int global_owned_total =
+            global_owned_counts[1]
+            + global_owned_counts[2]
+            + global_owned_counts[3];
+
+        const bool counts_match =
+            global_owned_counts[0] == 0
+            && reference_counts[0] == 0
+            && global_owned_counts[1] == reference_counts[1]
+            && global_owned_counts[2] == reference_counts[2]
+            && global_owned_counts[3] == reference_counts[3]
+            && global_owned_total == global_npoin;
+
+        if (global_copy_mismatches != 0 || !counts_match)
+        {
+            throw std::runtime_error(
+                "Distributed material-mask reconciliation failed");
+        }
+
+        if (s_.mpi_rank == 0)
+        {
+            std::cout
+                << "============================================================\n"
+                << "CBS3D DISTRIBUTED MATERIAL MASKS\n"
+                << "============================================================\n"
+                << "MPI ranks                    : " << s_.mpi_size << "\n"
+                << "fluid-only owned nodes       : "
+                << global_owned_counts[1] << "\n"
+                << "solid-only owned nodes       : "
+                << global_owned_counts[2] << "\n"
+                << "fluid-solid interface nodes  : "
+                << global_owned_counts[3] << "\n"
+                << "unique owned nodes           : "
+                << global_owned_total << "\n"
+                << "invalid material masks       : "
+                << global_owned_counts[0] << "\n"
+                << "owner/ghost mask agreement   : PASS\n"
+                << "independent MPI_BOR reference: PASS\n"
+                << "CBS Steps 1 to 4             : NOT STARTED\n"
+                << "RESULT                        : PASS\n"
+                << "============================================================\n";
+        }
+#else
+        throw std::runtime_error(
+            "Solver::auditDistributedMaterialMasks requires an MPI build");
 #endif
     }
 

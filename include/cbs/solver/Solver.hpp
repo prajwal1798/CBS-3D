@@ -80,6 +80,9 @@ namespace cbs
         // with independently integrated rank-local element contributions.
         void auditDistributedPreprocessing() const;
 
+        // Verifies the globally reconciled fluid/solid nodal masks.
+        void auditDistributedMaterialMasks() const;
+
         // Builds the element and global pressure operators used in CBS Step 2.
         void preparePressureSystem();
 
