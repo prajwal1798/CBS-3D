@@ -1,369 +1,173 @@
 # Mathematical formulation and code architecture
 
-This page connects the **continuous equations**, the **weak finite-element form**, the **element algebra**, and the exact **CBS3D++ C++ storage/update path**.
+This page maps the CBS3D++ solver through four levels:
 
-The governing rule is:
+$$\boxed{\text{strong PDE}\;\longrightarrow\;\text{weak finite-element form}\;\longrightarrow\;\text{element algebra}\;\longrightarrow\;\text{C++ arrays and updates}}$$
 
-$$
-\boxed{
-\text{strong PDE}
-\;\longrightarrow\;
-\text{weak form}
-\;\longrightarrow\;
-\text{element residual}
-\;\longrightarrow\;
-\text{assembled arrays and nodal update}
-}
-$$
+The objective is not only to state the CBS equations. Every major term is connected to its test function, tetrahedral coefficient, residual array and update routine.
 
-A numerical operation is not considered fully documented until all four levels can be identified.
+> **Implementation boundary.** CBS3D++ currently uses a semi-implicit incompressible CBS pressure-projection formulation on four-node linear tetrahedra. General CBS notation is shown for context, but the boxed **implemented equations** correspond to the active C++ source.
 
-!!! important "Implemented formulation"
-    CBS3D++ currently implements a **semi-implicit incompressible pressure-projection CBS specialisation** on four-node linear tetrahedra. General CBS equations are included to establish the derivation, but every section distinguishes the general theory from the active C++ implementation.
+## 1. Scope, indices and stored variables
 
-## 1. Scope and conventions
-
-The active solver path supports:
+The active formulation contains:
 
 - three-dimensional incompressible flow;
 - P1 tetrahedral finite elements;
-- element-wise constant material properties;
-- lumped nodal mass/time diagonals;
-- CBS momentum prediction, pressure projection and velocity correction;
-- optional temperature transport in fluid and solid regions;
-- native matrix-free PCG or the current PETSc pressure path;
-- OpenMP-coloured element assembly.
+- element-wise material properties;
+- lumped momentum and thermal mass/time diagonals;
+- CBS momentum prediction, pressure solution and velocity correction;
+- optional fluid-solid temperature transport;
+- optional Spalart-Allmaras transport;
+- OpenMP-coloured element assembly;
+- native matrix-free PCG or PETSc pressure solution.
 
-True physical-time BDF or dual-time integration is not yet a released capability. The active iteration is steady or pseudo-transient.
+The present iteration is steady or pseudo-transient. A validated physical-time BDF or dual-time path is not yet released.
 
 ### 1.1 Indices
 
-Cartesian indices use
+$$i,j,k\in\{1,2,3\},\qquad x_1=x,\quad x_2=y,\quad x_3=z.$$
 
-$$
- i,j,k\in\{1,2,3\},
- \qquad
- x_1=x,\;x_2=y,\;x_3=z.
-$$
+Local tetrahedral nodes are $a,b\in\{1,2,3,4\}$, elements are indexed by $e$, and global mesh nodes by $I,J$.
 
-Local tetrahedral nodes use $a,b\in\{1,2,3,4\}$, elements use $e$, and global nodes use $I,J$.
+### 1.2 Conservative theory variable and code variable
 
-### 1.2 Theory variables versus stored variables
+CBS derivations commonly introduce momentum per unit volume,
 
-The conservative CBS literature often introduces momentum per unit volume
+$$U_i=\rho u_i.$$
 
-$$
-U_i=\rho u_i.
-$$
+The active arrays `unkn1` and `unkno` store velocity components $u_i$, not a separate conservative momentum field. Code-aligned equations below therefore use velocity form after division by density where required.
 
-The active C++ arrays `unkn1` and `unkno` store **velocity components**, not a separate conservative-momentum field. Consequently, code-aligned equations below are written in velocity form after the momentum equation has been divided by density where required.
-
-| Mathematical meaning | C++ storage |
+| Mathematical quantity | C++ representation |
 |---|---|
 | coordinates $x_i$ | `coord(i,I)` |
 | local-to-global map $I=I_e(a)$ | `intma(a,e)` |
-| shape gradients $N_{a,i}^{(e)}$ | flattened `dNkdx` |
-| Jacobian determinant $\det J_e$ | `detJ(e)` |
+| $N_{a,i}^{(e)}=\partial N_a/\partial x_i$ | flattened `dNkdx` |
+| $\det J_e=6V_e$ | `detJ(e)` |
 | previous velocity $u_i^n$ | `unkn1(i,I)` |
-| predictor/corrected velocity | `unkno(i,I)` |
+| predicted/corrected velocity | `unkno(i,I)` |
 | pressure $p$ | `pres(I)` |
 | previous temperature $T^n$ | `temperature1(I)` |
 | updated temperature | `temperature(I)` |
-| Step-1 or Step-3 vector residual | `rhs(i,I)` |
-| Step-2 pressure or Step-4 thermal residual | `rhs1(I)` |
+| Step-1 or Step-3 residual | `rhs(i,I)` |
+| Step-2 or Step-4 residual | `rhs1(I)` |
 | local element time scale $\Delta t_e$ | `delte(e)` |
-| inverse fluid mass/time diagonal $D_u^{-1}$ | `elcoe2(I)` |
-| inverse thermal capacitance/time diagonal $D_T^{-1}$ | `elcoe2p(I)` |
+| $D_u^{-1}$ | `elcoe2(I)` |
+| $D_T^{-1}$ | `elcoe2p(I)` |
 
-The work arrays `rhs` and `rhs1` are deliberately reused. Their mathematical interpretation therefore depends on the active CBS step.
+`rhs` and `rhs1` are work arrays. Their mathematical meaning changes with the CBS stage, so documentation must identify the active step whenever either name is used.
 
 ## 2. Governing equations
 
-### 2.1 Incompressible continuity
+### 2.1 Continuity
 
-$$
-\boxed{
-\frac{\partial u_i}{\partial x_i}=0
-}
-$$
+For incompressible flow,
 
-or, in vector form,
-
-$$
-\nabla\!\cdot\mathbf{u}=0.
-$$
+$$\boxed{\frac{\partial u_i}{\partial x_i}=0}\qquad\Longleftrightarrow\qquad\boxed{\nabla\!\cdot\mathbf{u}=0}.$$
 
 ### 2.2 Momentum
 
-The incompressible Newtonian momentum equation is
+The general incompressible Newtonian momentum equation is
 
-$$
-\rho
-\left(
-\frac{\partial u_i}{\partial t}
-+u_j\frac{\partial u_i}{\partial x_j}
-\right)
-=
--\frac{\partial p}{\partial x_i}
-+\frac{\partial \tau_{ij}}{\partial x_j}
-+\rho b_i.
-$$
+$$\rho\left(\frac{\partial u_i}{\partial t}+u_j\frac{\partial u_i}{\partial x_j}\right)=-\frac{\partial p}{\partial x_i}+\frac{\partial\tau_{ij}}{\partial x_j}+\rho b_i.$$
 
 The complete Newtonian deviatoric stress is
 
-$$
-\tau_{ij}
-=
-\mu
-\left(
-\frac{\partial u_i}{\partial x_j}
-+
-\frac{\partial u_j}{\partial x_i}
--
-\frac{2}{3}\delta_{ij}
-\frac{\partial u_k}{\partial x_k}
-\right).
-$$
+$$\tau_{ij}=\mu\left(\frac{\partial u_i}{\partial x_j}+\frac{\partial u_j}{\partial x_i}-\frac{2}{3}\delta_{ij}\frac{\partial u_k}{\partial x_k}\right).$$
 
-For an exactly divergence-free field, the final isotropic term vanishes. However, the Step-1 predictor is not pointwise divergence-free before pressure correction.
+The active `MomentumAssembly.cpp` diffusion kernel does **not** assemble this complete tensor. It currently contracts $\nabla N_a$ with $\nabla u_i$, which corresponds to a component-wise Laplacian:
 
-!!! warning "Active diffusion operator"
-    `MomentumAssembly.cpp` currently assembles a **component-wise velocity Laplacian**,
+$$\boxed{\left.\frac{\partial u_i}{\partial t}\right|_{\mathrm{diff}}=\nu\nabla^2u_i}.$$
 
-    $$
-    \nu\,\nabla^2 u_i,
-    $$
+Body force belongs to the governing equation but is not assembled in the current Step-1 core.
 
-    through $\nabla N_a\cdot\nabla u_i$. It does not currently assemble the complete symmetric-gradient/deviatoric-stress operator. The documentation follows the active code rather than silently substituting the more general stress form.
+### 2.3 Temperature
 
-Body force is part of the governing equation but is not assembled in the current Step-1 core.
+For a fluid element,
 
-### 2.3 Temperature equation
+$$\boxed{\rho c_p\left(\frac{\partial T}{\partial t}+u_i\frac{\partial T}{\partial x_i}\right)=\frac{\partial}{\partial x_i}\left(k\frac{\partial T}{\partial x_i}\right)+Q}.$$
 
-For fluid elements,
+For a solid element, $\mathbf{u}=\mathbf{0}$ and only transient/pseudo-transient conduction remains:
 
-$$
-\boxed{
-\rho c_p
-\left(
-\frac{\partial T}{\partial t}
-+u_i\frac{\partial T}{\partial x_i}
-\right)
-=
-\frac{\partial}{\partial x_i}
-\left(
- k\frac{\partial T}{\partial x_i}
-\right)
-+Q
-}
-$$
+$$\rho c_p\frac{\partial T}{\partial t}=\nabla\!\cdot(k\nabla T)+Q.$$
 
-For solid elements, $\mathbf{u}=\mathbf{0}$ and the equation reduces to transient/pseudo-transient heat conduction:
+At a conformal fluid-solid interface, both materials share one nodal temperature degree of freedom. Diffusion is assembled from the adjacent fluid and solid elements; no duplicate interface temperature is introduced.
 
-$$
-\rho c_p\frac{\partial T}{\partial t}
-=
-\nabla\!\cdot(k\nabla T)+Q.
-$$
-
-A conformal fluid-solid interface shares the same nodal temperature unknown. Diffusion is assembled from both adjacent materials; no duplicate interface temperature is introduced.
-
-## 3. P1 tetrahedral finite-element architecture
+## 3. P1 tetrahedral finite elements
 
 ### 3.1 Interpolation
 
-For one four-node tetrahedron $\Omega_e$,
+For a four-node tetrahedron $\Omega_e$,
 
-$$
- u_i^h(\mathbf{x})
- =\sum_{a=1}^{4}N_a(\mathbf{x})u_{i,a},
- \qquad
- p^h(\mathbf{x})
- =\sum_{a=1}^{4}N_a(\mathbf{x})p_a,
-$$
+$$u_i^h(\mathbf{x})=\sum_{a=1}^{4}N_a(\mathbf{x})u_{i,a},\qquad p^h(\mathbf{x})=\sum_{a=1}^{4}N_a(\mathbf{x})p_a,\qquad T^h(\mathbf{x})=\sum_{a=1}^{4}N_a(\mathbf{x})T_a.$$
 
-$$
- T^h(\mathbf{x})
- =\sum_{a=1}^{4}N_a(\mathbf{x})T_a.
-$$
+The affine physical map is
 
-The physical map is
+$$\mathbf{x}=\mathbf{x}_1+J_e\begin{bmatrix}\xi&\eta&\zeta\end{bmatrix}^{T},\qquad J_e=\begin{bmatrix}x_2-x_1&x_3-x_1&x_4-x_1\\y_2-y_1&y_3-y_1&y_4-y_1\\z_2-z_1&z_3-z_1&z_4-z_1\end{bmatrix}.$$
 
-$$
-\mathbf{x}
-=
-\mathbf{x}_1
-+J_e
-\begin{bmatrix}
-\xi\\[2pt]\eta\\[2pt]\zeta
-\end{bmatrix},
-$$
+The positive-orientation convention gives
 
-with
+$$\boxed{V_e=\frac{\det J_e}{6}}.$$
 
-$$
-J_e=
-\begin{bmatrix}
- x_2-x_1 & x_3-x_1 & x_4-x_1\\
- y_2-y_1 & y_3-y_1 & y_4-y_1\\
- z_2-z_1 & z_3-z_1 & z_4-z_1
-\end{bmatrix}.
-$$
+### 3.2 Constant gradients and flattened storage
 
-The element volume is
+For P1 tetrahedra,
 
-$$
-\boxed{
-V_e=\frac{\det J_e}{6}
-}
-$$
+$$N_{a,i}^{(e)}\equiv\frac{\partial N_a}{\partial x_i}=\text{constant in }\Omega_e.$$
 
-for the positive-orientation convention enforced by preprocessing.
+Hence
 
-### 3.2 Constant shape gradients
+$$\left.\frac{\partial u_i^h}{\partial x_j}\right|_e=\sum_{a=1}^{4}u_{i,a}N_{a,j}^{(e)},\qquad\left.\frac{\partial p^h}{\partial x_i}\right|_e=\sum_{a=1}^{4}p_aN_{a,i}^{(e)}.$$
 
-For a P1 tetrahedron,
+The code flattens the logical object $N_{a,i}^{(e)}$ using
 
-$$
-N_{a,i}^{(e)}
-\equiv
-\frac{\partial N_a}{\partial x_i}
-=
-\text{constant in }\Omega_e.
-$$
+$$\mathcal{I}(e,i,a)=(e-1)(3)(4)+(i-1)(4)+a.$$
 
-Therefore,
-
-$$
-\frac{\partial u_i^h}{\partial x_j}
-=
-\sum_{a=1}^{4}u_{i,a}N_{a,j}^{(e)},
-\qquad
-\frac{\partial p^h}{\partial x_i}
-=
-\sum_{a=1}^{4}p_aN_{a,i}^{(e)},
-$$
-
-and both gradients are constant inside one element.
-
-The flattened storage address is
-
-$$
-\mathcal{I}(e,i,a)
-=
-(e-1)(3)(4)+(i-1)(4)+a.
-$$
-
-This is implemented by `dNkdx_index(...)`; the values themselves reside in `s.dNkdx`.
+`dNkdx_index(...)` computes this address; the derivative values are stored in `s.dNkdx`.
 
 ### 3.3 Exact integration identities
 
-The constants used throughout the code follow from exact P1 integration:
+The principal P1 tetrahedral identities are
 
-$$
-\int_{\Omega_e}N_a\,d\Omega
-=\frac{V_e}{4}
-=\frac{\det J_e}{24},
-$$
+$$\int_{\Omega_e}N_a\,d\Omega=\frac{V_e}{4}=\frac{\det J_e}{24}.$$
 
-$$
-\int_{\Omega_e}N_a^2\,d\Omega
-=\frac{V_e}{10},
-\qquad
-\int_{\Omega_e}N_aN_b\,d\Omega
-=\frac{V_e}{20}
-\quad(a\ne b),
-$$
+$$\int_{\Omega_e}N_a^2\,d\Omega=\frac{V_e}{10},\qquad\int_{\Omega_e}N_aN_b\,d\Omega=\frac{V_e}{20}\quad(a\ne b).$$
 
-$$
-\int_{\Gamma_f}N_a\,d\Gamma
-=\frac{A_f}{3},
-$$
+For a triangular face $\Gamma_f$,
 
-$$
-\int_{\Gamma_f}N_a^2\,d\Gamma
-=\frac{A_f}{6},
-\qquad
-\int_{\Gamma_f}N_aN_b\,d\Gamma
-=\frac{A_f}{12}
-\quad(a\ne b).
-$$
+$$\int_{\Gamma_f}N_a\,d\Gamma=\frac{A_f}{3},\qquad\int_{\Gamma_f}N_a^2\,d\Gamma=\frac{A_f}{6},\qquad\int_{\Gamma_f}N_aN_b\,d\Gamma=\frac{A_f}{12}\quad(a\ne b).$$
 
-These identities explain the principal code factors:
+These explain the code constants:
 
-| Code quantity | Mathematical value |
-|---|---:|
+| Code expression | FEM meaning |
+|---|---|
 | `detJ * fcon[1]` | $\det J_e/24=V_e/4$ |
-| `fcon[2]` | $1/12$ for consistent triangular-face integration |
+| `fcon[2]` | $1/12$ for consistent triangular-face interpolation |
 | `detJ * fdif[1]` | $\det J_e/6=V_e$ |
 | `fdif[2]` | $1/3$ for $\int_{\Gamma_f}N_a\,d\Gamma$ |
 
-### 3.4 Consistent and lumped mass
+### 3.4 Consistent mass, lumping and time diagonals
 
 The consistent scalar element mass matrix is
 
-$$
-M^{(e)}
-=
-\frac{V_e}{20}
-\begin{bmatrix}
-2&1&1&1\\
-1&2&1&1\\
-1&1&2&1\\
-1&1&1&2
-\end{bmatrix}.
-$$
+$$M^{(e)}=\frac{V_e}{20}\begin{bmatrix}2&1&1&1\\1&2&1&1\\1&1&2&1\\1&1&1&2\end{bmatrix}.$$
 
 Row-sum lumping gives
 
-$$
-\boxed{
-M_L^{(e)}=\frac{V_e}{4}I_4
-}
-$$
+$$\boxed{M_L^{(e)}=\frac{V_e}{4}I_4}.$$
 
-and preprocessing stores
+Preprocessing stores $V_e/4$ in `elcoe_e(e,a)`. The field updates do not use a general $M^{-1}$; they use time-dependent diagonal inverses:
 
-$$
-\texttt{elcoe\_e}(e,a)=\frac{V_e}{4}.
-$$
+$$[D_u]_{II}=\sum_{e\ni I,\;e\in\Omega_f}\frac{V_e/4}{\Delta t_e},\qquad\boxed{\texttt{elcoe2}(I)=[D_u]_{II}^{-1}}.$$
 
-The active momentum diagonal is not merely $M_L^{-1}$. The local element time scale is already incorporated:
+$$[D_T]_{II}=\sum_{e\ni I}\frac{(\rho c_p)_eV_e/4}{\Delta t_e},\qquad\boxed{\texttt{elcoe2p}(I)=[D_T]_{II}^{-1}}.$$
 
-$$
-[D_u]_{II}
-=
-\sum_{e\ni I,\;e\in\Omega_f}
-\frac{V_e/4}{\Delta t_e},
-$$
+Only fluid elements contribute to $D_u$; fluid and solid elements contribute to $D_T$.
 
-$$
-\boxed{
-\texttt{elcoe2}(I)=[D_u]_{II}^{-1}
-}
-$$
-
-Only fluid elements contribute. For temperature,
-
-$$
-[D_T]_{II}
-=
-\sum_{e\ni I}
-\frac{(\rho c_p)_eV_e/4}{\Delta t_e},
-$$
-
-$$
-\boxed{
-\texttt{elcoe2p}(I)=[D_T]_{II}^{-1}
-}
-$$
-
-and both fluid and solid elements contribute.
-
-## 4. Global CBS data flow
+## 4. Solver information flow
 
 ```text
-coord, intma, iside
+mesh: coord, intma, iside
         │
         ▼
 geometry preprocessing
@@ -384,90 +188,31 @@ TimeStep::updateLhsDiagonal
         └── Step 4: EnergyAssembly          → T^(n+1)
 ```
 
-At the beginning of one CBS iteration,
-
-$$
-\texttt{unkn1}=\mathbf{u}^n,
-\qquad
-\texttt{temperature1}=T^n.
-$$
-
-After Step 1, `unkno` means $\mathbf{u}^*$. After Step 3, the same array means $\mathbf{u}^{n+1}$.
+At the start of an iteration, `unkn1` represents $\mathbf{u}^n$ and `temperature1` represents $T^n$. After Step 1, `unkno` represents $\mathbf{u}^*$; after Step 3, the same array represents $\mathbf{u}^{n+1}$.
 
 ## 5. CBS Step 1: pressure-free momentum predictor
 
 ### 5.1 General CBS interpretation
 
-Let the non-pressure momentum operator be
+After division by density, define the non-pressure operator
 
-$$
-R_i(\mathbf{u})
-=
--\frac{\partial (u_ju_i)}{\partial x_j}
-+\nu\nabla^2u_i
-+b_i.
-$$
+$$R_i(\mathbf{u})=-\frac{\partial(u_ju_i)}{\partial x_j}+\nu\nabla^2u_i+b_i.$$
 
-A characteristic expansion gives a pressure-free increment of the form
+A characteristic expansion has the structure
 
-$$
-\Delta u_i^*
-=
-\Delta t\,R_i^n
--
-\frac{\Delta t^2}{2}
-\frac{\partial}{\partial x_k}
-\left(u_kR_i^n\right)
-+\cdots.
-$$
+$$\Delta u_i^*=\Delta t\,R_i^n-\frac{\Delta t^2}{2}\frac{\partial}{\partial x_k}\left(u_kR_i^n\right)+\cdots.$$
 
-The active implementation retains:
+The active implementation retains Galerkin convection, the convective characteristic correction and component-wise viscous diffusion. It omits body force, artificial diffusion and characteristic derivatives of viscous/body-force terms.
 
-- Galerkin convection;
-- the convective characteristic correction;
-- component-wise viscous diffusion.
+### 5.2 Implemented nodal equation
 
-It does not currently retain body force, artificial diffusion, or characteristic derivatives of viscous/body-force terms.
+The Step-1 element residuals assemble into
 
-### 5.2 Code-level nodal equation
+$$\boxed{D_u\left(\mathbf{u}^*-\mathbf{u}^n\right)=\mathbf{r}_m},\qquad\mathbf{r}_m=\mathbf{r}_{\mathrm{conv}}+\mathbf{r}_{\mathrm{char}}+\mathbf{r}_{\mathrm{diff}}.$$
 
-The assembled Step-1 equation is
+The nodal update is
 
-$$
-\boxed{
-D_u
-\left(
-\mathbf{u}^*-\mathbf{u}^n
-\right)
-=
-\mathbf{r}_m
-}
-$$
-
-with
-
-$$
-\mathbf{r}_m
-=
-\mathbf{r}_{\mathrm{conv}}
-+
-\mathbf{r}_{\mathrm{char}}
-+
-\mathbf{r}_{\mathrm{diff}}.
-$$
-
-The nodal update in `Steps::step1SemiImplicit()` is
-
-$$
-\boxed{
-\mathbf{u}^*
-=
-\mathbf{u}^n
-+D_u^{-1}\mathbf{r}_m
-}
-$$
-
-which maps directly to
+$$\boxed{\mathbf{u}^*=\mathbf{u}^n+D_u^{-1}\mathbf{r}_m}.$$
 
 ```cpp
 s.unkno(idim, ip) =
@@ -477,262 +222,138 @@ s.unkno(idim, ip) =
 
 ### 5.3 Galerkin convection
 
-Define the nodal momentum-flux product
+At local node $b$, define the momentum-flux product
 
-$$
-F_{ij,a}=u_{j,a}u_{i,a}.
-$$
+$$F_{ij,b}=u_{j,b}u_{i,b}.$$
 
-The strong convective contribution to the Step-1 right-hand side is
+The strong Step-1 convective contribution is $-\partial F_{ij}/\partial x_j$. Multiplication by $N_a$ and integration by parts gives
 
-$$
--\frac{\partial F_{ij}}{\partial x_j}.
-$$
-
-Multiplying by test function $N_a$ and integrating by parts gives
-
-$$
-r_{\mathrm{conv},i,a}^{(e)}
-=
-\int_{\Omega_e}
-N_{a,j}F_{ij}\,d\Omega
--
-\int_{\Gamma_e}
-N_aF_{ij}n_j\,d\Gamma.
-$$
+$$r_{\mathrm{conv},i,a}^{(e)}=\int_{\Omega_e}N_{a,j}F_{ij}\,d\Omega-\int_{\Gamma_e}N_aF_{ij}n_j\,d\Gamma.$$
 
 With $F_{ij}^h=N_bF_{ij,b}$ and constant $N_{a,j}$,
 
-$$
-\boxed{
-r_{\mathrm{conv},i,a}^{(e),\Omega}
-=
-N_{a,j}^{(e)}
-\frac{V_e}{4}
-\sum_{b=1}^{4}F_{ij,b}
-}
-$$
+$$\boxed{r_{\mathrm{conv},i,a}^{(e),\Omega}=N_{a,j}^{(e)}\frac{V_e}{4}\sum_{b=1}^{4}F_{ij,b}}.$$
 
-This is the exact meaning of `lunksum[i][j]` and the code line
+Theory-to-code correspondence:
 
-```cpp
-lrhs[i][a] +=
-    grad(s, ie, j, a)
-    * volume_factor
-    * lunksum[i][j];
-```
+| Mathematical operation | C++ object |
+|---|---|
+| gather $u_{i,b}^n$ | `lunkno[i][b]` from `unkn1` |
+| form $F_{ij,b}$ | `lunk[i][j][b]` |
+| compute $\sum_bF_{ij,b}$ | `lunksum[i][j]` |
+| $N_{a,j}^{(e)}$ | `grad(s,ie,j,a)` |
+| $V_e/4$ | `volume_factor = detJ * fcon[1]` |
+| local residual | `lrhs[i][a]` |
+| global assembly | `rhs(i,I) += lrhs[i][a]` |
 
-where `volume_factor = detJ/24 = V_e/4`.
-
-For a triangular face, consistent interpolation produces the $A_f/12$ factor used with `annxf` and `fcon[2]`.
+The face term uses the consistent $A_f/12$ coefficient through `annxf` and `fcon[2]`.
 
 ### 5.4 Characteristic correction
 
-The implemented volume correction is
+The implemented volume contribution is
 
-$$
-\boxed{
-r_{\mathrm{char},i,a}^{(e),\Omega}
-=
--\frac{\Delta t_e}{2}
-\int_{\Omega_e}
-N_{a,k}\,\bar u_k
-\frac{\partial F_{ij}}{\partial x_j}
-\,d\Omega
-}
-$$
+$$\boxed{r_{\mathrm{char},i,a}^{(e),\Omega}=-\frac{\Delta t_e}{2}\int_{\Omega_e}N_{a,k}\,\bar u_k\,\frac{\partial F_{ij}}{\partial x_j}\,d\Omega}.$$
 
-where
+The element-average velocity is
 
-$$
-\bar u_k
-=
-\frac{1}{4}
-\sum_{a=1}^{4}u_{k,a}.
-$$
+$$\bar u_k=\frac{1}{4}\sum_{a=1}^{4}u_{k,a}.$$
 
-Using constant P1 gradients and the element-average velocity,
+Because the adopted gradients and averages are constant in a P1 element,
 
-$$
-r_{\mathrm{char},i,a}^{(e),\Omega}
-=
--\frac{\Delta t_e}{2}
-V_e
-N_{a,k}^{(e)}\bar u_k
-\frac{\partial F_{ij}}{\partial x_j}.
-$$
+$$r_{\mathrm{char},i,a}^{(e),\Omega}=-\frac{\Delta t_e}{2}V_eN_{a,k}^{(e)}\bar u_k\frac{\partial F_{ij}}{\partial x_j}.$$
 
-The code factor
+The code factor is therefore
 
-$$
-\texttt{ldelte}
-=
-\frac{1}{2}\Delta t_e\det J_e\left(\frac{1}{6}\right)
-=
-\frac{1}{2}\Delta t_eV_e
-$$
+$$\texttt{ldelte}=\frac{1}{2}\Delta t_e\det J_e\left(\frac{1}{6}\right)=\frac{1}{2}\Delta t_eV_e.$$
 
-is therefore not arbitrary; it is the exact constant-element integral.
+This maps to `umean`, `lunksum`, `lunksumk`, `ldelte` and `step1_characteristic_correction(...)`.
 
 ### 5.5 Viscous diffusion
 
-The active velocity gradient is
+The constant element velocity gradient is
 
-$$
-\left.\frac{\partial u_i}{\partial x_j}\right|_e
-=
-\sum_{b=1}^{4}u_{i,b}N_{b,j}^{(e)}.
-$$
+$$\left.\frac{\partial u_i}{\partial x_j}\right|_e=\sum_{b=1}^{4}u_{i,b}N_{b,j}^{(e)}.$$
 
-The implemented weak volume term is
+The implemented weak volume residual is
 
-$$
-\boxed{
-r_{\mathrm{diff},i,a}^{(e),\Omega}
-=
--\nu_eV_e
-N_{a,j}^{(e)}
-\frac{\partial u_i}{\partial x_j}
-}
-$$
+$$\boxed{r_{\mathrm{diff},i,a}^{(e),\Omega}=-\nu_eV_eN_{a,j}^{(e)}\left.\frac{\partial u_i}{\partial x_j}\right|_e}.$$
 
-with
+The diffusivity is
 
-$$
-\nu_e=
-\begin{cases}
-\mu_e/\rho_e, & \text{dimensional material mode},\\[4pt]
-\texttt{ani}, & \text{non-dimensional mode}.
-\end{cases}
-$$
+$$\nu_e=\begin{cases}\mu_e/\rho_e,&\text{dimensional material mode},\\\texttt{ani},&\text{non-dimensional mode}.\end{cases}$$
 
-This maps to `dNuidxj`, `momentum_diffusivity(...)`, `fdif[1]`, and `step1_diffusion(...)`.
+This maps to `dNuidxj`, `momentum_diffusivity(...)`, `fdif[1]` and `step1_diffusion(...)`.
 
-### 5.6 Step-1 theory-to-code map
+### 5.6 Step-1 code contract
 
-| Theory object | Element/C++ representation |
+| Item | Meaning |
 |---|---|
-| $u_i^n$ | gathered from `unkn1(i,I)` into `lunkno[i][a]` |
-| $F_{ij,a}=u_{j,a}u_{i,a}$ | `lunk[i][j][a]` |
-| $r_{\mathrm{conv}}^{(e)}$ | `step1_convective_galerkin(...)` |
-| $r_{\mathrm{char}}^{(e)}$ | `step1_characteristic_correction(...)` |
-| $r_{\mathrm{diff}}^{(e)}$ | `step1_diffusion(...)` |
-| local residual $r_{m,i,a}^{(e)}$ | `lrhs[i][a]` |
-| assembled $r_{m,i,I}$ | `rhs(i,I)` |
-| $D_u^{-1}$ | `elcoe2(I)` |
-| $u_i^*$ | `unkno(i,I)` after Step 1 |
+| routine | `MomentumAssembly::assembleStep1Rhs` |
+| domain | fluid elements only: `mat_elem(e) == 0` |
+| reads | `unkn1`, `intma`, `dNkdx`, `detJ`, `delte`, face geometry and material data |
+| writes | `rhs` |
+| update routine | `Steps::step1SemiImplicit` |
+| post-update action | reapply symmetry, velocity/wall, backflow and solid-zero constraints |
 
-Element colouring changes only execution order and race avoidance; it does not alter the finite-element assembly operator.
+Element colouring is an execution strategy for race-free scatter; it does not change the finite-element operator.
 
 ## 6. CBS Step 2: pressure equation
 
-### 6.1 From continuity to a Poisson system
+### 6.1 Projection equation
 
-The pressure correction is chosen so that the corrected velocity satisfies continuity. In the active algebraic convention, the code solves
+The pressure field is chosen so that the Step-3 corrected velocity satisfies continuity. The active algebraic system is
 
-$$
-\boxed{
-A_p\mathbf{p}=\mathbf{b}_p
-}
-$$
+$$\boxed{A_p\mathbf{p}=\mathbf{b}_p}.$$
 
-where the local time factor is stored in the pressure operator rather than dividing the right-hand side by a global time step.
+The local time scale is carried by $A_p$, while $\mathbf{b}_p$ is the raw weak divergence of the predictor.
 
 ### 6.2 Element pressure stiffness
 
 The pressure stiffness matrix is
 
-$$
-H_{ab}^{(e)}
-=
-\int_{\Omega_e}
-\nabla N_a\cdot\nabla N_b
-\,d\Omega.
-$$
+$$H_{ab}^{(e)}=\int_{\Omega_e}\nabla N_a\!\cdot\nabla N_b\,d\Omega.$$
 
-Because the gradients are constant,
+Since the P1 gradients are constant,
 
-$$
-\boxed{
-H_{ab}^{(e)}
-=
-V_e
-N_{a,i}^{(e)}N_{b,i}^{(e)}
-}
-$$
+$$\boxed{H_{ab}^{(e)}=V_eN_{a,i}^{(e)}N_{b,i}^{(e)}}.$$
 
-`PressureAssembly::buildElementPressureTerms()` stores:
-
-- the four diagonal entries in `pdiagE`;
-- the six unique off-diagonal entries in `gstifE`;
-- the pair order $(1,2),(1,3),(1,4),(2,3),(2,4),(3,4)$.
+`PressureAssembly::buildElementPressureTerms()` stores the four diagonal coefficients in `pdiagE` and the six unique off-diagonal coefficients in `gstifE`, ordered as $(1,2),(1,3),(1,4),(2,3),(2,4),(3,4)$.
 
 The time-scaled element operator is
 
-$$
-\boxed{
-A_p^{(e)}
-=
-\Delta t_eH^{(e)}
-}
-$$
+$$\boxed{A_p^{(e)}=\Delta t_eH^{(e)}}.$$
 
-and `TimeStep::updateLhsDiagonal()` forms `pdiag` and `gstif` from `pdiagE` and `gstifE`.
+`TimeStep::updateLhsDiagonal()` forms the active `pdiag` and `gstif` arrays from `pdiagE` and `gstifE`.
 
 ### 6.3 Pressure right-hand side
 
-The element volume contribution is the weak divergence of the predictor:
+The element volume term is
 
-$$
-b_{p,a}^{(e),\Omega}
-=
-\int_{\Omega_e}
-\nabla N_a\cdot\mathbf{u}^*
-\,d\Omega.
-$$
+$$b_{p,a}^{(e),\Omega}=\int_{\Omega_e}\nabla N_a\!\cdot\mathbf{u}^*\,d\Omega.$$
 
 With linear velocity interpolation,
 
-$$
-\boxed{
-b_{p,a}^{(e),\Omega}
-=
-N_{a,i}^{(e)}
-\frac{V_e}{4}
-\sum_{b=1}^{4}u_{i,b}^*
-}
-$$
+$$\boxed{b_{p,a}^{(e),\Omega}=N_{a,i}^{(e)}\frac{V_e}{4}\sum_{b=1}^{4}u_{i,b}^*}.$$
 
-This maps directly to `u_sum`, `vol4`, `lrhs`, and finally `rhs1` in `PressureAssembly::assembleStep2Rhs()`.
+This maps to `u_sum`, `vol4`, `lrhs` and the assembled `rhs1` in `PressureAssembly::assembleStep2Rhs()`.
 
-!!! important "Time-step convention"
-    The pressure RHS is the **raw weak divergence**. It is not divided by `dtreal` in `assembleStep2Rhs()`. The time scale is already carried by $A_p^{(e)}=\Delta t_eH^{(e)}$ and by the Step-3 mass/time diagonal. Moving the factor to the RHS without changing the other stages would change the method.
+> **Time-step convention.** `rhs1` is not divided by `dtreal`. The time factor is already embedded in $A_p^{(e)}=\Delta t_eH^{(e)}$ and in the Step-3 diagonal update. Moving this factor independently changes the numerical method.
 
-### 6.4 Pressure constraints
+### 6.4 Pressure space and constraints
 
-Pressure is active at a node if the node belongs to at least one fluid element. A pressure node is free when it is active and not prescribed:
+A pressure node is free when it belongs to at least one fluid element and is not prescribed:
 
-$$
-\mathrm{free}(I)
-=
-\mathrm{active}(I)
-\land
-\neg\mathrm{fixed}(I).
-$$
+$$\operatorname{free}(I)=\operatorname{active}(I)\land\neg\operatorname{fixed}(I).$$
 
-Solid-only nodes are excluded from the pressure space. Prescribed pressure nodes are enforced algebraically. A pressure reference or equivalent null-space treatment is required when all pressure boundaries are Neumann.
+Solid-only nodes are excluded from the pressure space. Prescribed pressure nodes are imposed algebraically. A reference pressure or equivalent null-space treatment is required for an all-Neumann pressure boundary configuration.
 
-### 6.5 Matrix-free multiplication
+### 6.5 Matrix-free operator
 
-For the native solver, a global CSR matrix is not required. The off-diagonal element contributions are scattered, followed by the assembled diagonal action:
+The native solver applies
 
-$$
-\boxed{
-\mathbf{y}=A_p\mathbf{x}
-}
-$$
+$$\boxed{\mathbf{y}=A_p\mathbf{x}}$$
 
-with `gstif` providing the six compact off-diagonal pairs and `pdiag` providing the global diagonal. The same pair ordering must be used by assembly and `MatrixVectorCalc::pressureMultiply()`.
+without constructing a global CSR matrix. Element off-diagonal actions use `gstif`; the assembled diagonal action uses `pdiag`. The compact pair order must be identical in pressure assembly and `MatrixVectorCalc::pressureMultiply()`.
 
 ### 6.6 Step-2 theory-to-code map
 
@@ -740,71 +361,29 @@ with `gstif` providing the six compact off-diagonal pairs and `pdiag` providing 
 |---|---|
 | $H_{aa}^{(e)}$ | `pdiagE` |
 | six $H_{ab}^{(e)}$, $a<b$ | `gstifE` |
-| $A_p^{(e)}=\Delta t_eH^{(e)}$ | `gstif` plus assembled `pdiag` |
+| $A_p^{(e)}=\Delta t_eH^{(e)}$ | `gstif` and assembled `pdiag` |
 | $\mathbf{b}_p$ | `rhs1` during Step 2 |
-| pressure-active/fixed masks | pressure-space classification in solver state |
 | $A_p\mathbf{x}$ | matrix-free pressure multiplication |
-| $\mathbf{p}$ | `pres` |
+| pressure solution | `pres` |
+| solver selection | native PCG or PETSc in `Steps::step2SemiImplicit` |
 
 ## 7. Native preconditioned conjugate gradient
 
-For an initial pressure guess $\mathbf{p}_0$,
+Given an initial pressure estimate $\mathbf{p}_0$,
 
-$$
-\mathbf{r}_0
-=
-\mathbf{b}_p-A_p\mathbf{p}_0,
-$$
-
-$$
-M\mathbf{z}_0=\mathbf{r}_0,
-\qquad
-\mathbf{d}_0=\mathbf{z}_0.
-$$
+$$\mathbf{r}_0=\mathbf{b}_p-A_p\mathbf{p}_0,\qquad M\mathbf{z}_0=\mathbf{r}_0,\qquad\mathbf{d}_0=\mathbf{z}_0.$$
 
 At iteration $k$,
 
-$$
-\alpha_k
-=
-\frac{\mathbf{r}_k^T\mathbf{z}_k}
-     {\mathbf{d}_k^TA_p\mathbf{d}_k},
-$$
+$$\alpha_k=\frac{\mathbf{r}_k^T\mathbf{z}_k}{\mathbf{d}_k^TA_p\mathbf{d}_k},\qquad\mathbf{p}_{k+1}=\mathbf{p}_k+\alpha_k\mathbf{d}_k.$$
 
-$$
-\mathbf{p}_{k+1}
-=
-\mathbf{p}_k+\alpha_k\mathbf{d}_k,
-$$
-
-$$
-\mathbf{r}_{k+1}
-=
-\mathbf{r}_k-\alpha_kA_p\mathbf{d}_k,
-$$
-
-$$
-\beta_k
-=
-\frac{\mathbf{r}_{k+1}^T\mathbf{z}_{k+1}}
-     {\mathbf{r}_k^T\mathbf{z}_k},
-$$
-
-$$
-\mathbf{d}_{k+1}
-=
-\mathbf{z}_{k+1}+\beta_k\mathbf{d}_k.
-$$
+$$\mathbf{r}_{k+1}=\mathbf{r}_k-\alpha_kA_p\mathbf{d}_k,\qquad\beta_k=\frac{\mathbf{r}_{k+1}^T\mathbf{z}_{k+1}}{\mathbf{r}_k^T\mathbf{z}_k},\qquad\mathbf{d}_{k+1}=\mathbf{z}_{k+1}+\beta_k\mathbf{d}_k.$$
 
 For Jacobi preconditioning,
 
-$$
-M=\operatorname{diag}(A_p),
-\qquad
-z_I=\frac{r_I}{(A_p)_{II}}.
-$$
+$$M=\operatorname{diag}(A_p),\qquad z_I=\frac{r_I}{(A_p)_{II}}.$$
 
-The diagonal is exactly `pdiag(I)`. Dot products and norms must include only free pressure nodes.
+The diagonal is exactly `pdiag(I)`. Dot products, norms and updates operate only on free pressure nodes. Before pressure constraints, the Laplacian is positive semidefinite; removing the constant null mode gives the SPD free problem required by CG.
 
 ## 8. CBS Step 3: velocity correction
 
@@ -812,399 +391,189 @@ The diagonal is exactly `pdiag(I)`. Dot products and norms must include only fre
 
 For each fluid tetrahedron,
 
-$$
-\boxed{
-\left.\frac{\partial p}{\partial x_i}\right|_e
-=
-\sum_{a=1}^{4}p_aN_{a,i}^{(e)}
-}
-$$
+$$\boxed{\left.\frac{\partial p}{\partial x_i}\right|_e=\sum_{a=1}^{4}p_aN_{a,i}^{(e)}}.$$
 
-The gradient is stored temporarily in `grad_pres[idim]`.
+The constant gradient is accumulated into `grad_pres[idim]`.
 
-### 8.2 Local pressure residual
+### 8.2 Local residual and nodal update
 
-The weak nodal pressure-gradient contribution is
+The P1 nodal pressure-gradient contribution is
 
-$$
-r_{p,i,a}^{(e)}
-=
--\int_{\Omega_e}
-N_a\frac{\partial p}{\partial x_i}
-\,d\Omega.
-$$
+$$\boxed{r_{p,i,a}^{(e)}=-\frac{V_e}{4}\left.\frac{\partial p}{\partial x_i}\right|_e}.$$
 
-Because $\nabla p$ is constant,
+It is scattered to `rhs(i,I)`, after which
 
-$$
-\boxed{
-r_{p,i,a}^{(e)}
-=
--\frac{V_e}{4}
-\left.\frac{\partial p}{\partial x_i}\right|_e
-}
-$$
+$$\boxed{\mathbf{u}^{n+1}=\mathbf{u}^*+D_u^{-1}\mathbf{r}_p}.$$
 
-which is implemented as
-
-```cpp
-s.rhs(idim, ip) -= vol4 * grad_pres[idim];
-```
-
-### 8.3 Nodal velocity correction
-
-The code-aligned correction is
-
-$$
-\boxed{
-\mathbf{u}^{n+1}
-=
-\mathbf{u}^*
-+D_u^{-1}\mathbf{r}_p
-}
-$$
-
-or
+The required time factor is already contained in `elcoe2`; Step 3 must not multiply by a second explicit $\Delta t$.
 
 ```cpp
 s.unkno(idim, ip) +=
     s.rhs(idim, ip) * s.elcoe2(ip);
 ```
 
-Do not append another explicit $\Delta t$ to this code equation: the required time scaling is already embedded in `elcoe2` through $D_u^{-1}$.
+Velocity boundary constraints are reapplied after correction because the algebraic update modifies every free nodal component.
 
-After correction, symmetry, prescribed velocity, wall conditions, outlet backflow control and zero solid velocity are reapplied. This is part of the algebraic enforcement of essential boundary conditions.
+## 9. CBS Step 4: temperature and conjugate heat transfer
 
-## 9. Step 4: temperature equation
+### 9.1 Nodal equation
 
-### 9.1 Code-level nodal equation
+The thermal residual is decomposed as
 
-The thermal update is
+$$\mathbf{r}_T=\mathbf{r}_{\mathrm{conv}}+\mathbf{r}_{\mathrm{stab}}+\mathbf{r}_{\mathrm{diff}}+\mathbf{r}_{\mathrm{source}}+\mathbf{r}_{\mathrm{flux}}.$$
 
-$$
-\boxed{
-D_T
-\left(
-T^{n+1}-T^n
-\right)
-=
-r_T
-}
-$$
+The update is
 
-with
+$$\boxed{T^{n+1}=T^n+D_T^{-1}\mathbf{r}_T}.$$
 
-$$
-r_T
-=
-r_{\mathrm{conv}}
-+r_{\mathrm{stab}}
-+r_{\mathrm{diff}}
-+r_{\mathrm{source}}
-+r_{\mathrm{flux}}.
-$$
+`temperature1` supplies $T^n$, `rhs1` stores $\mathbf{r}_T$, and `elcoe2p` stores $D_T^{-1}$.
 
-The nodal update is
+### 9.2 Temperature gradient
 
-$$
-\boxed{
-T^{n+1}
-=
-T^n+D_T^{-1}r_T
-}
-$$
+$$\boxed{\left.\frac{\partial T}{\partial x_i}\right|_e=\sum_{a=1}^{4}T_a^nN_{a,i}^{(e)}}.$$
 
-and maps to
-
-```cpp
-s.temperature(ip) =
-    s.temperature1(ip)
-    + s.rhs1(ip) * s.elcoe2p(ip);
-```
-
-### 9.2 Element temperature gradient
-
-$$
-\boxed{
-T_{,i}^{(e)}
-=
-\sum_{a=1}^{4}T_a^nN_{a,i}^{(e)}
-}
-$$
-
-This is calculated from `temperature1` by `compute_temperature_gradient(...)`.
+This is computed by `compute_temperature_gradient(...)` and stored temporarily as `dTdx`, `dTdy` and `dTdz`.
 
 ### 9.3 Fluid convection
 
-The weak convective residual is
+The weak thermal-convection term is
 
-$$
-r_{\mathrm{conv},a}^{(e)}
-=
--(\rho c_p)_e
-\int_{\Omega_e}
-N_a\,u_iT_{,i}
-\,d\Omega.
-$$
+$$r_{\mathrm{conv},a}^{(e)}=-(\rho c_p)_e\int_{\Omega_e}N_a\,\mathbf{u}^{n+1}\!\cdot\nabla T^n\,d\Omega.$$
 
-Since $T_{,i}$ is constant and velocity is linearly interpolated,
+Using the consistent P1 mass integral,
 
-$$
-\boxed{
-r_{\mathrm{conv},a}^{(e)}
-=
--(\rho c_p)_e
-\frac{V_e}{20}
-\left(
-\sum_{b=1}^{4}\mathbf{u}_b
-+\mathbf{u}_a
-\right)
-\cdot\nabla T
-}
-$$
+$$\boxed{r_{\mathrm{conv},a}^{(e)}=-(\rho c_p)_e\frac{V_e}{20}\left(\sum_{b=1}^{4}\mathbf{u}_b^{n+1}+\mathbf{u}_a^{n+1}\right)\!\cdot\nabla T^n}.$$
 
-The corrected Step-3 velocity from `unkno` is used. This term is assembled only in fluid elements.
+This is implemented by `add_fluid_convection(...)` and uses the corrected velocity in `unkno`.
 
 ### 9.4 Thermal characteristic stabilisation
 
-The scalar characteristic/SUPG-style term is
+The scalar streamline correction is
 
-$$
-\boxed{
-r_{\mathrm{stab},a}^{(e)}
-=
-\frac{\Delta t_e}{2}
-(\rho c_p)_eV_e
-\left(
-\bar{\mathbf{u}}\cdot\nabla N_a
-\right)
-\left(
-\bar{\mathbf{u}}\cdot\nabla T
-\right)
-}
-$$
+$$\boxed{r_{\mathrm{stab},a}^{(e)}=\frac{\Delta t_e}{2}(\rho c_p)_eV_e\left(\bar{\mathbf{u}}\!\cdot\nabla N_a\right)\left(\bar{\mathbf{u}}\!\cdot\nabla T^n\right)}.$$
 
-where
+It is assembled only in fluid elements by `add_fluid_convection_stabilisation(...)`.
 
-$$
-\bar{\mathbf{u}}
-=
-\frac{1}{4}
-\sum_{a=1}^{4}\mathbf{u}_a.
-$$
+### 9.5 Diffusion, source and prescribed heat flux
 
-It is the scalar analogue of the Step-1 characteristic correction.
+The volume diffusion residual is
 
-### 9.5 Thermal diffusion
+$$\boxed{r_{\mathrm{diff},a}^{(e)}=-k_eV_e\nabla N_a\!\cdot\nabla T^n}.$$
 
-After integration by parts, the element volume contribution is
+It is assembled in both fluid and solid. For a constant volumetric source,
 
-$$
-\boxed{
-r_{\mathrm{diff},a}^{(e)}
-=
--k_eV_e\nabla N_a\cdot\nabla T
-}
-$$
+$$\boxed{r_{\mathrm{source},a}^{(e)}=Q_e\frac{V_e}{4}}.$$
 
-It is assembled in both fluid and solid elements. When turbulent heat transfer is enabled in a fluid element,
+For an inward prescribed heat flux $q''$ on a triangular face,
 
-$$
-k_{\mathrm{eff},e}
-=
-k_e
-+(\rho c_p)_e\frac{\nu_{t,e}}{Pr_t}.
-$$
+$$\boxed{r_{\mathrm{flux},a}^{(f)}=q''\frac{A_f}{3}}.$$
 
-The turbulent contribution is not applied to solid elements.
+The conformal fluid-solid interface receives no separate imposed flux term; shared temperature degrees of freedom and diffusion on both sides provide the discrete coupling.
 
-### 9.6 Volumetric source and surface heat flux
-
-For constant volumetric generation $Q_e$,
-
-$$
-\boxed{
-r_{\mathrm{source},a}^{(e)}
-=
-Q_e\frac{V_e}{4}
-}
-$$
-
-For a prescribed inward-positive heat flux $q''$ on a triangular face,
-
-$$
-\boxed{
-r_{\mathrm{flux},a}^{(f)}
-=
-q''\frac{A_f}{3}
-}
-$$
-
-for each node on that face.
-
-### 9.7 Step-4 theory-to-code map
+### 9.6 Step-4 theory-to-code map
 
 | Theory object | C++ representation |
 |---|---|
 | $T^n$ | `temperature1` |
-| $\nabla T$ | local `dTdx`, `dTdy`, `dTdz` |
+| $\nabla T^n$ | `dTdx`, `dTdy`, `dTdz` |
 | corrected $\mathbf{u}^{n+1}$ | `unkno` after Step 3 |
-| $r_{\mathrm{conv}}$ | `add_fluid_convection(...)` |
-| $r_{\mathrm{stab}}$ | `add_fluid_convection_stabilisation(...)` |
-| $r_{\mathrm{diff}}$ | thermal diffusion kernel |
-| $r_{\mathrm{source}}$ | volumetric-source kernel |
-| $r_{\mathrm{flux}}$ | prescribed heat-flux kernel |
-| assembled $r_T$ | `rhs1` during Step 4 |
+| $(\rho c_p)_e$ | `rho_cp_e` |
+| $k_e$ or $k_{\mathrm{eff},e}$ | `k_e`, `k_eff_e` |
+| $Q_e$ | `Qvol_e` |
+| $\mathbf{r}_T$ | `rhs1` during Step 4 |
 | $D_T^{-1}$ | `elcoe2p` |
 | $T^{n+1}$ | `temperature` |
 
 ## 10. Optional Spalart-Allmaras transport
 
-The transported SA working variable is $\tilde\nu$, not the eddy viscosity itself. The standard model architecture is
+The transported SA working variable is $\tilde\nu$, not the eddy viscosity itself. The constitutive conversion is
 
-$$
-\frac{\partial\tilde\nu}{\partial t}
-+u_j\frac{\partial\tilde\nu}{\partial x_j}
-=
-\underbrace{c_{b1}(1-f_{t2})\tilde S\tilde\nu}_{\text{production}}
--
-\underbrace{
-\left(
- c_{w1}f_w-\frac{c_{b1}}{\kappa^2}f_{t2}
-\right)
-\left(\frac{\tilde\nu}{d}\right)^2
-}_{\text{destruction}}
-+
-\underbrace{
-\frac{1}{\sigma}
-\left[
-\nabla\!\cdot
-\left((\nu+\tilde\nu)\nabla\tilde\nu\right)
-+c_{b2}|\nabla\tilde\nu|^2
-\right]
-}_{\text{diffusion and nonlinear source}}.
-$$
+$$\chi=\frac{\tilde\nu}{\nu},\qquad f_{v1}=\frac{\chi^3}{\chi^3+c_{v1}^3},\qquad\nu_t=\tilde\nu f_{v1},\qquad\mu_t=\rho\nu_t.$$
 
-The eddy viscosity is recovered from
+The standard transport architecture is
 
-$$
-\nu_t=\tilde\nu f_{v1},
-\qquad
-f_{v1}=\frac{\chi^3}{\chi^3+c_{v1}^3},
-\qquad
-\chi=\frac{\tilde\nu}{\nu}.
-$$
+$$\frac{\partial\tilde\nu}{\partial t}+u_j\frac{\partial\tilde\nu}{\partial x_j}=\text{production}-\text{destruction}+\text{diffusion}+\text{nonlinear gradient source}.$$
 
-SA is an additional transported scalar executed after Step 3 and before Step 4; it is not a fifth CBS split. Its wall distance, near-wall resolution and source-term treatment require separate validation.
+The current coupling order is
 
-## 11. Boundary and material-domain semantics
+```text
+Step 3 corrected velocity
+        ↓
+SA residual and nodal update
+        ↓
+SA wall/inlet conditions
+        ↓
+nu_t, mu_t, mu_eff and optional k_eff refresh
+        ↓
+Step 4 temperature assembly
+```
 
-The current material test is
+SA is an additional transported scalar, not a fifth CBS split. Wall distance, near-wall resolution, inlet $\tilde\nu$, source stiffness and SA/SA-neg behaviour require independent validation.
 
-$$
-\texttt{mat\_elem}(e)=0
-\quad\Longrightarrow\quad
-\text{fluid},
-$$
+## 11. Residual ownership by stage
 
-$$
-\texttt{mat\_elem}(e)\ne0
-\quad\Longrightarrow\quad
-\text{non-fluid/solid in the current cases}.
-$$
+| Stage | Mathematical residual | Work array | Resulting field |
+|---|---|---|---|
+| Step 1 | $\mathbf{r}_m$ | `rhs` | predictor `unkno = u*` |
+| Step 2 | $\mathbf{b}_p$ | `rhs1` | `pres` |
+| Step 3 | $\mathbf{r}_p$ | `rhs` | corrected `unkno = u^(n+1)` |
+| SA | $r_{SA}$ | SA-specific storage | `nu_tilde` and effective properties |
+| Step 4 | $\mathbf{r}_T$ | `rhs1` | `temperature` |
 
-Consequences:
+The reuse is safe only because each assembly routine clears the relevant work array before accumulation.
 
-- momentum and pressure are assembled only in fluid elements;
-- thermal diffusion and volumetric sources are assembled in fluid and solid;
-- velocity is set to zero on every node of a non-fluid element;
-- a conformal fluid-solid interface therefore receives no-slip velocity and one shared temperature degree of freedom;
-- solid-only nodes are excluded from the pressure space.
+## 12. Verification checklist
 
-Velocity constraints are reapplied after Steps 1 and 3 in this order:
+### Geometry and P1 operators
 
-1. symmetry projection;
-2. prescribed velocity and wall conditions;
-3. outlet backflow control;
-4. zero velocity in the solid material.
-
-Changing this order is a numerical change, not cosmetic refactoring.
-
-## 12. General CBS versus the active implementation
-
-| General formulation feature | Active CBS3D++ status |
-|---|---|
-| pressure-free predictor | implemented |
-| Galerkin convection | implemented |
-| second-order convective characteristic correction | implemented |
-| complete characteristic derivative of all residual terms | not implemented |
-| body force | not assembled in current Step 1 |
-| complete Newtonian deviatoric-stress operator | not implemented; component Laplacian active |
-| pressure-Poisson projection | implemented |
-| higher-order characteristic pressure term in Step 3 | not implemented |
-| true physical-time BDF/dual-time term | not implemented |
-| temperature equation in fluid and solid | implemented development path |
-| SA transported scalar | active development/validation |
-| distributed Steps 1-4 | under development |
-
-## 13. Verification checklist
-
-### Geometry and interpolation
-
-1. Verify $V_e=\det J_e/6$ on an analytical tetrahedron.
-2. Verify $\sum_aN_a=1$ and $\sum_a\nabla N_a=\mathbf{0}$.
-3. Verify `dNkdx_index(e,i,a)` addresses the intended derivative.
-4. Verify a linear scalar field produces the exact constant element gradient.
+1. Reproduce $V_e$, $N_{a,i}^{(e)}$ and $V_e/4$ for one analytical tetrahedron.
+2. Confirm $\sum_aN_a=1$ and $\sum_a\nabla N_a=\mathbf{0}$.
+3. Confirm positive `detJ` and consistent local-node orientation.
+4. Compare flattened `dNkdx` lookup with an explicit $(e,i,a)$ table.
 
 ### Step 1
 
-1. Uniform velocity must give zero velocity gradient.
-2. Verify one-element Galerkin convection against a hand calculation.
-3. Verify characteristic signs and the $\Delta t_eV_e/2$ factor.
-4. Verify `elcoe2` is the inverse mass/time diagonal at the instant of update.
-5. Verify velocity constraints after the predictor.
+1. Uniform velocity must give zero interior velocity gradient and zero viscous volume residual.
+2. Reproduce one-element Galerkin convection and characteristic correction by hand.
+3. Verify `elcoe2` is inverse mass-over-time at the instant of the predictor update.
+4. Confirm essential velocity conditions after Step 1.
+5. Keep SA disabled during baseline laminar verification.
 
-### Pressure
+### Pressure and Step 3
 
-1. Verify $H^{(e)}$ is symmetric.
-2. Verify each unconstrained element stiffness row sums to zero.
-3. Compare matrix-free $A_p\mathbf{x}$ with an explicitly assembled small matrix.
-4. Verify the compact six-pair ordering in assembly and multiplication.
-5. Verify one pressure reference removes the constant null space.
-6. Verify solid-only nodes are excluded.
+1. Confirm $H^{(e)}$ is symmetric and has zero row sum before constraints.
+2. Compare compact matrix-free $A_p\mathbf{x}$ with an explicitly assembled small matrix.
+3. Verify the six off-diagonal pair order in both assembly and multiplication.
+4. Confirm one pressure reference removes the constant null mode.
+5. Check $\mathbf{x}^TA_p\mathbf{x}>0$ for non-zero free vectors after constraints.
+6. Confirm divergence decreases after Step 3.
 
-### Step 3
+### Temperature and multiphysics
 
-1. Verify the element pressure gradient for a linear pressure field.
-2. Verify $r_{p,a}^{(e)}=-(V_e/4)\nabla p$.
-3. Verify divergence is reduced after correction.
-4. Verify no extra explicit time factor is applied outside `elcoe2`.
+1. Uniform temperature must give zero gradient, convection and diffusion.
+2. A linear temperature field must reproduce the exact constant P1 gradient.
+3. Solid elements must have diffusion but no convection.
+4. Interface nodes must share one temperature degree of freedom.
+5. Verify $q''A_f/3$ at every node of a heat-flux face.
+6. Check global thermal energy balance.
 
-### Energy
+## 13. Source-file map
 
-1. Uniform temperature must produce zero gradient, convection and diffusion.
-2. Solid elements must contain diffusion but no convection.
-3. Verify $Q_eV_e/4$ for volumetric generation.
-4. Verify $q''A_f/3$ for a prescribed triangular-face flux.
-5. Verify one shared temperature field across a conformal interface.
-
-## 14. Primary implementation files
-
-| Numerical responsibility | Active source |
+| Numerical responsibility | Primary source |
 |---|---|
-| geometry, shape gradients and lumped mass | `src/preprocess/Preprocess.cpp` |
-| local time scales and time-dependent diagonals | `src/timestep/TimeStep.cpp` |
-| Step-1 residual | `src/assembly/MomentumAssembly.cpp` |
-| pressure stiffness and RHS | `src/assembly/PressureAssembly.cpp` |
-| native pressure operator | `src/linalg/MatrixVectorCalc.cpp` |
-| native PCG | `src/linalg/ConjugateGradient.cpp` |
-| Steps 1-4 orchestration and Step-3 correction | `src/solver/Steps.cpp` |
-| temperature residual | `src/assembly/EnergyAssembly.cpp` |
-| SA residual and property coupling | `src/assembly/SpalartAllmarasAssembly.cpp` |
+| Step-1 residual | `MomentumAssembly.cpp` |
+| pressure stiffness and RHS | `PressureAssembly.cpp` |
+| Step order and Step-3 correction | `Steps.cpp` |
+| time-scaled diagonals/operator | `TimeStep.cpp` |
+| native pressure multiplication | `MatrixVectorCalc.cpp` |
+| native PCG | `ConjugateGradient.cpp` |
+| PETSc pressure option | `PetscPressureSolver.cpp` |
+| temperature residual | `EnergyAssembly.cpp` |
+| SA transport | `SpalartAllmarasAssembly.cpp` |
 
-## 15. References
+## 14. References
 
-1. P. Nithiarasu, R. Codina and O. C. Zienkiewicz, “The Characteristic-Based Split scheme—a unified approach to fluid dynamics,” *International Journal for Numerical Methods in Engineering*, 66, 1514-1546, 2006.
-2. O. C. Zienkiewicz, R. L. Taylor and P. Nithiarasu, *The Finite Element Method for Fluid Dynamics*, Elsevier.
+1. P. Nithiarasu, R. Codina and O. C. Zienkiewicz, “The Characteristic-Based Split scheme—a unified approach to fluid dynamics,” *International Journal for Numerical Methods in Engineering*, 66, 1514–1546, 2006.
+2. O. C. Zienkiewicz, R. L. Taylor and P. Nithiarasu, *The Finite Element Method for Fluid Dynamics*.
 3. P. R. Spalart and S. R. Allmaras, “A One-Equation Turbulence Model for Aerodynamic Flows,” 1994.
-4. The active CBS3D++ source files listed above. Where a historical derivation and the current source disagree, the current source defines the documented implementation and the discrepancy must be resolved through code review and regression testing.
+4. CBS3D++ implementation files listed above.
