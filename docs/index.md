@@ -1,4 +1,8 @@
-# CBS3D++ documentation
+<div align="center">
+
+<img src="assets/cbs3d-logo.svg" alt="CBS3D++ — A Finite Element based Fluid Dynamics Solver" width="100%">
+
+</div>
 
 CBS3D++ is a C++20 finite-element solver for three-dimensional incompressible flow, multiphysics transport and high-performance CFD development. The active numerical method is a semi-implicit Characteristic-Based Split pressure-projection scheme on linear tetrahedral elements.
 
