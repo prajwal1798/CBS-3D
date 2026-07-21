@@ -97,6 +97,12 @@ namespace cbs
         // node. Interface-only nodes legitimately retain a zero vector.
         Array2D<Real> node_wall_normal_sum;
 
+        // Reconciled prescribed-pressure classification:
+        //
+        //     0  pressure is not prescribed
+        //     1  pressure is prescribed at this node
+        Array1D<Int> node_pressure_fixed;
+
         // --------------------------------------------------------------------
         // Primary solution variables
         // --------------------------------------------------------------------
@@ -531,6 +537,7 @@ namespace cbs
             node_material_mask.resize(cfg.npoin);
             node_wall_mask.resize(cfg.npoin);
             node_wall_normal_sum.resize(cfg.ndim, cfg.npoin);
+            node_pressure_fixed.resize(cfg.npoin);
 
             // Element geometry and coefficients.
             dNkdx.resize(cfg.ndim * cfg.nep * cfg.nelem);
@@ -624,6 +631,7 @@ namespace cbs
             node_material_mask.fill(0);
             node_wall_mask.fill(0);
             node_wall_normal_sum.fill(0.0);
+            node_pressure_fixed.fill(0);
 
             rho_e.fill(1.0);
             cp_e.fill(1.0);

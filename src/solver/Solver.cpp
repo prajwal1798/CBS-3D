@@ -177,6 +177,13 @@ namespace cbs
         // Globally sum all physical BC 511 face areas and calculate one
         // identical mass-flow inlet velocity on every MPI rank.
         Preprocess::computeMassFlowInletVelocity(s_);
+
+        // Reconcile all BC 520 pressure nodes and rebuild each rank's local
+        // prescribed-pressure list.
+        Preprocess::detectPressureBoundaryNodes(s_);
+
+        // Independently reconstruct and verify global pressure-boundary state.
+        auditDistributedPressureBoundary();
     }
 
 

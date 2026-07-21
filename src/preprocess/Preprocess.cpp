@@ -1441,12 +1441,15 @@ namespace cbs
     {
         validateBoundaryFlags(s);
 
-        std::vector<Int> node_is_fixed(static_cast<Size>(s.cfg.npoin) + 1U, 0);
-
+        s.node_pressure_fixed.fill(0);
         s.cfg.bc_fixed = 0;
         s.bc_list.fill(0);
         s.bc_values.fill(0.0);
 
+        // -------------------------------------------------------------
+        // Mark pressure-outlet nodes from this rank's physical BC 520
+        // boundary faces.
+        // -------------------------------------------------------------
         for (Int ib = 1; ib <= s.cfg.nboun; ++ib)
         {
             const Int bc = s.iside(s.cfg.bsid, ib);
@@ -1463,66 +1466,384 @@ namespace cbs
                 if (ip < 1 || ip > s.cfg.npoin)
                 {
                     throw std::runtime_error(
-                        "Preprocess::detectPressureBoundaryNodes - pressure node out of range");
+                        "Preprocess::detectPressureBoundaryNodes - "
+                        "pressure node out of range");
                 }
 
                 if (!touches_fluid_domain(s, ip))
                 {
                     throw std::runtime_error(
-                        "Preprocess::detectPressureBoundaryNodes - pressure outlet node "
+                        "Preprocess::detectPressureBoundaryNodes - "
+                        "pressure outlet node "
                         + std::to_string(ip)
-                        + " is not connected to any fluid element");
+                        + " is not connected to a fluid element");
                 }
 
-                const Int old_count = s.cfg.bc_fixed;
-
-                add_unique_node(
-                    s.bc_list,
-                    s.cfg.bc_fixed,
-                    node_is_fixed,
-                    ip);
-
-                if (s.cfg.bc_fixed > old_count)
-                {
-                    s.bc_values(s.cfg.bc_fixed) = s.cfg.outlet_pressure_gauge;
-                }
+                s.node_pressure_fixed(ip) = 1;
             }
         }
 
-        if (s.cfg.bc_fixed < 1)
+#ifdef CBS3D_USE_MPI
+        if (s.mpi_enabled)
         {
-            Int ip = s.cfg.pnode;
+            // A shared pressure-outlet node may be visible on only the rank
+            // carrying the physical boundary face. Combine flags on the owner
+            // and broadcast the final value to every ghost copy.
+            HaloExchange::orGhostMasksToOwners(
+                s.node_pressure_fixed,
+                s.partition_metadata);
 
-            if (ip < 1 || ip > s.cfg.npoin || !touches_fluid_domain(s, ip))
+            HaloExchange::broadcastOwnedToGhosts(
+                s.node_pressure_fixed,
+                s.partition_metadata);
+        }
+#endif
+
+        Int global_owned_fixed_nodes = 0;
+        bool fallback_used = false;
+        Int fallback_global_node = 0;
+
+#ifdef CBS3D_USE_MPI
+        if (s.mpi_enabled)
+        {
+            Int local_owned_fixed_nodes = 0;
+
+            for (const Int ip : s.owned_nodes)
             {
-                ip = 0;
-
-                for (Int candidate = 1; candidate <= s.cfg.npoin; ++candidate)
+                if (s.node_pressure_fixed(ip) != 0)
                 {
-                    if (touches_fluid_domain(s, candidate))
-                    {
-                        ip = candidate;
-                        break;
-                    }
+                    ++local_owned_fixed_nodes;
                 }
             }
 
-            if (ip < 1 || ip > s.cfg.npoin)
+            const int count_error =
+                MPI_Allreduce(
+                    &local_owned_fixed_nodes,
+                    &global_owned_fixed_nodes,
+                    1,
+                    MPI_INT,
+                    MPI_SUM,
+                    MPI_COMM_WORLD);
+
+            if (count_error != MPI_SUCCESS)
             {
                 throw std::runtime_error(
-                    "Preprocess::detectPressureBoundaryNodes - no fluid-connected node available for pressure reference");
+                    "Preprocess::detectPressureBoundaryNodes - "
+                    "MPI_Allreduce failed for pressure-fixed count");
             }
 
-            s.cfg.bc_fixed = 1;
-            s.bc_list(1) = ip;
-            s.bc_values(1) = s.cfg.outlet_pressure_gauge;
+            // ---------------------------------------------------------
+            // No explicit outlet exists. Select one deterministic global
+            // fluid-connected reference node.
+            //
+            // In distributed input, cfg.pnode is interpreted as a global
+            // mesh-node ID. If it is invalid, use the minimum global ID
+            // among all owned fluid-connected nodes.
+            // ---------------------------------------------------------
+            if (global_owned_fixed_nodes < 1)
+            {
+                fallback_used = true;
 
-            std::cout << "Pressure reference fallback node selected: "
-                      << ip << "\n";
+                Int requested_min = 0;
+                Int requested_max = 0;
+                const Int requested_global_node = s.cfg.pnode;
+
+                const int requested_min_error =
+                    MPI_Allreduce(
+                        &requested_global_node,
+                        &requested_min,
+                        1,
+                        MPI_INT,
+                        MPI_MIN,
+                        MPI_COMM_WORLD);
+
+                const int requested_max_error =
+                    MPI_Allreduce(
+                        &requested_global_node,
+                        &requested_max,
+                        1,
+                        MPI_INT,
+                        MPI_MAX,
+                        MPI_COMM_WORLD);
+
+                if (requested_min_error != MPI_SUCCESS ||
+                    requested_max_error != MPI_SUCCESS)
+                {
+                    throw std::runtime_error(
+                        "Preprocess::detectPressureBoundaryNodes - "
+                        "MPI_Allreduce failed for requested pressure node");
+                }
+
+                if (requested_min != requested_max)
+                {
+                    throw std::runtime_error(
+                        "Preprocess::detectPressureBoundaryNodes - "
+                        "inconsistent pnode values across MPI ranks");
+                }
+
+                const Int global_npoin =
+                    static_cast<Int>(
+                        s.partition_metadata.global_npoin);
+
+                Int local_requested_valid = 0;
+
+                if (requested_global_node >= 1 &&
+                    requested_global_node <= global_npoin)
+                {
+                    for (const Int ip : s.owned_nodes)
+                    {
+                        const Size local_index =
+                            static_cast<Size>(ip);
+
+                        if (local_index >=
+                            s.local_to_global_node.size())
+                        {
+                            throw std::runtime_error(
+                                "Preprocess::detectPressureBoundaryNodes - "
+                                "incomplete local-to-global node map");
+                        }
+
+                        if (s.local_to_global_node[local_index] ==
+                                requested_global_node &&
+                            touches_fluid_domain(s, ip))
+                        {
+                            local_requested_valid = 1;
+                            break;
+                        }
+                    }
+                }
+
+                Int global_requested_valid = 0;
+
+                const int requested_valid_error =
+                    MPI_Allreduce(
+                        &local_requested_valid,
+                        &global_requested_valid,
+                        1,
+                        MPI_INT,
+                        MPI_MAX,
+                        MPI_COMM_WORLD);
+
+                if (requested_valid_error != MPI_SUCCESS)
+                {
+                    throw std::runtime_error(
+                        "Preprocess::detectPressureBoundaryNodes - "
+                        "MPI_Allreduce failed for pnode validation");
+                }
+
+                if (global_requested_valid != 0)
+                {
+                    fallback_global_node =
+                        requested_global_node;
+                }
+                else
+                {
+                    Int local_minimum_global =
+                        std::numeric_limits<Int>::max();
+
+                    for (const Int ip : s.owned_nodes)
+                    {
+                        if (!touches_fluid_domain(s, ip))
+                        {
+                            continue;
+                        }
+
+                        const Size local_index =
+                            static_cast<Size>(ip);
+
+                        if (local_index >=
+                            s.local_to_global_node.size())
+                        {
+                            throw std::runtime_error(
+                                "Preprocess::detectPressureBoundaryNodes - "
+                                "incomplete local-to-global node map");
+                        }
+
+                        local_minimum_global =
+                            std::min(
+                                local_minimum_global,
+                                s.local_to_global_node[local_index]);
+                    }
+
+                    const int fallback_error =
+                        MPI_Allreduce(
+                            &local_minimum_global,
+                            &fallback_global_node,
+                            1,
+                            MPI_INT,
+                            MPI_MIN,
+                            MPI_COMM_WORLD);
+
+                    if (fallback_error != MPI_SUCCESS)
+                    {
+                        throw std::runtime_error(
+                            "Preprocess::detectPressureBoundaryNodes - "
+                            "MPI_Allreduce failed for fallback node");
+                    }
+                }
+
+                if (fallback_global_node < 1 ||
+                    fallback_global_node > global_npoin)
+                {
+                    throw std::runtime_error(
+                        "Preprocess::detectPressureBoundaryNodes - "
+                        "no global fluid-connected pressure reference exists");
+                }
+
+                if (static_cast<Size>(fallback_global_node) <
+                    s.global_to_local_node.size())
+                {
+                    const Int local_fallback_node =
+                        s.global_to_local_node[
+                            static_cast<Size>(fallback_global_node)];
+
+                    if (local_fallback_node >= 1 &&
+                        local_fallback_node <= s.cfg.npoin)
+                    {
+                        s.node_pressure_fixed(
+                            local_fallback_node) = 1;
+                    }
+                }
+
+                HaloExchange::orGhostMasksToOwners(
+                    s.node_pressure_fixed,
+                    s.partition_metadata);
+
+                HaloExchange::broadcastOwnedToGhosts(
+                    s.node_pressure_fixed,
+                    s.partition_metadata);
+
+                local_owned_fixed_nodes = 0;
+
+                for (const Int ip : s.owned_nodes)
+                {
+                    if (s.node_pressure_fixed(ip) != 0)
+                    {
+                        ++local_owned_fixed_nodes;
+                    }
+                }
+
+                const int fallback_count_error =
+                    MPI_Allreduce(
+                        &local_owned_fixed_nodes,
+                        &global_owned_fixed_nodes,
+                        1,
+                        MPI_INT,
+                        MPI_SUM,
+                        MPI_COMM_WORLD);
+
+                if (fallback_count_error != MPI_SUCCESS)
+                {
+                    throw std::runtime_error(
+                        "Preprocess::detectPressureBoundaryNodes - "
+                        "MPI_Allreduce failed after fallback selection");
+                }
+
+                if (global_owned_fixed_nodes != 1)
+                {
+                    throw std::runtime_error(
+                        "Preprocess::detectPressureBoundaryNodes - "
+                        "distributed fallback did not select exactly one "
+                        "owned pressure node");
+                }
+            }
+        }
+        else
+#endif
+        {
+            // Serial behaviour: use the requested local node, otherwise the
+            // first fluid-connected local node.
+            for (Int ip = 1; ip <= s.cfg.npoin; ++ip)
+            {
+                if (s.node_pressure_fixed(ip) != 0)
+                {
+                    ++global_owned_fixed_nodes;
+                }
+            }
+
+            if (global_owned_fixed_nodes < 1)
+            {
+                fallback_used = true;
+
+                Int ip = s.cfg.pnode;
+
+                if (ip < 1 ||
+                    ip > s.cfg.npoin ||
+                    !touches_fluid_domain(s, ip))
+                {
+                    ip = 0;
+
+                    for (Int candidate = 1;
+                         candidate <= s.cfg.npoin;
+                         ++candidate)
+                    {
+                        if (touches_fluid_domain(s, candidate))
+                        {
+                            ip = candidate;
+                            break;
+                        }
+                    }
+                }
+
+                if (ip < 1 || ip > s.cfg.npoin)
+                {
+                    throw std::runtime_error(
+                        "Preprocess::detectPressureBoundaryNodes - "
+                        "no fluid-connected pressure reference exists");
+                }
+
+                s.node_pressure_fixed(ip) = 1;
+                global_owned_fixed_nodes = 1;
+                fallback_global_node = ip;
+            }
         }
 
-        std::cout << "Number of pressure outlet/fixed nodes: "
-                  << s.cfg.bc_fixed << "\n";
+        // -------------------------------------------------------------
+        // Rebuild the rank-local prescribed-pressure list after
+        // reconciliation. Shared nodes appear in the list on every rank
+        // carrying a local copy.
+        // -------------------------------------------------------------
+        for (Int ip = 1; ip <= s.cfg.npoin; ++ip)
+        {
+            const Int fixed_flag =
+                s.node_pressure_fixed(ip);
+
+            if (fixed_flag != 0 && fixed_flag != 1)
+            {
+                throw std::runtime_error(
+                    "Preprocess::detectPressureBoundaryNodes - "
+                    "invalid reconciled pressure-fixed flag");
+            }
+
+            if (fixed_flag == 0)
+            {
+                continue;
+            }
+
+            ++s.cfg.bc_fixed;
+            s.bc_list(s.cfg.bc_fixed) = ip;
+            s.bc_values(s.cfg.bc_fixed) =
+                s.cfg.outlet_pressure_gauge;
+        }
+
+        if (!s.mpi_enabled || s.mpi_rank == 0)
+        {
+            std::cout
+                << "Global pressure outlet/fixed nodes: "
+                << global_owned_fixed_nodes << "\n";
+
+            if (fallback_used)
+            {
+                std::cout
+                    << "Pressure reference fallback global node: "
+                    << fallback_global_node << "\n";
+            }
+            else
+            {
+                std::cout
+                    << "Pressure reference fallback: NOT USED\n";
+            }
+        }
     }
 
 

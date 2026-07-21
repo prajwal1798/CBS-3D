@@ -87,6 +87,10 @@ namespace cbs
         // area-weighted wall-normal reconciliation.
         void auditDistributedWallClassification() const;
 
+        // Independently reconstructs distributed prescribed-pressure state and
+        // validates owner/ghost flags and each rank-local pressure list.
+        void auditDistributedPressureBoundary() const;
+
         // Builds the element and global pressure operators used in CBS Step 2.
         void preparePressureSystem();
 

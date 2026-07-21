@@ -30,6 +30,7 @@ set(CBS3D_SOURCES
     src/solver/Steps.cpp
     src/solver/Solver.cpp
     src/solver/SolverDistributedWallAudit.cpp
+    src/solver/SolverDistributedPressureAudit.cpp
 
     src/linalg/BandedMatrix.cpp
     src/linalg/BandedGaussianSolver.cpp
