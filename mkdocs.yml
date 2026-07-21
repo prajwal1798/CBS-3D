@@ -1,0 +1,78 @@
+site_name: CBS3D++ Documentation
+site_description: Finite-element-based incompressible fluid dynamics solver
+site_url: https://prajwal1798.github.io/CBS-3D/
+repo_url: https://github.com/prajwal1798/CBS-3D
+repo_name: prajwal1798/CBS-3D
+edit_uri: edit/main/docs/
+
+strict: true
+
+theme:
+  name: material
+  language: en
+  features:
+    - navigation.instant
+    - navigation.sections
+    - navigation.top
+    - content.code.copy
+    - content.action.edit
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: blue grey
+      accent: cyan
+      toggle:
+        icon: material/weather-night
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: blue grey
+      accent: cyan
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to light mode
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - def_list
+  - footnotes
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.arithmatex:
+      generic: true
+  - pymdownx.details
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.superfences
+  - pymdownx.tabbed:
+      alternate_style: true
+
+extra_javascript:
+  - https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js
+
+nav:
+  - Home: index.md
+  - Getting started:
+      - Installation: getting-started/installation.md
+      - Quick start: getting-started/quickstart.md
+  - User guide:
+      - Case files: user-guide/case-files.md
+  - Numerics:
+      - Formulation: numerics/formulation.md
+  - Parallel computing:
+      - Development status: parallel/status.md
+  - Validation:
+      - Programme: validation/index.md
+      - Legacy regression: validation/legacy-regression.md
+  - Project lineage:
+      - Legacy provenance: legacy/provenance.md
+  - HPC:
+      - Sunbird workflow: hpc/sunbird.md
+  - Developer guide:
+      - Architecture: developer-guide/architecture.md
+      - Windows and MSYS2: developer-guide/windows-msys2.md
+  - Troubleshooting: troubleshooting.md
