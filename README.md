@@ -1,10 +1,8 @@
 <div align="center">
 
-# CBS3D++
+<img src="docs/assets/cbs3d-logo.svg" alt="CBS3D++ — A Finite Element based Fluid Dynamics Solver" width="100%">
 
-### A finite-element-based fluid dynamics solver
-
-**Incompressible flow · Multiphysics · Parallel scientific computing**
+<br>
 
 [Documentation](docs/index.md) · [Quick start](docs/getting-started/quickstart.md) · [Validation](docs/validation/index.md) · [Development status](docs/parallel/status.md) · [Contributing](CONTRIBUTING.md)
 
