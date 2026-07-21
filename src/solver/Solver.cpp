@@ -167,6 +167,12 @@ namespace cbs
 
         auditDistributedPreprocessing();
         auditDistributedMaterialMasks();
+
+        // Reconcile physical-wall flags, conformal-interface flags and
+        // area-weighted wall-normal contributions across shared nodes.
+        Preprocess::wallDetermination(s_);
+
+        auditDistributedWallClassification();
     }
 
 
@@ -318,7 +324,12 @@ namespace cbs
         // thermal capacitance used by the energy equation.
         Post::printStage("Mass matrix", "momentum and thermal capacitance");
         Preprocess::massMatrix(s_);
-        Post::printStageDone("Mass matrix", "lumped diagonals ready");
+
+        // Establish one persistent material classification for every node.
+        // In MPI mode this reconciles owner and ghost copies using bitwise OR.
+        Preprocess::buildMaterialNodeMasks(s_);
+
+        Post::printStageDone("Mass matrix", "lumped diagonals and material masks ready");
 
         // Identify all nodal and facial boundary groups required by the
         // momentum, pressure and energy equations.

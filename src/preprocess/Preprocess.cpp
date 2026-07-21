@@ -255,67 +255,69 @@ namespace cbs
         }
 
         //-------------------------------------------------------------------------
-        // Determines whether each node is connected to fluid and/or solid
-        // elements.
+        // Returns the validated persistent material-connectivity mask for one
+        // node.
         //
-        // Material convention:
-        //
-        //     mat_elem(e) = 0   fluid element
-        //     mat_elem(e) > 0   solid/material element
-        //
-        // A conformal CHT interface node is touched by at least one fluid
-        // element and at least one solid element.
+        // The mask must already have been built by
+        // Preprocess::buildMaterialNodeMasks(). In an MPI calculation that
+        // routine reconciles owner and ghost copies before these predicates are
+        // used.
         //-------------------------------------------------------------------------
-        void build_material_node_touch_masks(
+        Int material_node_mask(
             const CBSStateSI& s,
-            std::vector<char>& touches_fluid,
-            std::vector<char>& touches_solid)
+            Int ip,
+            const char* context)
         {
-            touches_fluid.assign(static_cast<Size>(s.cfg.npoin) + 1U, 0);
-            touches_solid.assign(static_cast<Size>(s.cfg.npoin) + 1U, 0);
-
-            for (Int ie = 1; ie <= s.cfg.nelem; ++ie)
+            if (ip < 1 || ip > s.cfg.npoin)
             {
-                const bool fluid_element = (s.mat_elem(ie) == 0);
-
-                for (Int in = 1; in <= s.cfg.nep; ++in)
-                {
-                    const Int ip = s.intma(in, ie);
-
-                    if (ip < 1 || ip > s.cfg.npoin)
-                    {
-                        throw std::runtime_error(
-                            "Preprocess - material node mask found element node out of range");
-                    }
-
-                    if (fluid_element)
-                    {
-                        touches_fluid[static_cast<Size>(ip)] = 1;
-                    }
-                    else
-                    {
-                        touches_solid[static_cast<Size>(ip)] = 1;
-                    }
-                }
+                throw std::runtime_error(
+                    std::string(context) + " - node index out of range");
             }
+
+            const Int mask = s.node_material_mask(ip);
+            const Int valid_mask =
+                CBSStateSI::node_touches_fluid |
+                CBSStateSI::node_touches_solid;
+
+            if (mask < CBSStateSI::node_touches_fluid ||
+                mask > valid_mask)
+            {
+                throw std::runtime_error(
+                    std::string(context)
+                    + " - material node mask has not been built or is invalid");
+            }
+
+            return mask;
         }
 
         // Returns true when the node belongs to at least one fluid element.
         bool touches_fluid_domain(
-            const std::vector<char>& touches_fluid,
+            const CBSStateSI& s,
             Int ip)
         {
-            return touches_fluid[static_cast<Size>(ip)] != 0;
+            return
+                (material_node_mask(
+                    s,
+                    ip,
+                    "Preprocess::touches_fluid_domain")
+                 & CBSStateSI::node_touches_fluid) != 0;
         }
 
         // Returns true when the node is shared by fluid and solid elements.
         bool is_conformal_fluid_solid_interface_node(
-            const std::vector<char>& touches_fluid,
-            const std::vector<char>& touches_solid,
+            const CBSStateSI& s,
             Int ip)
         {
-            return touches_fluid[static_cast<Size>(ip)] != 0 &&
-                   touches_solid[static_cast<Size>(ip)] != 0;
+            const Int interface_mask =
+                CBSStateSI::node_touches_fluid |
+                CBSStateSI::node_touches_solid;
+
+            return
+                material_node_mask(
+                    s,
+                    ip,
+                    "Preprocess::is_conformal_fluid_solid_interface_node")
+                == interface_mask;
         }
     }
 
@@ -1057,12 +1059,29 @@ namespace cbs
         validate_core_dimensions(s);
         validateBoundaryFlags(s);
 
-        std::vector<Int> node_is_wall(static_cast<Size>(s.cfg.npoin) + 1U, 0);
+        const Int physical_wall_bit =
+            CBSStateSI::node_on_physical_wall;
+
+        const Int material_interface_bit =
+            CBSStateSI::node_on_material_interface;
+
+        const Int valid_wall_mask =
+            physical_wall_bit |
+            material_interface_bit;
 
         s.cfg.npoin_wall = 0;
         s.wall_node_list.fill(0);
         s.wall_node_norm.fill(0.0);
+        s.node_wall_mask.fill(0);
+        s.node_wall_normal_sum.fill(0.0);
 
+        // -------------------------------------------------------------
+        // Rank-local physical-boundary contribution.
+        //
+        // Physical boundary faces occur exactly once in the distributed
+        // mesh. Their nodal flags and area-weighted normal contributions
+        // are initially accumulated on the rank that owns the face.
+        // -------------------------------------------------------------
         for (Int ib = 1; ib <= s.cfg.nboun; ++ib)
         {
             const Int bc = s.iside(s.cfg.bsid, ib);
@@ -1077,7 +1096,8 @@ namespace cbs
             if (area <= 0.0 || !std::isfinite(area))
             {
                 throw std::runtime_error(
-                    "Preprocess::wallDetermination - invalid boundary face area");
+                    "Preprocess::wallDetermination - "
+                    "invalid physical-wall face area");
             }
 
             for (Int in = 1; in <= s.cfg.nsidp; ++in)
@@ -1087,71 +1107,148 @@ namespace cbs
                 if (ip < 1 || ip > s.cfg.npoin)
                 {
                     throw std::runtime_error(
-                        "Preprocess::wallDetermination - wall node out of range");
+                        "Preprocess::wallDetermination - "
+                        "physical-wall node out of range");
                 }
 
-                if (node_is_wall[static_cast<Size>(ip)] == 0)
-                {
-                    ++s.cfg.npoin_wall;
-                    s.wall_node_list(s.cfg.npoin_wall) = ip;
-                    node_is_wall[static_cast<Size>(ip)] = s.cfg.npoin_wall;
-                }
+                s.node_wall_mask(ip) |= physical_wall_bit;
 
-                const Int iw = node_is_wall[static_cast<Size>(ip)];
+                s.node_wall_normal_sum(1, ip) +=
+                    s.face_norm(1, ib);
 
-                s.wall_node_norm(1, iw) += s.face_norm(1, ib);
-                s.wall_node_norm(2, iw) += s.face_norm(2, ib);
-                s.wall_node_norm(3, iw) += s.face_norm(3, ib);
+                s.node_wall_normal_sum(2, ip) +=
+                    s.face_norm(2, ib);
+
+                s.node_wall_normal_sum(3, ip) +=
+                    s.face_norm(3, ib);
             }
         }
 
-        // Conformal CHT interfaces are internal mesh faces, not .plt boundary
-        // faces.  Therefore they do not appear as BC 901 in the boundary-face
-        // list.  They are detected by material adjacency instead: a node
-        // touched by both fluid and solid elements is a no-slip interface node.
-        std::vector<char> touches_fluid;
-        std::vector<char> touches_solid;
-        build_material_node_touch_masks(s, touches_fluid, touches_solid);
-
-        Int conformal_interface_nodes_added = 0;
-
+        // -------------------------------------------------------------
+        // Conformal CHT interfaces are detected from the persistent
+        // material-connectivity mask. This mask was reconciled before
+        // wallDetermination() was called.
+        // -------------------------------------------------------------
         for (Int ip = 1; ip <= s.cfg.npoin; ++ip)
         {
-            if (!is_conformal_fluid_solid_interface_node(touches_fluid, touches_solid, ip))
+            if (is_conformal_fluid_solid_interface_node(s, ip))
+            {
+                s.node_wall_mask(ip) |= material_interface_bit;
+            }
+        }
+
+#ifdef CBS3D_USE_MPI
+        if (s.mpi_enabled)
+        {
+            // A shared node may be marked by a physical wall face or material
+            // interface detected on a neighbouring rank. Combine all wall bits
+            // on the owner and then broadcast the final classification.
+            HaloExchange::orGhostMasksToOwners(
+                s.node_wall_mask,
+                s.partition_metadata);
+
+            HaloExchange::broadcastOwnedToGhosts(
+                s.node_wall_mask,
+                s.partition_metadata);
+
+            // Sum all area-weighted physical-wall normal contributions on the
+            // owner and copy the complete vector back to every ghost.
+            HaloExchange::sumGhostContributionsToOwners(
+                s.node_wall_normal_sum,
+                s.partition_metadata);
+
+            HaloExchange::broadcastOwnedToGhosts(
+                s.node_wall_normal_sum,
+                s.partition_metadata);
+        }
+#endif
+
+        Int material_interface_nodes_added = 0;
+
+        // -------------------------------------------------------------
+        // Rebuild the rank-local wall list after owner/ghost
+        // reconciliation. Every local copy of a shared node therefore receives
+        // the same wall classification and physical-wall normal.
+        // -------------------------------------------------------------
+        for (Int ip = 1; ip <= s.cfg.npoin; ++ip)
+        {
+            const Int wall_mask = s.node_wall_mask(ip);
+
+            if (wall_mask < 0 || wall_mask > valid_wall_mask)
+            {
+                throw std::runtime_error(
+                    "Preprocess::wallDetermination - "
+                    "invalid reconciled wall mask at node "
+                    + std::to_string(ip));
+            }
+
+            if (wall_mask == 0)
             {
                 continue;
             }
 
-            if (node_is_wall[static_cast<Size>(ip)] == 0)
+            ++s.cfg.npoin_wall;
+
+            const Int iw = s.cfg.npoin_wall;
+            s.wall_node_list(iw) = ip;
+
+            const bool physical_wall =
+                (wall_mask & physical_wall_bit) != 0;
+
+            const bool material_interface =
+                (wall_mask & material_interface_bit) != 0;
+
+            if (material_interface && !physical_wall)
             {
-                ++s.cfg.npoin_wall;
-                s.wall_node_list(s.cfg.npoin_wall) = ip;
-                node_is_wall[static_cast<Size>(ip)] = s.cfg.npoin_wall;
-                ++conformal_interface_nodes_added;
+                ++material_interface_nodes_added;
+            }
+
+            const Real nx = s.node_wall_normal_sum(1, ip);
+            const Real ny = s.node_wall_normal_sum(2, ip);
+            const Real nz = s.node_wall_normal_sum(3, ip);
+
+            if (!std::isfinite(nx) ||
+                !std::isfinite(ny) ||
+                !std::isfinite(nz))
+            {
+                throw std::runtime_error(
+                    "Preprocess::wallDetermination - "
+                    "non-finite reconciled wall normal");
+            }
+
+            const Real length =
+                std::sqrt(nx * nx + ny * ny + nz * nz);
+
+            if (physical_wall && length > 0.0)
+            {
+                s.wall_node_norm(1, iw) = nx / length;
+                s.wall_node_norm(2, iw) = ny / length;
+                s.wall_node_norm(3, iw) = nz / length;
+            }
+            else
+            {
+                // Interface-only nodes have no external boundary normal.
+                // At geometric corners, physical-face contributions can also
+                // cancel. Preserve the established zero-vector behaviour.
+                s.wall_node_norm(1, iw) = 0.0;
+                s.wall_node_norm(2, iw) = 0.0;
+                s.wall_node_norm(3, iw) = 0.0;
             }
         }
 
-        for (Int iw = 1; iw <= s.cfg.npoin_wall; ++iw)
+        // These are meaningful global values only in a serial calculation.
+        // Distributed global totals are printed
+        if (!s.mpi_enabled)
         {
-            const Real nx = s.wall_node_norm(1, iw);
-            const Real ny = s.wall_node_norm(2, iw);
-            const Real nz = s.wall_node_norm(3, iw);
-
-            const Real len = std::sqrt(nx * nx + ny * ny + nz * nz);
-
-            if (len > 0.0)
-            {
-                s.wall_node_norm(1, iw) /= len;
-                s.wall_node_norm(2, iw) /= len;
-                s.wall_node_norm(3, iw) /= len;
-            }
+            std::cout
+                << "Wall/interface no-slip nodes detected: "
+                << s.cfg.npoin_wall << "\n"
+                << "Conformal material-interface nodes added to "
+                   "no-slip list: "
+                << material_interface_nodes_added << "\n";
         }
-
-        std::cout << "Wall/interface no-slip nodes detected: "
-                  << s.cfg.npoin_wall << "\n";
-        std::cout << "Conformal material-interface nodes added to no-slip list: "
-                  << conformal_interface_nodes_added << "\n";
     }
+
 
     //=========================================================================
     // Converts a prescribed inlet mass-flow rate into velocity magnitude.
@@ -1276,10 +1373,6 @@ namespace cbs
     {
         validateBoundaryFlags(s);
 
-        std::vector<char> touches_fluid;
-        std::vector<char> touches_solid;
-        build_material_node_touch_masks(s, touches_fluid, touches_solid);
-
         std::vector<Int> node_is_fixed(static_cast<Size>(s.cfg.npoin) + 1U, 0);
 
         s.cfg.bc_fixed = 0;
@@ -1305,7 +1398,7 @@ namespace cbs
                         "Preprocess::detectPressureBoundaryNodes - pressure node out of range");
                 }
 
-                if (!touches_fluid_domain(touches_fluid, ip))
+                if (!touches_fluid_domain(s, ip))
                 {
                     throw std::runtime_error(
                         "Preprocess::detectPressureBoundaryNodes - pressure outlet node "
@@ -1332,13 +1425,13 @@ namespace cbs
         {
             Int ip = s.cfg.pnode;
 
-            if (ip < 1 || ip > s.cfg.npoin || !touches_fluid_domain(touches_fluid, ip))
+            if (ip < 1 || ip > s.cfg.npoin || !touches_fluid_domain(s, ip))
             {
                 ip = 0;
 
                 for (Int candidate = 1; candidate <= s.cfg.npoin; ++candidate)
                 {
-                    if (touches_fluid_domain(touches_fluid, candidate))
+                    if (touches_fluid_domain(s, candidate))
                     {
                         ip = candidate;
                         break;

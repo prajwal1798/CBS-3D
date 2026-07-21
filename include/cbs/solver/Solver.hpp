@@ -83,6 +83,10 @@ namespace cbs
         // Verifies the globally reconciled fluid/solid nodal masks.
         void auditDistributedMaterialMasks() const;
 
+        // Independently verifies distributed wall/interface classification and
+        // area-weighted wall-normal reconciliation.
+        void auditDistributedWallClassification() const;
+
         // Builds the element and global pressure operators used in CBS Step 2.
         void preparePressureSystem();
 

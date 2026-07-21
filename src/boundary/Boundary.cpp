@@ -183,69 +183,39 @@ namespace cbs
         }
 
         //-------------------------------------------------------------------------
-        // Determines whether each global node belongs to at least one fluid
-        // element and/or at least one solid element.
-        //
-        // A conformal CHT interface node is characterised by:
-        //
-        //     touches_fluid(ip) = true
-        //     touches_solid(ip) = true
-        //-------------------------------------------------------------------------
-        void build_node_material_touch_masks(
-            const CBSStateSI& s,
-            std::vector<char>& touches_fluid,
-            std::vector<char>& touches_solid)
-        {
-            touches_fluid.assign(static_cast<std::size_t>(s.cfg.npoin + 1), 0);
-            touches_solid.assign(static_cast<std::size_t>(s.cfg.npoin + 1), 0);
-
-            for (Int ie = 1; ie <= s.cfg.nelem; ++ie)
-            {
-                const bool fluid_element = (s.mat_elem(ie) == 0);
-
-                for (Int in = 1; in <= s.cfg.nep; ++in)
-                {
-                    const Int ip = s.intma(in, ie);
-                    check_node_range(s, ip, "Boundary::build_node_material_touch_masks");
-
-                    if (fluid_element)
-                    {
-                        touches_fluid[static_cast<std::size_t>(ip)] = 1;
-                    }
-                    else
-                    {
-                        touches_solid[static_cast<std::size_t>(ip)] = 1;
-                    }
-                }
-            }
-        }
-
-        //-------------------------------------------------------------------------
         // Removes every node touched by a solid element from the free velocity
         // space:
         //
         //     u(ip) = 0
         //
-        // This includes both solid-only nodes and shared fluid-solid interface
-        // nodes. Temperature remains continuous and is not modified here.
+        // node_material_mask is the persistent material classification built in
+        // preprocessing. In MPI mode its owner and ghost copies have already
+        // been reconciled.
         //-------------------------------------------------------------------------
         void enforce_zero_velocity_on_material_solid_touch_nodes(CBSStateSI& s)
         {
-            std::vector<char> touches_fluid;
-            std::vector<char> touches_solid;
-            build_node_material_touch_masks(s, touches_fluid, touches_solid);
-
             for (Int ip = 1; ip <= s.cfg.npoin; ++ip)
             {
-                const bool solid =
-                    touches_solid[static_cast<std::size_t>(ip)] != 0;
+                const Int mask = s.node_material_mask(ip);
+                const Int valid_mask =
+                    CBSStateSI::node_touches_fluid |
+                    CBSStateSI::node_touches_solid;
 
-                if (solid)
+                if (mask < CBSStateSI::node_touches_fluid ||
+                    mask > valid_mask)
                 {
-                    // In conformal CHT meshes, every node touched by a solid
-                    // element is outside the free velocity space.  This covers
-                    // both solid-only nodes and shared fluid-solid interface
-                    // nodes.  Temperature remains unconstrained here.
+                    throw std::runtime_error(
+                        "Boundary::applyVelocity - material node mask "
+                        "has not been built or is invalid");
+                }
+
+                const bool touches_solid =
+                    (mask & CBSStateSI::node_touches_solid) != 0;
+
+                if (touches_solid)
+                {
+                    // Both solid-only nodes and conformal interface nodes are
+                    // outside the free velocity space.
                     set_zero_velocity(s, ip);
                 }
             }
@@ -690,10 +660,6 @@ namespace cbs
     {
         validate_boundary_flags(s);
 
-        std::vector<char> touches_fluid;
-        std::vector<char> touches_solid;
-        build_node_material_touch_masks(s, touches_fluid, touches_solid);
-
         for (Int ib = 1; ib <= s.cfg.nboun; ++ib)
         {
             const Int bc = s.iside(s.cfg.bsid, ib);
@@ -713,10 +679,25 @@ namespace cbs
                 const Int ip = s.iside(in, ib);
                 check_node_range(s, ip, "Boundary::applyOutletBackflowControl");
 
-                if (touches_solid[static_cast<std::size_t>(ip)] != 0)
+                const Int material_mask = s.node_material_mask(ip);
+                const Int valid_material_mask =
+                    CBSStateSI::node_touches_fluid |
+                    CBSStateSI::node_touches_solid;
+
+                if (material_mask < CBSStateSI::node_touches_fluid ||
+                    material_mask > valid_material_mask)
                 {
-                    // Outlet backflow treatment belongs only to the free fluid
-                    // velocity space.  Interface/solid nodes remain no-slip.
+                    throw std::runtime_error(
+                        "Boundary::applyOutletBackflowControl - material node "
+                        "mask has not been built or is invalid");
+                }
+
+                if ((material_mask &
+                     CBSStateSI::node_touches_solid) != 0)
+                {
+                    // Outlet backflow treatment belongs only to the free-fluid
+                    // velocity space. Solid-only and conformal interface nodes
+                    // remain no-slip.
                     set_zero_velocity(s, ip);
                     continue;
                 }

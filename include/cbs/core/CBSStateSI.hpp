@@ -60,6 +60,15 @@ namespace cbs
         static constexpr Int node_touches_fluid = 1;
         static constexpr Int node_touches_solid = 2;
 
+        // Nodal no-slip classification bits.
+        //
+        //     0  not a no-slip node
+        //     1  belongs to at least one physical no-slip boundary face
+        //     2  belongs to the conformal fluid-solid material interface
+        //     3  belongs to both classifications
+        static constexpr Int node_on_physical_wall = 1;
+        static constexpr Int node_on_material_interface = 2;
+
         // --------------------------------------------------------------------
         // Problem configuration
         // --------------------------------------------------------------------
@@ -80,6 +89,13 @@ namespace cbs
         Array2D<Real> coord;      // Nodal coordinates: (ndim, npoin)
         Array1D<Int> mat_elem;    // Element material: 0 fluid, greater than 0 solid
         Array1D<Int> node_material_mask; // Nodal fluid/solid connectivity bits
+
+        // Reconciled no-slip classification for every local node.
+        Array1D<Int> node_wall_mask;
+
+        // Unnormalised area-weighted physical-wall normal sum indexed by local
+        // node. Interface-only nodes legitimately retain a zero vector.
+        Array2D<Real> node_wall_normal_sum;
 
         // --------------------------------------------------------------------
         // Primary solution variables
@@ -513,6 +529,8 @@ namespace cbs
             bc_values.resize(cfg.npoin);
             bc_list.resize(cfg.npoin);
             node_material_mask.resize(cfg.npoin);
+            node_wall_mask.resize(cfg.npoin);
+            node_wall_normal_sum.resize(cfg.ndim, cfg.npoin);
 
             // Element geometry and coefficients.
             dNkdx.resize(cfg.ndim * cfg.nep * cfg.nelem);
@@ -604,6 +622,8 @@ namespace cbs
             fedge.fill(0);
             mat_elem.fill(0);
             node_material_mask.fill(0);
+            node_wall_mask.fill(0);
+            node_wall_normal_sum.fill(0.0);
 
             rho_e.fill(1.0);
             cp_e.fill(1.0);
