@@ -1,0 +1,83 @@
+name: Validation or benchmark case
+description: Propose, document or review a verification/validation case
+title: "[Validation]: "
+labels:
+  - validation
+body:
+  - type: input
+    id: capability
+    attributes:
+      label: Solver capability
+      placeholder: Laminar flow, CHT, SA turbulence, distributed pressure solve, etc.
+    validations:
+      required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem definition
+      description: Geometry, equations, Reynolds number, material properties and boundary conditions
+    validations:
+      required: true
+
+  - type: textarea
+    id: reference
+    attributes:
+      label: Reference solution or data
+      description: Full citation, DOI, analytical solution or authorised legacy benchmark source
+    validations:
+      required: true
+
+  - type: textarea
+    id: outputs
+    attributes:
+      label: Comparison quantities
+      description: Field profiles, norms, drag/lift, pressure drop, heat flux, Strouhal number, scaling, etc.
+    validations:
+      required: true
+
+  - type: textarea
+    id: resolution
+    attributes:
+      label: Resolution study
+      description: Meshes, time steps, solver tolerances and domain-size sensitivity
+    validations:
+      required: true
+
+  - type: textarea
+    id: tolerances
+    attributes:
+      label: Proposed acceptance tolerances
+      description: Define thresholds before running the comparison
+    validations:
+      required: true
+
+  - type: textarea
+    id: artefacts
+    attributes:
+      label: Reproducibility artefacts
+      description: Input, extraction script, comparison script, compact data and plots
+
+  - type: dropdown
+    id: evidence
+    attributes:
+      label: Evidence class
+      options:
+        - Legacy regression
+        - Code verification
+        - Independent physical validation
+        - Parallel equivalence
+        - Strong scaling
+        - Weak scaling
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: rights
+    attributes:
+      label: Data and rights
+      options:
+        - label: The proposed data can be redistributed or will be linked from its authorised source.
+          required: true
+        - label: The case does not require publishing restricted legacy source.
+          required: true

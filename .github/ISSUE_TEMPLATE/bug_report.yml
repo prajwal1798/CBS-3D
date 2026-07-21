@@ -1,0 +1,104 @@
+name: Solver bug report
+description: Report a reproducible build, input, numerical or runtime defect
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Provide the smallest reproducible case. Remove credentials, private cluster identifiers and restricted legacy material.
+
+  - type: input
+    id: commit
+    attributes:
+      label: Git commit
+      description: Full commit SHA used for the run
+      placeholder: 0123456789abcdef...
+    validations:
+      required: true
+
+  - type: dropdown
+    id: category
+    attributes:
+      label: Failure category
+      options:
+        - Build or link
+        - Input or preprocessing
+        - Boundary conditions
+        - Pressure solver
+        - Momentum or CBS update
+        - Energy or multiphysics
+        - Turbulence
+        - OpenMP
+        - MPI or domain decomposition
+        - Output or post-processing
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: OS, compiler, CMake/Make, MPI, PETSc and HYPRE versions
+      render: text
+    validations:
+      required: true
+
+  - type: textarea
+    id: build
+    attributes:
+      label: Build command
+      render: shell
+    validations:
+      required: true
+
+  - type: textarea
+    id: run
+    attributes:
+      label: Run command and case files
+      description: Include executable name, case base name and input checksums
+      render: shell
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behaviour
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behaviour
+      description: Include the first incorrect message, iteration or field
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant log excerpt
+      description: Include startup audit and the first failure; do not paste enormous logs
+      render: text
+
+  - type: textarea
+    id: checks
+    attributes:
+      label: Checks already performed
+      description: Mesh totals, boundary/material maps, sanitizer, serial comparison, rank-count comparison, etc.
+
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: Submission checks
+      options:
+        - label: I removed credentials and private cluster identifiers.
+          required: true
+        - label: I did not attach restricted legacy source or documentation.
+          required: true
+        - label: I can provide a reproducible case or precise reproduction steps.
+          required: true

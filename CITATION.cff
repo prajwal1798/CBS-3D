@@ -1,0 +1,25 @@
+cff-version: 1.2.0
+message: >-
+  If you use CBS3D++ in research, cite the software repository and the
+  numerical references relevant to the configuration used.
+title: "CBS3D++: A finite-element-based fluid dynamics solver"
+type: software
+authors:
+  - family-names: Bharadwaj
+    given-names: Prajwal
+repository-code: "https://github.com/prajwal1798/CBS-3D"
+url: "https://github.com/prajwal1798/CBS-3D"
+keywords:
+  - computational fluid dynamics
+  - finite element method
+  - incompressible flow
+  - characteristic-based split
+  - conjugate heat transfer
+  - multiphysics
+  - parallel computing
+abstract: >-
+  CBS3D++ is a C++20 finite-element solver for three-dimensional
+  incompressible fluid dynamics. It uses a semi-implicit
+  Characteristic-Based Split pressure-projection formulation on linear
+  tetrahedral elements and includes active development for multiphysics,
+  turbulence modelling and distributed-memory parallel execution.
