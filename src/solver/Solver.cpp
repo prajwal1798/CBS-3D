@@ -173,6 +173,10 @@ namespace cbs
         Preprocess::wallDetermination(s_);
 
         auditDistributedWallClassification();
+
+        // Globally sum all physical BC 511 face areas and calculate one
+        // identical mass-flow inlet velocity on every MPI rank.
+        Preprocess::computeMassFlowInletVelocity(s_);
     }
 
 

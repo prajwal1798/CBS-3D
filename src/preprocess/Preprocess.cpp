@@ -1280,15 +1280,20 @@ namespace cbs
             return;
         }
 
-        if (s.cfg.inlet_density <= 0.0 || !std::isfinite(s.cfg.inlet_density))
+        if (s.cfg.inlet_density <= 0.0 ||
+            !std::isfinite(s.cfg.inlet_density))
         {
             throw std::runtime_error(
-                "Preprocess::computeMassFlowInletVelocity - inlet density must be positive");
+                "Preprocess::computeMassFlowInletVelocity - "
+                "inlet density must be positive");
         }
 
-        Real inlet_area = 0.0;
-        Int inlet_faces = 0;
+        Real local_inlet_area = 0.0;
+        Int local_inlet_faces = 0;
 
+        // Each physical inlet face occurs on exactly one rank-local
+        // partition. Artificial partition boundaries are not present in
+        // the physical boundary-face file.
         for (Int ib = 1; ib <= s.cfg.nboun; ++ib)
         {
             const Int bc = s.iside(s.cfg.bsid, ib);
@@ -1303,33 +1308,96 @@ namespace cbs
             if (area <= 0.0 || !std::isfinite(area))
             {
                 throw std::runtime_error(
-                    "Preprocess::computeMassFlowInletVelocity - invalid inlet face area");
+                    "Preprocess::computeMassFlowInletVelocity - "
+                    "invalid inlet face area");
             }
 
-            inlet_area += area;
-            ++inlet_faces;
+            local_inlet_area += area;
+            ++local_inlet_faces;
         }
+
+        Real inlet_area = local_inlet_area;
+        Int inlet_faces = local_inlet_faces;
+
+#ifdef CBS3D_USE_MPI
+        if (s.mpi_enabled)
+        {
+            const int area_error =
+                MPI_Allreduce(
+                    &local_inlet_area,
+                    &inlet_area,
+                    1,
+                    MPI_DOUBLE,
+                    MPI_SUM,
+                    MPI_COMM_WORLD);
+
+            if (area_error != MPI_SUCCESS)
+            {
+                throw std::runtime_error(
+                    "Preprocess::computeMassFlowInletVelocity - "
+                    "MPI_Allreduce failed for inlet area");
+            }
+
+            const int face_error =
+                MPI_Allreduce(
+                    &local_inlet_faces,
+                    &inlet_faces,
+                    1,
+                    MPI_INT,
+                    MPI_SUM,
+                    MPI_COMM_WORLD);
+
+            if (face_error != MPI_SUCCESS)
+            {
+                throw std::runtime_error(
+                    "Preprocess::computeMassFlowInletVelocity - "
+                    "MPI_Allreduce failed for inlet face count");
+            }
+        }
+#endif
 
         if (inlet_faces < 1)
         {
             throw std::runtime_error(
-                "Preprocess::computeMassFlowInletVelocity - mass-flow inlet enabled but no BC_ID 511 faces were found");
+                "Preprocess::computeMassFlowInletVelocity - "
+                "mass-flow inlet enabled but no BC_ID 511 faces were found");
         }
 
-        if (inlet_area <= 0.0 || !std::isfinite(inlet_area))
+        if (inlet_area <= 0.0 ||
+            !std::isfinite(inlet_area))
         {
             throw std::runtime_error(
-                "Preprocess::computeMassFlowInletVelocity - total inlet area is invalid");
+                "Preprocess::computeMassFlowInletVelocity - "
+                "global inlet area is invalid");
         }
 
         s.cfg.inlet_u_from_massflow =
-            s.cfg.inlet_mass_flow_rate / (s.cfg.inlet_density * inlet_area);
+            s.cfg.inlet_mass_flow_rate /
+            (s.cfg.inlet_density * inlet_area);
 
-        std::cout << "Mass-flow inlet faces: " << inlet_faces << "\n";
-        std::cout << "Mass-flow inlet area : " << inlet_area << "\n";
-        std::cout << "Mass-flow velocity magnitude: "
-                  << s.cfg.inlet_u_from_massflow << "\n";
-    }    //=========================================================================
+        if (!std::isfinite(s.cfg.inlet_u_from_massflow))
+        {
+            throw std::runtime_error(
+                "Preprocess::computeMassFlowInletVelocity - "
+                "computed inlet velocity is not finite");
+        }
+
+        // Avoid duplicate MPI output. Every rank nevertheless stores the same
+        // globally calculated inlet velocity.
+        if (!s.mpi_enabled || s.mpi_rank == 0)
+        {
+            std::cout
+                << "Mass-flow inlet faces: "
+                << inlet_faces << "\n"
+                << "Mass-flow inlet area : "
+                << inlet_area << "\n"
+                << "Mass-flow velocity magnitude: "
+                << s.cfg.inlet_u_from_massflow << "\n";
+        }
+    }
+
+
+    //=========================================================================
     // Initialises the scalar nodal velocity magnitude:
     //
     //     |u_i| = sqrt(u_i^2 + v_i^2 + w_i^2 + epsilon)
