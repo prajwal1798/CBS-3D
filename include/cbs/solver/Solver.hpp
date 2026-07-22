@@ -91,6 +91,10 @@ namespace cbs
         // validates owner/ghost flags and each rank-local pressure list.
         void auditDistributedPressureBoundary() const;
 
+        // Inventories global velocity-relevant boundary classifications,
+        // overlaps and inlet-normal multiplicity without modifying solver state.
+        void auditDistributedVelocityBoundaryInventory() const;
+
         // Builds the element and global pressure operators used in CBS Step 2.
         void preparePressureSystem();
 

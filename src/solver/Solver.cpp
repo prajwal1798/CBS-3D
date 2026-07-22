@@ -184,6 +184,10 @@ namespace cbs
 
         // Independently reconstruct and verify global pressure-boundary state.
         auditDistributedPressureBoundary();
+
+        // Measure the global velocity-boundary topology before defining a
+        // permanent distributed nodal priority and value representation.
+        auditDistributedVelocityBoundaryInventory();
     }
 
 
