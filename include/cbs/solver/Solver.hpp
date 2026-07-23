@@ -50,6 +50,10 @@ namespace cbs
         // Executes distributed Step 1 followed by the MPI/PETSc pressure step.
         void runDistributedStep2();
 
+        // Executes distributed Steps 1 to 3 and measures the post-correction
+        // weak-divergence residual on unconstrained pressure rows.
+        void runDistributedStep3();
+
         // Returns read-only access to the complete solver state.
         [[nodiscard]] const CBSStateSI& state() const noexcept;
 
