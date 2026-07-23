@@ -59,6 +59,11 @@ namespace cbs
         // then advanced for cfg.ntime iterations.
         void runDistributedLoop();
 
+        // Executes the DD-4B/DD-4C production loop with globally reduced
+        // component-wise convergence, early stopping, rank-zero residual CSV,
+        // and per-rank VTU plus rank-zero PVTU/PVD output.
+        void runDistributedProductionLoop();
+
         // Returns read-only access to the complete solver state.
         [[nodiscard]] const CBSStateSI& state() const noexcept;
 
