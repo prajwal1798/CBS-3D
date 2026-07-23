@@ -7,7 +7,7 @@
 //
 //     cbs3dpp_si <case_name>
 //
-// MPI persistent distributed-loop execution:
+// MPI DD-4B/DD-4C production-loop execution:
 //
 //     cbs3dpp_si <case_name> [partition_root]
 //
@@ -239,9 +239,10 @@ int main(int argc, char** argv)
 #ifdef CBS3D_USE_MPI
         if (mpi_size > 1)
         {
-            // Preprocess once, build the distributed PETSc matrix and AMG
-            // hierarchy once, then advance the complete distributed CBS loop.
-            solver.runDistributedLoop();
+            // Execute globally reduced component-wise convergence, steady or
+            // transient termination, rank-zero residual CSV, and distributed
+            // VTU/PVTU/PVD output while reusing one PETSc matrix/AMG hierarchy.
+            solver.runDistributedProductionLoop();
         }
         else
 #endif
