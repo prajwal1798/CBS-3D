@@ -54,6 +54,11 @@ namespace cbs
         // weak-divergence residual on unconstrained pressure rows.
         void runDistributedStep3();
 
+        // Executes the persistent distributed CBS iteration loop. Preprocessing,
+        // pressure-matrix assembly and AMG setup occur once; Steps 1 to 4 are
+        // then advanced for cfg.ntime iterations.
+        void runDistributedLoop();
+
         // Returns read-only access to the complete solver state.
         [[nodiscard]] const CBSStateSI& state() const noexcept;
 
