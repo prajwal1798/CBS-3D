@@ -47,6 +47,9 @@ namespace cbs
         // owner/ghost-consistent CBS momentum-predictor step.
         void runDistributedStep1();
 
+        // Executes distributed Step 1 followed by the MPI/PETSc pressure step.
+        void runDistributedStep2();
+
         // Returns read-only access to the complete solver state.
         [[nodiscard]] const CBSStateSI& state() const noexcept;
 
