@@ -20,6 +20,7 @@
 #include <array>
 #include <cmath>
 #include <iostream>
+#include <iomanip>
 #include <limits>
 #include <set>
 #include <stdexcept>
@@ -1394,6 +1395,555 @@ namespace cbs
                 << "Mass-flow velocity magnitude: "
                 << s.cfg.inlet_u_from_massflow << "\n";
         }
+    }
+
+
+    //=========================================================================
+    // Builds the persistent distributed nodal velocity-boundary state.
+    //
+    // Rank-local physical boundary faces first contribute integer
+    // classification bits and, for BC 511, area-weighted outward normals:
+    //
+    //     N_i = sum_{f incident on i} A_f n_f
+    //
+    // Shared-node integer classifications are reconciled with bitwise OR.
+    // Shared-node normal contributions are reconciled with summation.
+    //
+    // The final strong velocity priority is:
+    //
+    //     ordinary prescribed velocity
+    //         -> physical no-slip wall
+    //         -> moving-wall BC 500
+    //         -> material-solid/interface no-slip
+    //
+    // Pressure-outlet and symmetry membership are retained separately because
+    // neither represents a fixed three-component velocity value.
+    //=========================================================================
+    void Preprocess::buildVelocityBoundaryState(CBSStateSI& s)
+    {
+        validate_core_dimensions(s);
+        validateBoundaryFlags(s);
+
+        // Rank-independent boundary candidate bits. These are combined on
+        // shared-node owners with bitwise OR.
+        constexpr Int candidate_moving_wall = 1 << 0;
+        constexpr Int candidate_bc_503 = 1 << 1;
+        constexpr Int candidate_bc_507 = 1 << 2;
+        constexpr Int candidate_bc_508 = 1 << 3;
+        constexpr Int candidate_bc_510 = 1 << 4;
+        constexpr Int candidate_bc_511 = 1 << 5;
+        constexpr Int candidate_pressure_outlet = 1 << 6;
+        constexpr Int candidate_symmetry = 1 << 7;
+
+        const Int ordinary_prescribed_mask =
+            candidate_bc_503 |
+            candidate_bc_507 |
+            candidate_bc_508 |
+            candidate_bc_510 |
+            candidate_bc_511;
+
+        Array1D<Int> candidate_mask;
+        candidate_mask.resize(s.cfg.npoin);
+        candidate_mask.fill(0);
+
+        s.node_velocity_bc_type.fill(
+            CBSStateSI::velocity_bc_free);
+
+        s.node_velocity_bc_priority.fill(
+            CBSStateSI::velocity_priority_free);
+
+        s.node_velocity_bc_value.fill(0.0);
+        s.node_inlet_normal_sum.fill(0.0);
+        s.node_inlet_normal.fill(0.0);
+
+        s.node_massflow_inlet.fill(0);
+        s.node_pressure_outlet.fill(0);
+        s.node_symmetry.fill(0);
+
+        // -------------------------------------------------------------
+        // Rank-local physical-boundary contributions.
+        //
+        // Every physical boundary triangle occurs on exactly one rank.
+        // Its nodes may nevertheless be owned by another rank.
+        // -------------------------------------------------------------
+        for (Int ib = 1; ib <= s.cfg.nboun; ++ib)
+        {
+            const Int bc = s.iside(s.cfg.bsid, ib);
+
+            Int boundary_bit = 0;
+
+            if (bc == s.cfg.bc_adiabatic_prescribed_velocity)
+            {
+                boundary_bit = candidate_moving_wall;
+            }
+            else if (
+                bc == s.cfg.bc_temperature_zero_prescribed_velocity)
+            {
+                boundary_bit = candidate_bc_503;
+            }
+            else if (bc == s.cfg.bc_bfs_parabolic_inlet)
+            {
+                boundary_bit = candidate_bc_507;
+            }
+            else if (bc == s.cfg.bc_parabolic_inlet)
+            {
+                boundary_bit = candidate_bc_508;
+            }
+            else if (bc == s.cfg.bc_velocity_temperature_inlet)
+            {
+                boundary_bit = candidate_bc_510;
+            }
+            else if (bc == s.cfg.bc_massflow_temperature_inlet)
+            {
+                boundary_bit = candidate_bc_511;
+            }
+            else if (bc == s.cfg.bc_pressure_outlet)
+            {
+                boundary_bit = candidate_pressure_outlet;
+            }
+            else if (bc == s.cfg.bc_symmetry_no_flux)
+            {
+                boundary_bit = candidate_symmetry;
+            }
+            else
+            {
+                // No-slip state is already represented by node_wall_mask.
+                // Material-solid state is represented by node_material_mask.
+                // BC 504 and BC 902 do not impose strong velocity values.
+                continue;
+            }
+
+            const bool massflow_face =
+                bc == s.cfg.bc_massflow_temperature_inlet;
+
+            if (massflow_face)
+            {
+                const Real area = s.face_norm(4, ib);
+
+                if (area <= 0.0 ||
+                    !std::isfinite(area) ||
+                    !std::isfinite(s.face_norm(1, ib)) ||
+                    !std::isfinite(s.face_norm(2, ib)) ||
+                    !std::isfinite(s.face_norm(3, ib)))
+                {
+                    throw std::runtime_error(
+                        "Preprocess::buildVelocityBoundaryState - "
+                        "invalid BC 511 face normal");
+                }
+            }
+
+            for (Int in = 1; in <= s.cfg.nsidp; ++in)
+            {
+                const Int ip = s.iside(in, ib);
+
+                if (ip < 1 || ip > s.cfg.npoin)
+                {
+                    throw std::runtime_error(
+                        "Preprocess::buildVelocityBoundaryState - "
+                        "boundary node is outside the local node range");
+                }
+
+                candidate_mask(ip) |= boundary_bit;
+
+                if (massflow_face)
+                {
+                    // face_norm(1:3,ib) already stores A_f n_f.
+                    s.node_inlet_normal_sum(1, ip) +=
+                        s.face_norm(1, ib);
+
+                    s.node_inlet_normal_sum(2, ip) +=
+                        s.face_norm(2, ib);
+
+                    s.node_inlet_normal_sum(3, ip) +=
+                        s.face_norm(3, ib);
+                }
+            }
+        }
+
+#ifdef CBS3D_USE_MPI
+        if (s.mpi_enabled)
+        {
+            // Reconcile boundary membership on shared-node owners.
+            HaloExchange::orGhostMasksToOwners(
+                candidate_mask,
+                s.partition_metadata);
+
+            HaloExchange::broadcastOwnedToGhosts(
+                candidate_mask,
+                s.partition_metadata);
+
+            // Reconcile all BC 511 area-weighted normal contributions.
+            HaloExchange::sumGhostContributionsToOwners(
+                s.node_inlet_normal_sum,
+                s.partition_metadata);
+
+            HaloExchange::broadcastOwnedToGhosts(
+                s.node_inlet_normal_sum,
+                s.partition_metadata);
+        }
+#else
+        if (s.mpi_enabled)
+        {
+            throw std::runtime_error(
+                "Preprocess::buildVelocityBoundaryState - "
+                "MPI state requires an MPI-enabled build");
+        }
+#endif
+
+        const auto count_bits = [](Int value) -> Int
+        {
+            Int count = 0;
+
+            while (value != 0)
+            {
+                count += value & 1;
+                value >>= 1;
+            }
+
+            return count;
+        };
+
+        const auto bfs_profile = [](Real y) -> Real
+        {
+            return
+                0.6624 * std::pow(y, 6)
+                - 7.5547 * std::pow(y, 5)
+                + 33.9 * std::pow(y, 4)
+                - 75.283 * std::pow(y, 3)
+                + 83.368 * std::pow(y, 2)
+                - 37.793 * y
+                + 2.6959;
+        };
+
+        const auto rectangular_profile = [](Real y) -> Real
+        {
+            return 6.0 * y * (1.0 - y);
+        };
+
+        // -------------------------------------------------------------
+        // Derive the complete nodal state from reconciled input masks.
+        // -------------------------------------------------------------
+        for (Int ip = 1; ip <= s.cfg.npoin; ++ip)
+        {
+            const Int candidates = candidate_mask(ip);
+
+            const bool has_moving_wall =
+                (candidates & candidate_moving_wall) != 0;
+
+            const bool has_bc_503 =
+                (candidates & candidate_bc_503) != 0;
+
+            const bool has_bc_507 =
+                (candidates & candidate_bc_507) != 0;
+
+            const bool has_bc_508 =
+                (candidates & candidate_bc_508) != 0;
+
+            const bool has_bc_510 =
+                (candidates & candidate_bc_510) != 0;
+
+            const bool has_bc_511 =
+                (candidates & candidate_bc_511) != 0;
+
+            const bool has_pressure_outlet =
+                (candidates & candidate_pressure_outlet) != 0;
+
+            const bool has_symmetry =
+                (candidates & candidate_symmetry) != 0;
+
+            s.node_massflow_inlet(ip) =
+                has_bc_511 ? 1 : 0;
+
+            s.node_pressure_outlet(ip) =
+                has_pressure_outlet ? 1 : 0;
+
+            s.node_symmetry(ip) =
+                has_symmetry ? 1 : 0;
+
+            // ---------------------------------------------------------
+            // Normalise the globally assembled BC 511 nodal normal.
+            // ---------------------------------------------------------
+            if (has_bc_511)
+            {
+                const Real nx =
+                    s.node_inlet_normal_sum(1, ip);
+
+                const Real ny =
+                    s.node_inlet_normal_sum(2, ip);
+
+                const Real nz =
+                    s.node_inlet_normal_sum(3, ip);
+
+                const Real magnitude =
+                    std::sqrt(
+                        nx * nx +
+                        ny * ny +
+                        nz * nz);
+
+                if (!std::isfinite(magnitude) ||
+                    magnitude <= 1.0e-14)
+                {
+                    const Size local_index =
+                        static_cast<Size>(ip);
+
+                    long long global_node = -1;
+                    Int owner_rank = -1;
+
+                    if (local_index <
+                        s.partition_metadata.local_to_global_node.size())
+                    {
+                        global_node = static_cast<long long>(
+                            s.partition_metadata
+                                .local_to_global_node[local_index]);
+                    }
+
+                    if (local_index <
+                        s.partition_metadata.node_owner_rank.size())
+                    {
+                        owner_rank =
+                            s.partition_metadata
+                                .node_owner_rank[local_index];
+                    }
+
+                    std::cerr
+                        << std::scientific
+                        << std::setprecision(17)
+                        << "DD-2D1A-2 BC 511 normal diagnostic:"
+                        << " rank=" << s.mpi_rank
+                        << " local_node=" << ip
+                        << " global_node=" << global_node
+                        << " owner_rank=" << owner_rank
+                        << " candidate_mask=" << candidates
+                        << " normal_sum=("
+                        << nx << ","
+                        << ny << ","
+                        << nz << ")"
+                        << " magnitude=" << magnitude
+                        << " threshold=1.00000000000000000e-14"
+                        << "\n";
+
+                    throw std::runtime_error(
+                        "Preprocess::buildVelocityBoundaryState - "
+                        "BC 511 node has a zero or invalid resultant normal");
+                }
+
+                s.node_inlet_normal(1, ip) = nx / magnitude;
+                s.node_inlet_normal(2, ip) = ny / magnitude;
+                s.node_inlet_normal(3, ip) = nz / magnitude;
+            }
+
+            const Int material_mask =
+                s.node_material_mask(ip);
+
+            const Int valid_material_mask =
+                CBSStateSI::node_touches_fluid |
+                CBSStateSI::node_touches_solid;
+
+            if (material_mask < CBSStateSI::node_touches_fluid ||
+                material_mask > valid_material_mask)
+            {
+                throw std::runtime_error(
+                    "Preprocess::buildVelocityBoundaryState - "
+                    "invalid material node mask");
+            }
+
+            const Int wall_mask =
+                s.node_wall_mask(ip);
+
+            const Int valid_wall_mask =
+                CBSStateSI::node_on_physical_wall |
+                CBSStateSI::node_on_material_interface;
+
+            if (wall_mask < 0 || wall_mask > valid_wall_mask)
+            {
+                throw std::runtime_error(
+                    "Preprocess::buildVelocityBoundaryState - "
+                    "invalid wall node mask");
+            }
+
+            const bool touches_solid =
+                (material_mask &
+                 CBSStateSI::node_touches_solid) != 0;
+
+            const bool physical_wall =
+                (wall_mask &
+                 CBSStateSI::node_on_physical_wall) != 0;
+
+            const Int ordinary_count =
+                count_bits(
+                    candidates &
+                    ordinary_prescribed_mask);
+
+            // ---------------------------------------------------------
+            // Priority 4: solid-only and fluid-solid interface nodes.
+            // ---------------------------------------------------------
+            if (touches_solid)
+            {
+                s.node_velocity_bc_type(ip) =
+                    CBSStateSI::velocity_bc_noslip;
+
+                s.node_velocity_bc_priority(ip) =
+                    CBSStateSI::velocity_priority_material_solid;
+            }
+
+            // ---------------------------------------------------------
+            // Priority 3: moving wall BC 500.
+
+            else if (has_moving_wall)
+            {
+                s.node_velocity_bc_type(ip) =
+                    CBSStateSI::velocity_bc_moving_wall;
+
+                s.node_velocity_bc_priority(ip) =
+                    CBSStateSI::velocity_priority_moving_wall;
+
+                s.node_velocity_bc_value(1, ip) =
+                    s.cfg.inlet_u;
+
+                s.node_velocity_bc_value(2, ip) =
+                    s.cfg.inlet_v;
+
+                s.node_velocity_bc_value(3, ip) =
+                    s.cfg.inlet_w;
+            }
+
+            // ---------------------------------------------------------
+            // Priority 2: physical no-slip wall.
+            // ---------------------------------------------------------
+            else if (physical_wall)
+            {
+                s.node_velocity_bc_type(ip) =
+                    CBSStateSI::velocity_bc_noslip;
+
+                s.node_velocity_bc_priority(ip) =
+                    CBSStateSI::velocity_priority_physical_wall;
+            }
+
+            // ---------------------------------------------------------
+            // Priority 1: ordinary prescribed velocity.
+            // ---------------------------------------------------------
+            else if (ordinary_count > 0)
+            {
+                if (ordinary_count != 1)
+                {
+                    throw std::runtime_error(
+                        "Preprocess::buildVelocityBoundaryState - "
+                        "multiple ordinary prescribed-velocity families "
+                        "remain active at one unconstrained node");
+                }
+
+                s.node_velocity_bc_type(ip) =
+                    CBSStateSI::velocity_bc_prescribed;
+
+                s.node_velocity_bc_priority(ip) =
+                    CBSStateSI::velocity_priority_prescribed;
+
+                if (has_bc_503)
+                {
+                    s.node_velocity_bc_value(1, ip) = 1.0;
+                }
+                else if (has_bc_507)
+                {
+                    s.node_velocity_bc_value(1, ip) =
+                        bfs_profile(s.coord(2, ip));
+                }
+                else if (has_bc_508)
+                {
+                    s.node_velocity_bc_value(1, ip) =
+                        rectangular_profile(s.coord(2, ip));
+                }
+                else if (has_bc_510)
+                {
+                    s.node_velocity_bc_value(1, ip) =
+                        s.cfg.inlet_u;
+
+                    s.node_velocity_bc_value(2, ip) =
+                        s.cfg.inlet_v;
+
+                    s.node_velocity_bc_value(3, ip) =
+                        s.cfg.inlet_w;
+                }
+                else if (has_bc_511)
+                {
+                    if (s.cfg.mass_flow_inlet_enabled > 0)
+                    {
+                        s.node_velocity_bc_value(1, ip) =
+                            -s.cfg.inlet_u_from_massflow *
+                            s.node_inlet_normal(1, ip);
+
+                        s.node_velocity_bc_value(2, ip) =
+                            -s.cfg.inlet_u_from_massflow *
+                            s.node_inlet_normal(2, ip);
+
+                        s.node_velocity_bc_value(3, ip) =
+                            -s.cfg.inlet_u_from_massflow *
+                            s.node_inlet_normal(3, ip);
+                    }
+                    else
+                    {
+                        s.node_velocity_bc_value(1, ip) =
+                            s.cfg.inlet_u;
+
+                        s.node_velocity_bc_value(2, ip) =
+                            s.cfg.inlet_v;
+
+                        s.node_velocity_bc_value(3, ip) =
+                            s.cfg.inlet_w;
+                    }
+                }
+            }
+
+            for (Int idim = 1;
+                 idim <= s.cfg.ndim;
+                 ++idim)
+            {
+                if (!std::isfinite(
+                        s.node_velocity_bc_value(idim, ip)) ||
+                    !std::isfinite(
+                        s.node_inlet_normal(idim, ip)) ||
+                    !std::isfinite(
+                        s.node_inlet_normal_sum(idim, ip)))
+                {
+                    throw std::runtime_error(
+                        "Preprocess::buildVelocityBoundaryState - "
+                        "non-finite persistent nodal boundary state");
+                }
+            }
+        }
+
+#ifdef CBS3D_USE_MPI
+        if (s.mpi_enabled)
+        {
+            // The owner is authoritative for the completed persistent state.
+            HaloExchange::broadcastOwnedToGhosts(
+                s.node_velocity_bc_type,
+                s.partition_metadata);
+
+            HaloExchange::broadcastOwnedToGhosts(
+                s.node_velocity_bc_priority,
+                s.partition_metadata);
+
+            HaloExchange::broadcastOwnedToGhosts(
+                s.node_velocity_bc_value,
+                s.partition_metadata);
+
+            HaloExchange::broadcastOwnedToGhosts(
+                s.node_inlet_normal,
+                s.partition_metadata);
+
+            HaloExchange::broadcastOwnedToGhosts(
+                s.node_massflow_inlet,
+                s.partition_metadata);
+
+            HaloExchange::broadcastOwnedToGhosts(
+                s.node_pressure_outlet,
+                s.partition_metadata);
+
+            HaloExchange::broadcastOwnedToGhosts(
+                s.node_symmetry,
+                s.partition_metadata);
+        }
+#endif
     }
 
 

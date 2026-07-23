@@ -188,6 +188,10 @@ namespace cbs
         // Measure the global velocity-boundary topology before defining a
         // permanent distributed nodal priority and value representation.
         auditDistributedVelocityBoundaryInventory();
+
+        // Construct the persistent owner/ghost-consistent velocity-boundary
+        // classification, priority, prescribed values and BC 511 normals.
+        Preprocess::buildVelocityBoundaryState(s_);
     }
 
 

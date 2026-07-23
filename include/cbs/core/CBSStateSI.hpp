@@ -69,6 +69,19 @@ namespace cbs
         static constexpr Int node_on_physical_wall = 1;
         static constexpr Int node_on_material_interface = 2;
 
+        // Final strong nodal velocity-boundary type.
+        static constexpr Int velocity_bc_free = 0;
+        static constexpr Int velocity_bc_prescribed = 1;
+        static constexpr Int velocity_bc_noslip = 2;
+        static constexpr Int velocity_bc_moving_wall = 3;
+
+        // Priority used to resolve overlapping velocity conditions.
+        static constexpr Int velocity_priority_free = 0;
+        static constexpr Int velocity_priority_prescribed = 1;
+        static constexpr Int velocity_priority_physical_wall = 2;
+        static constexpr Int velocity_priority_moving_wall = 3;
+        static constexpr Int velocity_priority_material_solid = 4;
+
         // --------------------------------------------------------------------
         // Problem configuration
         // --------------------------------------------------------------------
@@ -102,6 +115,33 @@ namespace cbs
         //     0  pressure is not prescribed
         //     1  pressure is prescribed at this node
         Array1D<Int> node_pressure_fixed;
+
+        // Final distributed strong velocity-boundary classification.
+        Array1D<Int> node_velocity_bc_type;
+
+        // Final distributed velocity-boundary priority.
+        Array1D<Int> node_velocity_bc_priority;
+
+        // Final prescribed nodal velocity:
+        //
+        //     node_velocity_bc_value(1:3, ip)
+        Array2D<Real> node_velocity_bc_value;
+
+        // Unnormalised area-weighted BC 511 nodal normal:
+        //
+        //     sum over incident inlet faces of A_f n_f
+        Array2D<Real> node_inlet_normal_sum;
+
+        // Normalised outward BC 511 nodal normal.
+        Array2D<Real> node_inlet_normal;
+
+        // Boundary-topology flags kept separate from strong velocity state.
+        Array1D<Int> node_massflow_inlet;
+        Array1D<Int> node_pressure_outlet;
+        Array1D<Int> node_symmetry;
+
+
+
 
         // --------------------------------------------------------------------
         // Primary solution variables
@@ -539,6 +579,17 @@ namespace cbs
             node_wall_normal_sum.resize(cfg.ndim, cfg.npoin);
             node_pressure_fixed.resize(cfg.npoin);
 
+            node_velocity_bc_type.resize(cfg.npoin);
+            node_velocity_bc_priority.resize(cfg.npoin);
+            node_velocity_bc_value.resize(cfg.ndim, cfg.npoin);
+
+            node_inlet_normal_sum.resize(cfg.ndim, cfg.npoin);
+            node_inlet_normal.resize(cfg.ndim, cfg.npoin);
+
+            node_massflow_inlet.resize(cfg.npoin);
+            node_pressure_outlet.resize(cfg.npoin);
+            node_symmetry.resize(cfg.npoin);
+
             // Element geometry and coefficients.
             dNkdx.resize(cfg.ndim * cfg.nep * cfg.nelem);
             detJ.resize(cfg.nelem);
@@ -632,6 +683,17 @@ namespace cbs
             node_wall_mask.fill(0);
             node_wall_normal_sum.fill(0.0);
             node_pressure_fixed.fill(0);
+
+            node_velocity_bc_type.fill(velocity_bc_free);
+            node_velocity_bc_priority.fill(velocity_priority_free);
+            node_velocity_bc_value.fill(0.0);
+
+            node_inlet_normal_sum.fill(0.0);
+            node_inlet_normal.fill(0.0);
+
+            node_massflow_inlet.fill(0);
+            node_pressure_outlet.fill(0);
+            node_symmetry.fill(0);
 
             rho_e.fill(1.0);
             cp_e.fill(1.0);

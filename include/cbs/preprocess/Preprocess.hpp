@@ -72,6 +72,10 @@ namespace cbs
         // Convert the prescribed inlet mass-flow rate into velocity magnitude.
         static void computeMassFlowInletVelocity(CBSStateSI& s);
 
+        // Build the persistent distributed nodal velocity-boundary state,
+        // including reconciled BC 511 inlet normals and boundary priorities.
+        static void buildVelocityBoundaryState(CBSStateSI& s);
+
         // Initialise the nodal velocity magnitude and its previous value.
         static void initialiseVelocityMagnitude(CBSStateSI& s);
 
