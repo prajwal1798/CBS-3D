@@ -3,8 +3,8 @@
 
 This script is intentionally compatible with the system Python 3.6 available on
 Sunbird. It checks that every requested rank has the complete local case and
-that each .mpi metadata header reports the expected rank, communicator size and
-common global mesh counts.
+that each .mpi metadata header reports the expected one-based partition ID,
+zero-based MPI rank, communicator size and common global mesh counts.
 """
 
 import argparse
@@ -79,6 +79,7 @@ def main():
     print("Partition root : {}".format(root))
     print("Case           : {}".format(case_name))
     print("Expected ranks : {}".format(expected_ranks))
+    print("Convention     : partition_id = mpi_rank + 1")
     print()
 
     for rank in range(expected_ranks):
@@ -111,9 +112,14 @@ def main():
                 global_nboun,
             ) = parse_partition_header(metadata_path)
 
-            if partition_id != rank:
+            expected_partition_id = rank + 1
+
+            if partition_id != expected_partition_id:
                 raise ValueError(
-                    "partition_id={}, expected {}".format(partition_id, rank)
+                    "partition_id={}, expected {} (= mpi_rank + 1)".format(
+                        partition_id,
+                        expected_partition_id,
+                    )
                 )
 
             if metadata_rank != rank:
@@ -148,8 +154,9 @@ def main():
             continue
 
         print(
-            "rank {}: PASS  GLOBAL={}/{}/{}".format(
+            "rank {}: PASS  partition_id={}  GLOBAL={}/{}/{}".format(
                 text,
+                partition_id,
                 global_nelem,
                 global_npoin,
                 global_nboun,
