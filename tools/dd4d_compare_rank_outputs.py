@@ -6,15 +6,12 @@ state from each run, retains only owner copies, matches nodes by global_node_id,
 and reports absolute and relative L2/max differences for u, v, w, pressure and
 temperature. The script also compares the rank-zero residual CSV histories.
 
-The VTU pieces are ASCII and may be hundreds of megabytes. This reader scans the
-files line by line and never constructs an XML tree for a VTU piece.
+The implementation is compatible with the system Python 3.6 on Sunbird. VTU
+pieces are scanned line by line and are never loaded as XML trees.
 """
-
-from __future__ import annotations
 
 import argparse
 import csv
-from dataclasses import dataclass
 import json
 import math
 from pathlib import Path
@@ -42,10 +39,12 @@ CSV_FIELDS = (
 )
 
 
-@dataclass(frozen=True)
-class FieldTolerance:
-    absolute: float
-    relative: float
+class FieldTolerance(object):
+    __slots__ = ("absolute", "relative")
+
+    def __init__(self, absolute, relative):
+        self.absolute = float(absolute)
+        self.relative = float(relative)
 
 
 DEFAULT_TOLERANCES = {
@@ -57,51 +56,52 @@ DEFAULT_TOLERANCES = {
 }
 
 
-def final_pvtu(output_dir: Path, case_name: str) -> tuple[int, Path]:
-    candidates: list[tuple[int, Path]] = []
+def final_pvtu(output_dir, case_name):
+    candidates = []
 
-    for path in output_dir.glob(f"{case_name}_step_*.pvtu"):
+    for path in output_dir.glob("{}_step_*.pvtu".format(case_name)):
         match = STEP_PATTERN.search(path.name)
         if match:
             candidates.append((int(match.group(1)), path))
 
     if not candidates:
         raise FileNotFoundError(
-            f"No {case_name}_step_*.pvtu files in {output_dir}"
+            "No {}_step_*.pvtu files in {}".format(case_name, output_dir)
         )
 
     return max(candidates, key=lambda item: item[0])
 
 
-def pvtu_piece_paths(pvtu_path: Path) -> list[Path]:
-    tree = ET.parse(pvtu_path)
+def pvtu_piece_paths(pvtu_path):
+    tree = ET.parse(str(pvtu_path))
     pieces = []
 
     for element in tree.findall(".//Piece"):
         source = element.attrib.get("Source")
         if not source:
-            raise ValueError(f"{pvtu_path}: Piece has no Source attribute")
+            raise ValueError(
+                "{}: Piece has no Source attribute".format(pvtu_path)
+            )
 
         path = pvtu_path.parent / source
         if not path.is_file():
             raise FileNotFoundError(
-                f"{pvtu_path}: referenced VTU piece is missing: {path}"
+                "{}: referenced VTU piece is missing: {}".format(
+                    pvtu_path,
+                    path,
+                )
             )
         pieces.append(path)
 
     if not pieces:
-        raise ValueError(f"{pvtu_path}: contains no Piece elements")
+        raise ValueError("{}: contains no Piece elements".format(pvtu_path))
 
     return pieces
 
 
-def read_data_array(
-    path: Path,
-    name: str,
-    converter,
-) -> list:
-    marker = f'Name="{name}"'
-    values: list = []
+def read_data_array(path, name, converter):
+    marker = 'Name="{}"'.format(name)
+    values = []
     in_array = False
 
     with path.open("r", encoding="utf-8") as stream:
@@ -119,26 +119,33 @@ def read_data_array(
                     values.append(converter(token))
                 except ValueError as error:
                     raise ValueError(
-                        f"{path}:{line_number}: invalid value in {name}: {token}"
+                        "{}:{}: invalid value in {}: {}".format(
+                            path,
+                            line_number,
+                            name,
+                            token,
+                        )
                     ) from error
 
-    raise ValueError(f"{path}: DataArray {name!r} was not terminated")
+    raise ValueError(
+        "{}: DataArray {!r} was not terminated".format(path, name)
+    )
 
 
-def load_owned_solution(
-    output_dir: Path,
-    case_name: str,
-) -> tuple[int, int, dict[int, tuple[float, float, float, float, float]]]:
+def load_owned_solution(output_dir, case_name):
     iteration, pvtu = final_pvtu(output_dir, case_name)
     pieces = pvtu_piece_paths(pvtu)
 
-    # Mutable records are used only while loading. Tuple ordering is:
-    # u, v, w, pressure, temperature.
-    records: dict[int, list[float]] = {}
+    # Mutable record order: u, v, w, pressure, temperature.
+    records = {}
 
     for piece_index, piece in enumerate(pieces, start=1):
         print(
-            f"  reading piece {piece_index}/{len(pieces)}: {piece.name}",
+            "  reading piece {}/{}: {}".format(
+                piece_index,
+                len(pieces),
+                piece.name,
+            ),
             flush=True,
         )
 
@@ -147,7 +154,7 @@ def load_owned_solution(
 
         if len(global_ids) != len(is_owned):
             raise ValueError(
-                f"{piece}: global_node_id/is_owned length mismatch"
+                "{}: global_node_id/is_owned length mismatch".format(piece)
             )
 
         owned_indices = [
@@ -158,7 +165,10 @@ def load_owned_solution(
             global_id = global_ids[index]
             if global_id in records:
                 raise ValueError(
-                    f"Duplicate owned global node {global_id} in {piece}"
+                    "Duplicate owned global node {} in {}".format(
+                        global_id,
+                        piece,
+                    )
                 )
             records[global_id] = [math.nan] * 5
 
@@ -169,11 +179,11 @@ def load_owned_solution(
         node_count = len(global_ids)
 
         if len(pressure) != node_count:
-            raise ValueError(f"{piece}: pressure length mismatch")
+            raise ValueError("{}: pressure length mismatch".format(piece))
         if len(temperature) != node_count:
-            raise ValueError(f"{piece}: temperature length mismatch")
+            raise ValueError("{}: temperature length mismatch".format(piece))
         if len(velocity) != 3 * node_count:
-            raise ValueError(f"{piece}: velocity length mismatch")
+            raise ValueError("{}: velocity length mismatch".format(piece))
 
         for index in owned_indices:
             global_id = global_ids[index]
@@ -185,25 +195,21 @@ def load_owned_solution(
             record[3] = pressure[index]
             record[4] = temperature[index]
 
-    immutable_records: dict[
-        int, tuple[float, float, float, float, float]
-    ] = {}
+    immutable_records = {}
 
     for global_id, record in records.items():
         if not all(math.isfinite(value) for value in record):
             raise ValueError(
-                f"Non-finite or incomplete field record at global node {global_id}"
+                "Non-finite or incomplete field record at global node {}".format(
+                    global_id
+                )
             )
-        immutable_records[global_id] = tuple(record)  # type: ignore[arg-type]
+        immutable_records[global_id] = tuple(record)
 
     return iteration, len(pieces), immutable_records
 
 
-def compare_fields(
-    reference: dict[int, tuple[float, float, float, float, float]],
-    candidate: dict[int, tuple[float, float, float, float, float]],
-    tolerances: dict[str, FieldTolerance],
-) -> tuple[bool, dict[str, dict[str, float | bool]]]:
+def compare_fields(reference, candidate, tolerances):
     reference_ids = set(reference)
     candidate_ids = set(candidate)
 
@@ -212,20 +218,21 @@ def compare_fields(
 
     if missing or extra:
         raise ValueError(
-            "Owned global-node sets differ: "
-            f"missing={len(missing)}, extra={len(extra)}"
+            "Owned global-node sets differ: missing={}, extra={}".format(
+                len(missing),
+                len(extra),
+            )
         )
 
-    accumulators = {
-        name: {
+    accumulators = {}
+    for name in FIELD_NAMES:
+        accumulators[name] = {
             "difference_squared": 0.0,
             "reference_squared": 0.0,
             "candidate_squared": 0.0,
             "maximum_absolute_difference": 0.0,
             "maximum_reference_absolute": 0.0,
         }
-        for name in FIELD_NAMES
-    }
 
     for global_id in reference_ids:
         reference_record = reference[global_id]
@@ -254,7 +261,7 @@ def compare_fields(
             )
 
     all_passed = True
-    report: dict[str, dict[str, float | bool]] = {}
+    report = {}
 
     for name in FIELD_NAMES:
         accumulator = accumulators[name]
@@ -295,19 +302,16 @@ def compare_fields(
     return all_passed, report
 
 
-def read_residual_csv(output_dir: Path, case_name: str) -> list[dict[str, str]]:
-    path = output_dir / f"{case_name}_distributed_residuals.csv"
+def read_residual_csv(output_dir, case_name):
+    path = output_dir / "{}_distributed_residuals.csv".format(case_name)
     if not path.is_file():
-        raise FileNotFoundError(f"Missing residual CSV: {path}")
+        raise FileNotFoundError("Missing residual CSV: {}".format(path))
 
     with path.open("r", encoding="utf-8", newline="") as stream:
         return list(csv.DictReader(stream))
 
 
-def compare_residual_histories(
-    reference_rows: list[dict[str, str]],
-    candidate_rows: list[dict[str, str]],
-) -> dict[str, float | int | list[int]]:
+def compare_residual_histories(reference_rows, candidate_rows):
     common_count = min(len(reference_rows), len(candidate_rows))
     maximum_relative_difference = 0.0
 
@@ -323,7 +327,10 @@ def compare_residual_histories(
                 candidate_value
             ):
                 raise ValueError(
-                    f"Non-finite residual value at row {index + 1}, {field}"
+                    "Non-finite residual value at row {}, {}".format(
+                        index + 1,
+                        field,
+                    )
                 )
 
             scale = max(abs(reference_value), abs(candidate_value), 1.0e-300)
@@ -346,7 +353,7 @@ def compare_residual_histories(
     }
 
 
-def main() -> int:
+def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("reference_output", type=Path)
     parser.add_argument("candidate_output", type=Path)
@@ -356,6 +363,20 @@ def main() -> int:
 
     reference_dir = args.reference_output.resolve()
     candidate_dir = args.candidate_output.resolve()
+
+    if not reference_dir.is_dir():
+        raise FileNotFoundError(
+            "Reference output directory does not exist: {}".format(
+                reference_dir
+            )
+        )
+
+    if not candidate_dir.is_dir():
+        raise FileNotFoundError(
+            "Candidate output directory does not exist: {}".format(
+                candidate_dir
+            )
+        )
 
     print("Loading reference final state")
     reference_iteration, reference_pieces, reference = load_owned_solution(
@@ -371,8 +392,10 @@ def main() -> int:
 
     if reference_iteration != candidate_iteration:
         raise ValueError(
-            "Final output iterations differ: "
-            f"reference={reference_iteration}, candidate={candidate_iteration}"
+            "Final output iterations differ: reference={}, candidate={}".format(
+                reference_iteration,
+                candidate_iteration,
+            )
         )
 
     fields_passed, field_report = compare_fields(
@@ -399,38 +422,51 @@ def main() -> int:
 
     print()
     print(
-        f"Compared {len(reference)} unique owned global nodes at "
-        f"iteration {reference_iteration}"
+        "Compared {} unique owned global nodes at iteration {}".format(
+            len(reference),
+            reference_iteration,
+        )
     )
     print(
-        f"Reference pieces: {reference_pieces}; "
-        f"candidate pieces: {candidate_pieces}"
+        "Reference pieces: {}; candidate pieces: {}".format(
+            reference_pieces,
+            candidate_pieces,
+        )
     )
     print()
     print(
-        f"{'field':>12} {'relative L2':>16} {'maximum abs':>16} "
-        f"{'allowed max':>16} {'result':>8}"
+        "{:>12} {:>16} {:>16} {:>16} {:>8}".format(
+            "field",
+            "relative L2",
+            "maximum abs",
+            "allowed max",
+            "result",
+        )
     )
 
     for name in FIELD_NAMES:
         item = field_report[name]
         print(
-            f"{name:>12} "
-            f"{float(item['relative_l2_difference']):16.8e} "
-            f"{float(item['maximum_absolute_difference']):16.8e} "
-            f"{float(item['allowed_maximum_difference']):16.8e} "
-            f"{'PASS' if item['passed'] else 'FAIL':>8}"
+            "{:>12} {:16.8e} {:16.8e} {:16.8e} {:>8}".format(
+                name,
+                float(item["relative_l2_difference"]),
+                float(item["maximum_absolute_difference"]),
+                float(item["allowed_maximum_difference"]),
+                "PASS" if item["passed"] else "FAIL",
+            )
         )
 
     print()
     print(
-        "Maximum residual-history scalar relative difference: "
-        f"{residual_report['maximum_scalar_relative_difference']:.8e}"
+        "Maximum residual-history scalar relative difference: {:.8e}".format(
+            residual_report["maximum_scalar_relative_difference"]
+        )
     )
     print(
-        "CG iterations: "
-        f"{residual_report['reference_cg_iterations']} versus "
-        f"{residual_report['candidate_cg_iterations']}"
+        "CG iterations: {} versus {}".format(
+            residual_report["reference_cg_iterations"],
+            residual_report["candidate_cg_iterations"],
+        )
     )
 
     if args.json_report:
@@ -439,12 +475,13 @@ def main() -> int:
             json.dumps(report, indent=2, sort_keys=True) + "\n",
             encoding="utf-8",
         )
-        print(f"JSON report: {args.json_report}")
+        print("JSON report: {}".format(args.json_report))
 
     print()
     print(
-        "DD-4D rank-count field comparison: "
-        + ("PASS" if fields_passed else "FAIL")
+        "DD-4D rank-count field comparison: {}".format(
+            "PASS" if fields_passed else "FAIL"
+        )
     )
 
     return 0 if fields_passed else 1
@@ -453,6 +490,6 @@ def main() -> int:
 if __name__ == "__main__":
     try:
         raise SystemExit(main())
-    except Exception as error:  # noqa: BLE001 - command-line diagnostic
-        print(f"ERROR: {error}", file=sys.stderr)
+    except Exception as error:
+        print("ERROR: {}".format(error), file=sys.stderr)
         raise SystemExit(2)
