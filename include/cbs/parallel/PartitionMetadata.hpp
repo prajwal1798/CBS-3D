@@ -32,7 +32,9 @@ namespace cbs
         Int ghost_nodes = 0;
         Int local_nboun = 0;
 
-        // One-based local node/element IDs map to original global Gmsh IDs.
+        // One-based local node IDs map to global mesh-node IDs. Local element
+        // IDs map to dense global tetrahedron IDs in 1..global_nelem. The
+        // metadata reader normalises legacy constant-offset Gmsh element tags.
         std::vector<std::int64_t> local_to_global_node;
         std::vector<std::int64_t> local_to_global_element;
 
