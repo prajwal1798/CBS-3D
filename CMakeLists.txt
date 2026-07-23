@@ -30,6 +30,7 @@ set(CBS3D_SOURCES
     src/solver/Steps.cpp
     src/solver/Solver.cpp
     src/solver/SolverDistributedStep2.cpp
+    src/solver/SolverDistributedStep3.cpp
     src/solver/SolverDistributedWallAudit.cpp
     src/solver/SolverDistributedPressureAudit.cpp
     src/solver/SolverDistributedVelocityBoundaryInventory.cpp
@@ -41,6 +42,7 @@ set(CBS3D_SOURCES
     src/linalg/ConjugateGradient.cpp
 
     src/assembly/PressureAssembly.cpp
+    src/assembly/VelocityCorrectionAssembly.cpp
     src/assembly/MomentumAssembly.cpp
     src/assembly/EnergyAssembly.cpp
 
