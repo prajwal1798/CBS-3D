@@ -7,7 +7,7 @@
 //
 //     cbs3dpp_si <case_name>
 //
-// MPI distributed Step-3 execution:
+// MPI persistent distributed-loop execution:
 //
 //     cbs3dpp_si <case_name> [partition_root]
 //
@@ -239,9 +239,9 @@ int main(int argc, char** argv)
 #ifdef CBS3D_USE_MPI
         if (mpi_size > 1)
         {
-            // Execute the distributed momentum predictor, collective pressure
-            // solve and owner/ghost-consistent velocity correction.
-            solver.runDistributedStep3();
+            // Preprocess once, build the distributed PETSc matrix and AMG
+            // hierarchy once, then advance the complete distributed CBS loop.
+            solver.runDistributedLoop();
         }
         else
 #endif
@@ -250,7 +250,7 @@ int main(int argc, char** argv)
         }
 
 #ifdef CBS3D_USE_PETSC
-        // Every rank destroys its local PETSc cache before MPI_Finalize().
+        // Releases the legacy serial PETSc cache when that path was used.
         cbs::PetscPressureSolver::shutdown();
 #endif
 
