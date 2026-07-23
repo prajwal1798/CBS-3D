@@ -24,16 +24,6 @@
 //
 // when PETSc is built with HYPRE. PETSc GAMG is used as the fallback
 // preconditioner when HYPRE is unavailable.
-//
-// The current implementation creates sequential PETSc objects on:
-//
-//     PETSC_COMM_SELF
-//
-// It is therefore a serial PETSc pressure solver, not yet a distributed MPI
-// pressure solve.
-//
-// The PETSc matrix, vectors, KSP object and AMG hierarchy are cached and reused
-// between CBS iterations while the pressure-system structure is unchanged.
 //=============================================================================
 
 #include "cbs/core/CBSStateSI.hpp"
@@ -46,6 +36,10 @@ namespace cbs
     public:
         // Solves the constrained fluid-pressure system with PETSc CG and AMG.
         static ConjugateGradient::Result solvePressure(CBSStateSI& s);
+
+        // Solves the pressure system collectively on MPI_COMM_WORLD using
+        // owner-contiguous pressure DOFs and a distributed AIJ matrix.
+        static ConjugateGradient::Result solveDistributedPressure(CBSStateSI& s);
 
         // Destroys the persistent PETSc matrix, vectors, KSP object and
         // preconditioner hierarchy.
