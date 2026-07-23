@@ -32,15 +32,64 @@
 #include <mpi.h>
 #endif
 
+#include <cstdlib>
 #include <exception>
 #include <iomanip>
 #include <iostream>
 #include <sstream>
 #include <stdexcept>
+#include <streambuf>
 #include <string>
 
 namespace
 {
+    class NullStreamBuffer final : public std::streambuf
+    {
+    protected:
+        int overflow(const int character) override
+        {
+            return traits_type::not_eof(character);
+        }
+    };
+
+
+    class ScopedStdoutSilence final
+    {
+    public:
+        explicit ScopedStdoutSilence(const bool suppress)
+        {
+            if (suppress)
+            {
+                previous_ = std::cout.rdbuf(&null_buffer_);
+            }
+        }
+
+        ~ScopedStdoutSilence()
+        {
+            if (previous_ != nullptr)
+            {
+                std::cout.rdbuf(previous_);
+            }
+        }
+
+        ScopedStdoutSilence(const ScopedStdoutSilence&) = delete;
+        ScopedStdoutSilence& operator=(const ScopedStdoutSilence&) = delete;
+
+    private:
+        NullStreamBuffer null_buffer_;
+        std::streambuf* previous_ = nullptr;
+    };
+
+
+    bool environmentFlagEnabled(const char* name)
+    {
+        const char* value = std::getenv(name);
+
+        return value != nullptr &&
+               value[0] != '\0' &&
+               std::string(value) != "0";
+    }
+
 #ifdef CBS3D_USE_MPI
     // Broadcasts one text string from rank zero to every MPI rank.
     void broadcastString(std::string& value, const int rank)
@@ -160,6 +209,10 @@ int main(int argc, char** argv)
     }
 #endif
 
+    const ScopedStdoutSilence rank_stdout(
+        mpi_rank != 0 &&
+        !environmentFlagEnabled("CBS3D_ALL_RANK_OUTPUT"));
+
     try
     {
         std::string case_name;
@@ -218,16 +271,19 @@ int main(int argc, char** argv)
 
         if (mpi_rank == 0)
         {
-            std::cout << "Problem Name: " << case_name << "\n";
+            std::cout
+                << "CBS3D++_SI | case=" << case_name;
 
 #ifdef CBS3D_USE_MPI
             if (mpi_size > 1)
             {
                 std::cout
-                    << "MPI ranks: " << mpi_size << "\n"
-                    << "Partition root: " << partition_root << "\n";
+                    << " | MPI ranks=" << mpi_size
+                    << " | partitions=" << partition_root;
             }
 #endif
+
+            std::cout << "\n";
         }
 
         cbs::Solver solver(solver_case_name);

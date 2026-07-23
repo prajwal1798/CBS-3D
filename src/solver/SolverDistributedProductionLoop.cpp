@@ -30,9 +30,11 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstdlib>
 #include <iostream>
 #include <limits>
 #include <stdexcept>
+#include <streambuf>
 #include <string>
 
 #ifdef CBS3D_USE_MPI
@@ -45,6 +47,53 @@ namespace cbs
     namespace
     {
         constexpr Real residual_epsilon = 1.0e-30;
+
+        class NullStreamBuffer final : public std::streambuf
+        {
+        protected:
+            int overflow(const int character) override
+            {
+                return traits_type::not_eof(character);
+            }
+        };
+
+
+        class ScopedStdoutSilence final
+        {
+        public:
+            explicit ScopedStdoutSilence(const bool suppress)
+            {
+                if (suppress)
+                {
+                    previous_ = std::cout.rdbuf(&null_buffer_);
+                }
+            }
+
+            ~ScopedStdoutSilence()
+            {
+                if (previous_ != nullptr)
+                {
+                    std::cout.rdbuf(previous_);
+                }
+            }
+
+            ScopedStdoutSilence(const ScopedStdoutSilence&) = delete;
+            ScopedStdoutSilence& operator=(const ScopedStdoutSilence&) = delete;
+
+        private:
+            NullStreamBuffer null_buffer_;
+            std::streambuf* previous_ = nullptr;
+        };
+
+
+        bool environment_flag_enabled(const char* name)
+        {
+            const char* value = std::getenv(name);
+
+            return value != nullptr &&
+                   value[0] != '\0' &&
+                   std::string(value) != "0";
+        }
 
         void check_mpi(const int error_code, const char* operation)
         {
@@ -863,53 +912,58 @@ namespace cbs
 
         const double setup_start = MPI_Wtime();
 
-        runDistributedPreprocessing();
-
-        Preprocess::classifyFaceEdges(s_);
-        Preprocess::elementSize(s_);
-        Coloring::build(s_);
-
-        reject_unsupported_options(s_);
-
-        PressureAssembly::buildElementPressureTerms(s_);
-
         ThermalBoundaryState thermal_boundary(s_.cfg.npoin);
+        PetscPersistentDistributedPressureSystem pressure_system;
 
-        if (s_.cfg.temp_calc > 0)
         {
-            thermal_boundary = build_thermal_boundary_state(s_);
-        }
+            const ScopedStdoutSilence setup_stdout(
+                s_.mpi_rank != 0 ||
+                !environment_flag_enabled("CBS3D_VERBOSE"));
 
-        Boundary::applyOwnedVelocityConstraints(s_);
-        apply_owned_pressure_constraints(s_);
+            runDistributedPreprocessing();
 
-        if (s_.cfg.temp_calc > 0)
-        {
-            apply_owned_temperature_constraints(s_, thermal_boundary);
-        }
+            Preprocess::classifyFaceEdges(s_);
+            Preprocess::elementSize(s_);
+            Coloring::build(s_);
 
-        HaloExchange::broadcastOwnedToGhosts(
-            s_.unkno,
-            s_.partition_metadata,
-            MPI_COMM_WORLD);
+            reject_unsupported_options(s_);
 
-        HaloExchange::broadcastOwnedToGhosts(
-            s_.pres,
-            s_.partition_metadata,
-            MPI_COMM_WORLD);
+            PressureAssembly::buildElementPressureTerms(s_);
 
-        if (s_.cfg.temp_calc > 0)
-        {
+            if (s_.cfg.temp_calc > 0)
+            {
+                thermal_boundary = build_thermal_boundary_state(s_);
+            }
+
+            Boundary::applyOwnedVelocityConstraints(s_);
+            apply_owned_pressure_constraints(s_);
+
+            if (s_.cfg.temp_calc > 0)
+            {
+                apply_owned_temperature_constraints(s_, thermal_boundary);
+            }
+
             HaloExchange::broadcastOwnedToGhosts(
-                s_.temperature,
+                s_.unkno,
                 s_.partition_metadata,
                 MPI_COMM_WORLD);
+
+            HaloExchange::broadcastOwnedToGhosts(
+                s_.pres,
+                s_.partition_metadata,
+                MPI_COMM_WORLD);
+
+            if (s_.cfg.temp_calc > 0)
+            {
+                HaloExchange::broadcastOwnedToGhosts(
+                    s_.temperature,
+                    s_.partition_metadata,
+                    MPI_COMM_WORLD);
+            }
+
+            updateVelocityMagnitude();
+            pressure_system.initialise(s_);
         }
-
-        updateVelocityMagnitude();
-
-        PetscPersistentDistributedPressureSystem pressure_system;
-        pressure_system.initialise(s_);
 
         double local_setup_seconds = MPI_Wtime() - setup_start;
         double global_setup_seconds = 0.0;
@@ -930,24 +984,19 @@ namespace cbs
         if (s_.mpi_rank == 0)
         {
             std::cout
-                << "============================================================\n"
-                << "CBS3D DD-4B/DD-4C PRODUCTION LOOP READY\n"
-                << "============================================================\n"
-                << "case                       : "
-                << distributed_case_name << "\n"
-                << "MPI ranks                  : " << s_.mpi_size << "\n"
-                << "iterations requested       : " << s_.cfg.ntime << "\n"
-                << "energy equation            : "
+                << "Run configuration\n"
+                << "  mesh       : "
+                << s_.partition_metadata.global_nelem << " tetrahedra, "
+                << s_.partition_metadata.global_npoin << " nodes\n"
+                << "  parallel   : " << s_.mpi_size << " MPI ranks\n"
+                << "  iterations : " << s_.cfg.ntime << "\n"
+                << "  energy     : "
                 << (s_.cfg.temp_calc > 0 ? "ON" : "OFF") << "\n"
-                << "pressure matrix builds     : 1\n"
-                << "AMG hierarchy builds       : 1\n"
-                << "distributed residual CSV   : "
+                << "  residuals  : "
                 << (s_.cfg.residual_log_enabled > 0 ? "ON" : "OFF") << "\n"
-                << "PVTU/PVD output            : "
+                << "  VTU/PVD    : "
                 << (s_.cfg.vtu_output_enabled > 0 ? "ON" : "OFF") << "\n"
-                << "maximum setup time [s]     : "
-                << global_setup_seconds << "\n"
-                << "============================================================\n";
+                << "  setup time : " << global_setup_seconds << " s\n";
         }
 
         DistributedPost::initialise(s_, case_name_);
@@ -1209,7 +1258,7 @@ namespace cbs
             if (s_.mpi_rank == 0 && print_iteration)
             {
                 std::cout
-                    << "DD iteration " << iteration
+                    << "Iteration " << iteration
                     << "/" << s_.cfg.ntime
                     << "  dt=" << global_dt
                     << "  CG=" << pressure_result.iterations
@@ -1269,21 +1318,12 @@ namespace cbs
         if (s_.mpi_rank == 0)
         {
             std::cout
-                << "============================================================\n"
-                << "CBS3D DD-4B/DD-4C PRODUCTION LOOP COMPLETE\n"
-                << "============================================================\n"
-                << "MPI ranks                  : " << s_.mpi_size << "\n"
-                << "completed iterations       : " << last_iteration << "\n"
-                << "stop reason                : " << stop_reason << "\n"
-                << "final physical time        : " << s_.cfg.rtime << "\n"
-                << "pressure matrix builds     : 1\n"
-                << "AMG hierarchy builds       : 1\n"
-                << "distributed output case    : "
-                << distributed_case_name << "\n"
-                << "maximum loop time [s]      : "
-                << global_loop_seconds << "\n"
-                << "next development stage     : rank-count validation\n"
-                << "============================================================\n";
+                << "Run complete\n"
+                << "  iterations    : " << last_iteration << "\n"
+                << "  stop reason   : " << stop_reason << "\n"
+                << "  physical time : " << s_.cfg.rtime << "\n"
+                << "  loop time     : " << global_loop_seconds << " s\n"
+                << "  output case   : " << distributed_case_name << "\n";
         }
 #else
         throw std::runtime_error(
