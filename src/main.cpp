@@ -7,7 +7,7 @@
 //
 //     cbs3dpp_si <case_name>
 //
-// MPI partition-initialisation execution:
+// MPI distributed Step-1 execution:
 //
 //     cbs3dpp_si <case_name> [partition_root]
 //
@@ -239,9 +239,9 @@ int main(int argc, char** argv)
 #ifdef CBS3D_USE_MPI
         if (mpi_size > 1)
         {
-            // Reconcile the first distributed numerical preprocessing arrays.
-            // CBS Steps 1 to 4 are intentionally not advanced yet.
-            solver.runDistributedPreprocessing();
+            // Execute the first complete distributed CBS numerical stage:
+            // the owner/ghost-consistent momentum predictor.
+            solver.runDistributedStep1();
         }
         else
 #endif

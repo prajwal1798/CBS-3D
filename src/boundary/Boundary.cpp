@@ -223,6 +223,81 @@ namespace cbs
     }
 
     //=========================================================================
+    // Applies the persistent strong velocity state at MPI-owned nodes.
+    //
+    // Strong Dirichlet constraints are stored once during preprocessing in:
+    //
+    //     node_velocity_bc_type
+    //     node_velocity_bc_value
+    //
+    // Only owner copies are modified. The solver performs the subsequent
+    // owner-to-ghost broadcast after all local owner updates are complete.
+    //=========================================================================
+    void Boundary::applyOwnedVelocityConstraints(CBSStateSI& s)
+    {
+        if (!s.mpi_enabled)
+        {
+            throw std::runtime_error(
+                "Boundary::applyOwnedVelocityConstraints requires "
+                "a distributed MPI calculation");
+        }
+
+        for (const Int ip : s.owned_nodes)
+        {
+            check_node_range(
+                s,
+                ip,
+                "Boundary::applyOwnedVelocityConstraints");
+
+            const Int boundary_type =
+                s.node_velocity_bc_type(ip);
+
+            if (boundary_type == CBSStateSI::velocity_bc_free)
+            {
+                continue;
+            }
+
+            if (boundary_type == CBSStateSI::velocity_bc_noslip)
+            {
+                set_zero_velocity(s, ip);
+                continue;
+            }
+
+            if (boundary_type ==
+                    CBSStateSI::velocity_bc_prescribed ||
+                boundary_type ==
+                    CBSStateSI::velocity_bc_moving_wall)
+            {
+                const Real u =
+                    s.node_velocity_bc_value(1, ip);
+
+                const Real v =
+                    s.node_velocity_bc_value(2, ip);
+
+                const Real w =
+                    s.node_velocity_bc_value(3, ip);
+
+                if (!std::isfinite(u) ||
+                    !std::isfinite(v) ||
+                    !std::isfinite(w))
+                {
+                    throw std::runtime_error(
+                        "Boundary::applyOwnedVelocityConstraints found "
+                        "a non-finite prescribed velocity");
+                }
+
+                set_velocity(s, ip, u, v, w);
+                continue;
+            }
+
+            throw std::runtime_error(
+                "Boundary::applyOwnedVelocityConstraints found "
+                "an invalid persistent velocity-boundary type");
+        }
+    }
+
+
+    //=========================================================================
     // Applies the impermeability condition on symmetry or slip boundaries.
     //
     // For velocity u and outward unit normal n, the normal component is:

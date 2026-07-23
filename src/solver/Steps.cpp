@@ -33,6 +33,10 @@
 #include "cbs/boundary/TurbulenceBoundary.hpp"
 #include "cbs/linalg/ConjugateGradient.hpp"
 
+#ifdef CBS3D_USE_MPI
+#include "cbs/parallel/HaloExchange.hpp"
+#endif
+
 #ifdef CBS3D_USE_PETSC
 #include "cbs/linalg/PetscPressureSolver.hpp"
 #endif
@@ -138,12 +142,35 @@ namespace cbs
         //     r_m       = rhs
         void update_velocity_from_rhs_using_predictor_mass(CBSStateSI& s)
         {
+#ifdef CBS3D_USE_MPI
+            if (s.mpi_enabled)
+            {
+                // Shared-node residuals have already been reverse-assembled
+                // onto their owners. Therefore only owners advance the
+                // predictor equation.
+                for (const Int ip : s.owned_nodes)
+                {
+                    for (Int idim = 1;
+                         idim <= s.cfg.ndim;
+                         ++idim)
+                    {
+                        s.unkno(idim, ip) =
+                            s.unkn1(idim, ip)
+                            + s.rhs(idim, ip) * s.elcoe2(ip);
+                    }
+                }
+
+                return;
+            }
+#endif
+
             for (Int ip = 1; ip <= s.cfg.npoin; ++ip)
             {
                 for (Int idim = 1; idim <= s.cfg.ndim; ++idim)
                 {
                     s.unkno(idim, ip) =
-                        s.unkn1(idim, ip) + s.rhs(idim, ip) * s.elcoe2(ip);
+                        s.unkn1(idim, ip)
+                        + s.rhs(idim, ip) * s.elcoe2(ip);
                 }
             }
         }
@@ -297,6 +324,57 @@ namespace cbs
     void Steps::step1SemiImplicit(CBSStateSI& s)
     {
         validate_step_dimensions(s);
+
+#ifdef CBS3D_USE_MPI
+        if (s.mpi_enabled)
+        {
+            // DD-3A currently supports strong Dirichlet velocity conditions.
+            // Symmetry requires a separately reconciled nodal normal operator.
+            // Do not silently apply an incomplete rank-local face projection.
+            for (const Int ip : s.owned_nodes)
+            {
+                if (s.node_symmetry(ip) != 0)
+                {
+                    throw std::runtime_error(
+                        "Steps::step1SemiImplicit - distributed symmetry "
+                        "projection requires a persistent nodal symmetry normal");
+                }
+            }
+
+            // Element kernels read u^n at all four local element nodes.
+            // Ghost copies must therefore contain the current owner value.
+            HaloExchange::broadcastOwnedToGhosts(
+                s.unkn1,
+                s.partition_metadata);
+
+            // Every rank integrates only its owned tetrahedra. Contributions
+            // at shared nodes are initially stored in local ghost entries.
+            MomentumAssembly::assembleStep1Rhs(s);
+
+            // Perform distributed finite-element vector assembly:
+            //
+            //     r_i = sum over all incident owned elements r_i^(e)
+            //
+            // The completed residual is retained on the node owner.
+            HaloExchange::sumGhostContributionsToOwners(
+                s.rhs,
+                s.partition_metadata);
+
+            // Advance only the unique owner copy of each global node.
+            update_velocity_from_rhs_using_predictor_mass(s);
+
+            // Strong velocity constraints are also owner-authoritative.
+            Boundary::applyOwnedVelocityConstraints(s);
+
+            // Make u* available to every rank containing a neighbouring
+            // tetrahedron before the next CBS operator is evaluated.
+            HaloExchange::broadcastOwnedToGhosts(
+                s.unkno,
+                s.partition_metadata);
+
+            return;
+        }
+#endif
 
         MomentumAssembly::assembleStep1Rhs(s);
 

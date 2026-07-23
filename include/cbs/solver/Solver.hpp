@@ -43,6 +43,10 @@ namespace cbs
         // 1 to 4 and the pressure solve are not advanced by this milestone.
         void runDistributedPreprocessing();
 
+        // Preprocesses the distributed mesh and executes one complete
+        // owner/ghost-consistent CBS momentum-predictor step.
+        void runDistributedStep1();
+
         // Returns read-only access to the complete solver state.
         [[nodiscard]] const CBSStateSI& state() const noexcept;
 
@@ -94,6 +98,10 @@ namespace cbs
         // Inventories global velocity-relevant boundary classifications,
         // overlaps and inlet-normal multiplicity without modifying solver state.
         void auditDistributedVelocityBoundaryInventory() const;
+
+        // Independently validates the persistent distributed nodal velocity-
+        // boundary types, priorities, values, topology flags and inlet normals.
+        void auditDistributedVelocityBoundaryState() const;
 
         // Builds the element and global pressure operators used in CBS Step 2.
         void preparePressureSystem();

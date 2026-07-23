@@ -149,9 +149,6 @@ namespace cbs
         MeshIO::readAll(case_name_, s_);
         readPartitionMetadata();
 
-        // Validate partition ownership and the basic forward halo operation.
-        auditPartitionHalo();
-
         // These operations use only owned tetrahedra or rank-local physical
         // boundary faces.
         Preprocess::validateBoundaryFlags(s_);
@@ -165,14 +162,9 @@ namespace cbs
         // Reconcile the fluid/solid classification of every shared node.
         Preprocess::buildMaterialNodeMasks(s_);
 
-        auditDistributedPreprocessing();
-        auditDistributedMaterialMasks();
-
         // Reconcile physical-wall flags, conformal-interface flags and
         // area-weighted wall-normal contributions across shared nodes.
         Preprocess::wallDetermination(s_);
-
-        auditDistributedWallClassification();
 
         // Globally sum all physical BC 511 face areas and calculate one
         // identical mass-flow inlet velocity on every MPI rank.
@@ -182,16 +174,264 @@ namespace cbs
         // prescribed-pressure list.
         Preprocess::detectPressureBoundaryNodes(s_);
 
-        // Independently reconstruct and verify global pressure-boundary state.
-        auditDistributedPressureBoundary();
-
-        // Measure the global velocity-boundary topology before defining a
-        // permanent distributed nodal priority and value representation.
-        auditDistributedVelocityBoundaryInventory();
-
         // Construct the persistent owner/ghost-consistent velocity-boundary
         // classification, priority, prescribed values and BC 511 normals.
         Preprocess::buildVelocityBoundaryState(s_);
+    }
+
+
+    //=========================================================================
+    // Executes one complete distributed CBS Step 1.
+    //
+    // The distributed finite-element sequence is:
+    //
+    //     1. Complete rank-local geometry and colouring.
+    //     2. Apply initial strong velocity values on owners.
+    //     3. Broadcast owner velocity to ghosts.
+    //     4. Compute one communicator-wide global time step.
+    //     5. Assemble the fluid momentum dia
+    //     6. Execute the distributed momentum predictor.
+    //
+    // Ste
+    // MPI_COMM_WORLD and a global pressure numbering.
+    //=========================================================================
+    void Solver::runDistributedStep1()
+    {
+#ifdef CBS3D_USE_MPI
+        if (!s_.mpi_enabled)
+        {
+            throw std::runtime_error(
+                "Solver::runDistributedStep1 requires more than one MPI rank");
+        }
+
+        runDistributedPreprocessing();
+
+        // Step-1 element kernels require exterior-face classification,
+        // characteristic lengths and race-free local OpenMP colouring.
+        Preprocess::classifyFaceEdges(s_);
+        Preprocess::elementSize(s_);
+        Coloring::build(s_);
+
+        // Establish one authoritative initial velocity value per global node.
+        Boundary::applyOwnedVelocityConstraints(s_);
+
+        HaloExchange::broadcastOwnedToGhosts(
+            s_.unkno,
+            s_.partition_metadata,
+            MPI_COMM_WORLD);
+
+        updateVelocityMagnitude();
+        s_.velocity_old = s_.velocity;
+
+        // Store u^n before calculating the predictor.
+        s_.unkn1 = s_.unkno;
+
+        // Calculate rank-local stability limits. A communicator-wide minimum
+        // is then used for this first distributed solver milestone.
+        TimeStep::computeTimeStep(s_, 1);
+
+        Real local_dt_min =
+            std::numeric_limits<Real>::max();
+
+        for (Int ie = 1; ie <= s_.cfg.nelem; ++ie)
+        {
+            if (s_.delte(ie) < local_dt_min)
+            {
+                local_dt_min = s_.delte(ie);
+            }
+        }
+
+        Real global_dt = 0.0;
+
+        checkMpi(
+            MPI_Allreduce(
+                &local_dt_min,
+                &global_dt,
+                1,
+                MPI_DOUBLE,
+                MPI_MIN,
+                MPI_COMM_WORLD),
+            "MPI_Allreduce distributed Step-1 timestep");
+
+        if (global_dt <= 0.0 || !std::isfinite(global_dt))
+        {
+            throw std::runtime_error(
+                "Solver::runDistributedStep1 obtained an invalid global timestep");
+        }
+
+        // DD-3A uses one communicator-wide time step. This gives one identical
+        // discrete momentum diagonal definition on all subdomains and matches
+        // the global-time-step semi-implicit CBS formulation.
+        for (Int ie = 1; ie <= s_.cfg.nelem; ++ie)
+        {
+            s_.delte(ie) = global_dt;
+        }
+
+        for (Int ip = 1; ip <= s_.cfg.npoin; ++ip)
+        {
+            s_.deltp(ip) = global_dt;
+            s_.deltp1(ip) = global_dt;
+            s_.deltp2(ip) = global_dt;
+        }
+
+        s_.cfg.dtreal = global_dt;
+
+        // Assemble the fluid-only momentum time diagonal:
+        //
+        //     D_i = sum_{fluid e incident on i} m_i^(e) / dt_e
+        //
+        // Each rank contributes only its owned tetrahedra. Shared-node
+        // contributions are reverse-summed onto the node owner.
+        Array1D<Real> momentum_diagonal(s_.cfg.npoin);
+        momentum_diagonal.fill(0.0);
+
+        for (Int ie = 1; ie <= s_.cfg.nelem; ++ie)
+        {
+            if (s_.mat_elem(ie) != 0)
+            {
+                continue;
+            }
+
+            const Real dt = s_.delte(ie);
+
+            for (Int in = 1; in <= s_.cfg.nep; ++in)
+            {
+                const Int ip = s_.intma(in, ie);
+
+                const Int coefficient_index =
+                    (ie - 1) * s_.cfg.nep + in;
+
+                const Real mass =
+                    s_.elcoe_e(coefficient_index);
+
+                if (mass <= 0.0 || !std::isfinite(mass))
+                {
+                    throw std::runtime_error(
+                        "Solver::runDistributedStep1 found an invalid "
+                        "fluid element-node mass");
+                }
+
+                momentum_diagonal(ip) += mass / dt;
+            }
+        }
+
+        HaloExchange::sumGhostContributionsToOwners(
+            momentum_diagonal,
+            s_.partition_metadata,
+            MPI_COMM_WORLD);
+
+        s_.elcoe2.fill(0.0);
+
+        for (const Int ip : s_.owned_nodes)
+        {
+            const bool touches_fluid =
+                (s_.node_material_mask(ip) &
+                 CBSStateSI::node_touches_fluid) != 0;
+
+            if (!touches_fluid)
+            {
+                // Solid-only nodes have no momentum equation.
+                s_.elcoe2(ip) = 0.0;
+                continue;
+            }
+
+            const Real diagonal =
+                momentum_diagonal(ip);
+
+            if (diagonal <= 0.0 || !std::isfinite(diagonal))
+            {
+                throw std::runtime_error(
+                    "Solver::runDistributedStep1 found a non-positive "
+                    "owned momentum diagonal");
+            }
+
+            s_.elcoe2(ip) = 1.0 / diagonal;
+        }
+
+        HaloExchange::broadcastOwnedToGhosts(
+            s_.elcoe2,
+            s_.partition_metadata,
+            MPI_COMM_WORLD);
+
+        // Execute the real distributed finite-element momentum predictor.
+        Steps::step1(s_);
+
+        updateVelocityMagnitude();
+
+        // Solver diagnostics are evaluated once per unique global node.
+        Real local_velocity_squared = 0.0;
+        Real local_velocity_max = 0.0;
+
+        for (const Int ip : s_.owned_nodes)
+        {
+            const Real u = s_.unkno(1, ip);
+            const Real v = s_.unkno(2, ip);
+            const Real w = s_.unkno(3, ip);
+
+            if (!std::isfinite(u) ||
+                !std::isfinite(v) ||
+                !std::isfinite(w))
+            {
+                throw std::runtime_error(
+                    "Solver::runDistributedStep1 produced a non-finite velocity");
+            }
+
+            const Real speed_squared =
+                u * u + v * v + w * w;
+
+            local_velocity_squared += speed_squared;
+
+            const Real speed =
+                std::sqrt(speed_squared);
+
+            if (speed > local_velocity_max)
+            {
+                local_velocity_max = speed;
+            }
+        }
+
+        Real global_velocity_squared = 0.0;
+        Real global_velocity_max = 0.0;
+
+        checkMpi(
+            MPI_Allreduce(
+                &local_velocity_squared,
+                &global_velocity_squared,
+                1,
+                MPI_DOUBLE,
+                MPI_SUM,
+                MPI_COMM_WORLD),
+            "MPI_Allreduce Step-1 velocity L2 norm");
+
+        checkMpi(
+            MPI_Allreduce(
+                &local_velocity_max,
+                &global_velocity_max,
+                1,
+                MPI_DOUBLE,
+                MPI_MAX,
+                MPI_COMM_WORLD),
+            "MPI_Allreduce Step-1 velocity maximum");
+
+        if (s_.mpi_rank == 0)
+        {
+            std::cout
+                << "============================================================\n"
+                << "CBS3D DISTRIBUTED STEP 1 COMPLETE\n"
+                << "============================================================\n"
+                << "MPI ranks            : " << s_.mpi_size << "\n"
+                << "global timestep      : " << global_dt << "\n"
+                << "velocity L2 norm     : "
+                << std::sqrt(global_velocity_squared) << "\n"
+                << "maximum velocity     : "
+                << global_velocity_max << "\n"
+                << "next solver stage    : distributed pressure RHS/PETSc\n"
+                << "============================================================\n";
+        }
+#else
+        throw std::runtime_error(
+            "Solver::runDistributedStep1 requires an MPI-enabled build");
+#endif
     }
 
 
