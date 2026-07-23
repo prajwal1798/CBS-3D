@@ -7,7 +7,7 @@
 //
 //     cbs3dpp_si <case_name>
 //
-// MPI distributed Step-2 execution:
+// MPI distributed Step-3 execution:
 //
 //     cbs3dpp_si <case_name> [partition_root]
 //
@@ -239,9 +239,9 @@ int main(int argc, char** argv)
 #ifdef CBS3D_USE_MPI
         if (mpi_size > 1)
         {
-            // Execute the distributed momentum predictor and the
-            // collective MPI/PETSc pressure-correction solve.
-            solver.runDistributedStep2();
+            // Execute the distributed momentum predictor, collective pressure
+            // solve and owner/ghost-consistent velocity correction.
+            solver.runDistributedStep3();
         }
         else
 #endif
