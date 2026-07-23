@@ -29,6 +29,7 @@ set(CBS3D_SOURCES
     src/solver/Convergence.cpp
     src/solver/Steps.cpp
     src/solver/Solver.cpp
+    src/solver/SolverDistributedStep2.cpp
     src/solver/SolverDistributedWallAudit.cpp
     src/solver/SolverDistributedPressureAudit.cpp
     src/solver/SolverDistributedVelocityBoundaryInventory.cpp
@@ -60,6 +61,7 @@ set(CBS3D_SOURCES
 if (CBS3D_ENABLE_PETSC)
     list(APPEND CBS3D_SOURCES
         src/linalg/PetscPressureSolver.cpp
+        src/linalg/PetscDistributedPressureSolver.cpp
     )
 endif()
 
