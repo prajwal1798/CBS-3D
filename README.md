@@ -14,6 +14,8 @@
 
 **CBS3D++** is a modern C++20 finite-element solver for three-dimensional incompressible fluid dynamics. It is based on the semi-implicit **Characteristic-Based Split (CBS)** formulation and is being developed for research-scale laminar flow, turbulence modelling, conjugate heat transfer and broader multiphysics applications.
 
+<img src="docs/assets/cbs_fig.png" alt="CBS3D++ — A Finite Element based Fluid Dynamics Solver" width="100%">
+
 The project modernises a legacy Fortran CBSFlow development while preserving the numerical method, finite-element conventions and benchmark lineage. The new implementation introduces modular C++ architecture, reproducible build systems, OpenMP acceleration, PETSc pressure-solver integration, distributed-mesh infrastructure and modern VTU/PVD output.
 
 > [!IMPORTANT]
