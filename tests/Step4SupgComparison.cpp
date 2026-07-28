@@ -13,8 +13,9 @@
 //
 // The production EnergyAssembly::assembleStep4Rhs() routine is called first at
 // every step. For cases 2 and 3 this diagnostic then removes the production
-// tau=dt/2 contribution and replaces it with the requested candidate. No
-// production source file is changed by this experiment.
+// tau=dt/2 contribution. Case 3 adds the streamline-upwind spatial term with
+// the negative sign required when the stabilising operator is placed on the
+// explicit right-hand side. No production source file is changed.
 //=============================================================================
 
 #define main cbs3d_step4_bounded_transport_baseline_main
@@ -41,7 +42,7 @@ namespace
         case StabilisationMode::no_characteristic:
             return "no characteristic correction (diagnostic)";
         case StabilisationMode::peclet_supg:
-            return "Peclet-based streamline SUPG candidate";
+            return "Peclet-based streamline-upwind candidate";
         }
         return "unknown";
     }
@@ -180,15 +181,32 @@ namespace
             const Real advective_temperature_gradient =
                 ubar * dTdx + vbar * dTdy + wbar * dTdz;
 
+            // Production currently contributes:
+            //
+            //   + old_tau rhoCp V (u.gradN_a)(u.gradT)
+            //
+            // The streamline-upwind spatial operator is diffusive on the left
+            // side of the scalar equation. In the explicit update residual it
+            // therefore contributes:
+            //
+            //   - new_tau rhoCp V (u.gradN_a)(u.gradT).
+            //
+            // Thus the diagnostic increment is -old_tau for the no-correction
+            // case and -(old_tau + new_tau) for the streamline-upwind case.
             const Real old_tau = 0.5 * state.delte(element);
             const Real new_tau =
                 (mode == StabilisationMode::peclet_supg)
                 ? peclet_supg_tau(state, element, ubar, vbar, wbar)
                 : 0.0;
 
+            const Real target_signed_tau =
+                (mode == StabilisationMode::peclet_supg)
+                ? -new_tau
+                : 0.0;
+
             const Real volume = state.detJ(element) / 6.0;
             const Real delta_factor =
-                (new_tau - old_tau)
+                (target_signed_tau - old_tau)
                 * state.rho_cp_e(element)
                 * volume;
 
@@ -254,7 +272,7 @@ namespace
             maximum_tau = std::max(maximum_tau, tau);
         }
 
-        std::cout << "  tau range                     : ["
+        std::cout << "  tau magnitude range           : ["
                   << minimum_tau << ", " << maximum_tau << "] s\n";
     }
 
@@ -380,8 +398,8 @@ int main()
 
     std::cout << "\n============================================================\n";
     std::cout
-        << "The Péclet-SUPG case is a validation candidate, not a production\n"
-        << "change. A passing result here must still be followed by smooth\n"
+        << "The Péclet-based streamline case is a validation candidate, not\n"
+        << "a production change. It must still pass boundedness, smooth-field\n"
         << "accuracy, CHT-interface, timestep, and MPI-equivalence tests.\n";
 
     return 0;
