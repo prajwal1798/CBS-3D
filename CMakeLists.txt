@@ -8,6 +8,7 @@ project(CBS3Dpp_SI LANGUAGES CXX)
 option(CBS3D_ENABLE_OPENMP "Enable OpenMP shared-memory parallelism" ON)
 option(CBS3D_ENABLE_MPI "Enable MPI partitioned-solver development" OFF)
 option(CBS3D_ENABLE_PETSC "Enable the PETSc pressure-solver path" OFF)
+option(CBS3D_BUILD_STEP4_VALIDATION "Build the standalone Step-4 validation executable" ON)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -97,6 +98,43 @@ else()
 endif()
 
 #==============================================================================
+# Standalone Step-4 validation
+#==============================================================================
+if (CBS3D_BUILD_STEP4_VALIDATION)
+    enable_testing()
+
+    add_executable(cbs3d_step4_validation
+        tests/Step4Validation.cpp
+        src/assembly/EnergyAssembly.cpp
+    )
+
+    target_include_directories(cbs3d_step4_validation PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/include"
+    )
+
+    target_compile_features(cbs3d_step4_validation PRIVATE cxx_std_20)
+
+    if (MSVC)
+        target_compile_options(cbs3d_step4_validation PRIVATE
+            /W4
+            /permissive-
+        )
+    else()
+        target_compile_options(cbs3d_step4_validation PRIVATE
+            -O2
+            -Wall
+            -Wextra
+            -pedantic
+        )
+    endif()
+
+    add_test(
+        NAME step4_element_validation
+        COMMAND cbs3d_step4_validation
+    )
+endif()
+
+#==============================================================================
 # OpenMP
 #==============================================================================
 if (CBS3D_ENABLE_OPENMP)
@@ -169,6 +207,7 @@ endif()
 # Configuration summary
 #==============================================================================
 message(STATUS "CBS3D++_SI configuration")
-message(STATUS "  OpenMP : ${CBS3D_ENABLE_OPENMP}")
-message(STATUS "  MPI    : ${CBS3D_ENABLE_MPI}")
-message(STATUS "  PETSc  : ${CBS3D_ENABLE_PETSC}")
+message(STATUS "  OpenMP          : ${CBS3D_ENABLE_OPENMP}")
+message(STATUS "  MPI             : ${CBS3D_ENABLE_MPI}")
+message(STATUS "  PETSc           : ${CBS3D_ENABLE_PETSC}")
+message(STATUS "  Step4 validation: ${CBS3D_BUILD_STEP4_VALIDATION}")
