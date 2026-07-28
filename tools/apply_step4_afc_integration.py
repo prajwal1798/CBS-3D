@@ -24,7 +24,7 @@ def replace_once(path: Path, old: str, new: str) -> None:
             f"expected exactly one audited match in {path}, found {count}"
         )
 
-    path.write_text(text.replace(old, new, 1), encoding="utf-8", newline="\n")
+    path.write_text(text.replace(old, new, 1), encoding="utf-8")
     print(f"updated: {path.relative_to(ROOT)}")
 
 
