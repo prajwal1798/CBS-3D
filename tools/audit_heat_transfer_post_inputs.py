@@ -4,9 +4,10 @@
 The audit is intentionally dependency-free. It reads the ASCII VTK XML pieces
 sequentially and verifies that the topology and identifiers required for an
 accurate conjugate heat-transfer post-processor are present.
-"""
 
-from __future__ import annotations
+This script is compatible with the older Python interpreter currently provided
+on Sunbird.
+"""
 
 import argparse
 import collections
@@ -14,7 +15,7 @@ import hashlib
 import sys
 import xml.etree.ElementTree as ET
 from pathlib import Path
-from typing import Dict, Iterable, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 
 REQUIRED_POINT_ARRAYS = {
@@ -34,16 +35,19 @@ REQUIRED_CELL_ARRAYS = {
 }
 
 
-def parse_numbers(text: str | None, cast):
+def parse_numbers(text, cast):
+    """Convert one ASCII VTK array payload into a Python list."""
     if not text:
         return []
     return [cast(token) for token in text.split()]
 
 
-def named_arrays(parent: ET.Element | None) -> Dict[str, ET.Element]:
+def named_arrays(parent):
+    """Return DataArray children indexed by their Name attribute."""
     if parent is None:
         return {}
-    result: Dict[str, ET.Element] = {}
+
+    result = {}  # type: Dict[str, ET.Element]
     for array in parent.findall("DataArray"):
         name = array.attrib.get("Name")
         if name:
@@ -51,45 +55,39 @@ def named_arrays(parent: ET.Element | None) -> Dict[str, ET.Element]:
     return result
 
 
-def find_piece_sources(pvtu: Path) -> List[Path]:
-    root = ET.parse(pvtu).getroot()
+def find_piece_sources(pvtu):
+    """Resolve all rank-local VTU files referenced by a PVTU descriptor."""
+    root = ET.parse(str(pvtu)).getroot()
     grid = root.find("PUnstructuredGrid")
     if grid is None:
-        raise RuntimeError(f"{pvtu} is not a PUnstructuredGrid file")
+        raise RuntimeError("{} is not a PUnstructuredGrid file".format(pvtu))
 
-    pieces = []
+    pieces = []  # type: List[Path]
     for piece in grid.findall("Piece"):
         source = piece.attrib.get("Source")
         if not source:
-            raise RuntimeError(f"PVTU piece without Source in {pvtu}")
+            raise RuntimeError("PVTU piece without Source in {}".format(pvtu))
         pieces.append((pvtu.parent / source).resolve())
 
     if not pieces:
-        raise RuntimeError(f"No Piece entries found in {pvtu}")
+        raise RuntimeError("No Piece entries found in {}".format(pvtu))
+
     return pieces
 
 
-def audit_piece(
-    path: Path,
-) -> Tuple[
-    collections.Counter,
-    collections.Counter,
-    collections.Counter,
-    set,
-    set,
-    int,
-    int,
-]:
+def audit_piece(path):
+    """Audit one rank-local VTU piece and return aggregateable counters."""
     if not path.is_file():
-        raise RuntimeError(f"Missing VTU piece: {path}")
+        raise RuntimeError("Missing VTU piece: {}".format(path))
 
-    root = ET.parse(path).getroot()
+    root = ET.parse(str(path)).getroot()
     grid = root.find("UnstructuredGrid")
     if grid is None:
-        raise RuntimeError(f"{path} is not an UnstructuredGrid file")
+        raise RuntimeError("{} is not an UnstructuredGrid file".format(path))
+
     piece = grid.find("Piece")
     if piece is None:
-        raise RuntimeError(f"No Piece element in {path}")
+        raise RuntimeError("No Piece element in {}".format(path))
 
     number_of_points = int(piece.attrib["NumberOfPoints"])
     number_of_cells = int(piece.attrib["NumberOfCells"])
@@ -101,33 +99,45 @@ def audit_piece(
     missing_cell = REQUIRED_CELL_ARRAYS.difference(cell_arrays)
     if missing_point or missing_cell:
         raise RuntimeError(
-            f"{path.name}: missing point arrays={sorted(missing_point)}, "
-            f"cell arrays={sorted(missing_cell)}"
+            "{}: missing point arrays={}, cell arrays={}".format(
+                path.name,
+                sorted(missing_point),
+                sorted(missing_cell),
+            )
         )
 
     cell_kind = parse_numbers(cell_arrays["cell_kind"].text, int)
-    global_element = parse_numbers(cell_arrays["global_element_id"].text, int)
+    global_element = parse_numbers(
+        cell_arrays["global_element_id"].text,
+        int,
+    )
     material_id = parse_numbers(cell_arrays["material_id"].text, int)
     bc_id = parse_numbers(cell_arrays["bc_id"].text, int)
     parent_global = parse_numbers(
-        cell_arrays["parent_global_element"].text, int
+        cell_arrays["parent_global_element"].text,
+        int,
     )
 
     arrays = [cell_kind, global_element, material_id, bc_id, parent_global]
     if any(len(values) != number_of_cells for values in arrays):
         lengths = [len(values) for values in arrays]
         raise RuntimeError(
-            f"{path.name}: cell-array lengths {lengths} do not match "
-            f"NumberOfCells={number_of_cells}"
+            "{}: cell-array lengths {} do not match NumberOfCells={}".format(
+                path.name,
+                lengths,
+                number_of_cells,
+            )
         )
 
-    volume_material: Dict[int, int] = {}
+    volume_material = {}  # type: Dict[int, int]
     material_counts = collections.Counter()
     bc_counts = collections.Counter()
     parent_material_counts = collections.Counter()
 
     for kind, gid, material in zip(
-        cell_kind, global_element, material_id
+        cell_kind,
+        global_element,
+        material_id,
     ):
         if kind == 1:
             volume_material[gid] = material
@@ -136,17 +146,22 @@ def audit_piece(
     for kind, bc, parent in zip(cell_kind, bc_id, parent_global):
         if kind != 2:
             continue
+
         bc_counts[bc] += 1
         parent_material = volume_material.get(parent)
         parent_material_counts[(bc, parent_material)] += 1
 
     ghost_values = parse_numbers(
-        point_arrays["vtkGhostType"].text, int
+        point_arrays["vtkGhostType"].text,
+        int,
     )
     if len(ghost_values) != number_of_points:
         raise RuntimeError(
-            f"{path.name}: vtkGhostType length {len(ghost_values)} does not "
-            f"match NumberOfPoints={number_of_points}"
+            "{}: vtkGhostType length {} does not match NumberOfPoints={}".format(
+                path.name,
+                len(ghost_values),
+                number_of_points,
+            )
         )
 
     return (
@@ -160,23 +175,28 @@ def audit_piece(
     )
 
 
-def data_lines(path: Path, limit: int = 30) -> List[str]:
-    lines: List[str] = []
+def data_lines(path, limit=30):
+    """Read the first non-comment data lines from a text input file."""
+    lines = []  # type: List[str]
     with path.open("r", encoding="utf-8", errors="replace") as stream:
         for raw in stream:
             line = raw.strip()
             if not line or line.startswith("#") or line.startswith("!"):
                 continue
+
             lines.append(line)
             if len(lines) >= limit:
                 break
+
     return lines
 
 
-def audit_material_files(partition_root: Path) -> None:
+def audit_material_files(partition_root):
+    """Report whether all rank-local material property files are identical."""
     files = sorted(partition_root.rglob("*.matprop"))
+
     print("\n===== MATERIAL PROPERTY FILES =====")
-    print(f"matprop files found : {len(files)}")
+    print("matprop files found : {}".format(len(files)))
 
     if not files:
         print("ERROR: no .matprop files found")
@@ -187,15 +207,16 @@ def audit_material_files(partition_root: Path) -> None:
         digest = hashlib.sha256(path.read_bytes()).hexdigest()
         hashes[digest].append(path)
 
-    print(f"unique contents     : {len(hashes)}")
+    print("unique contents     : {}".format(len(hashes)))
+
     for index, paths in enumerate(hashes.values(), start=1):
         representative = paths[0]
-        print(f"\nmatprop variant {index}: {representative}")
+        print("\nmatprop variant {}: {}".format(index, representative))
         for line in data_lines(representative):
-            print(f"  {line}")
+            print("  {}".format(line))
 
 
-def main() -> int:
+def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--pvtu", required=True, type=Path)
     parser.add_argument("--partition-root", required=True, type=Path)
@@ -208,17 +229,17 @@ def main() -> int:
     total_material = collections.Counter()
     total_bc = collections.Counter()
     total_parent_material = collections.Counter()
-    point_array_intersection = None
-    cell_array_intersection = None
+    point_array_intersection = None  # type: Optional[set]
+    cell_array_intersection = None  # type: Optional[set]
     total_local_points = 0
     total_ghost_points = 0
 
     print("CBS3D heat-transfer post-processing audit")
-    print(f"PVTU             : {pvtu}")
-    print(f"VTU pieces       : {len(pieces)}")
-    print(f"Partition root   : {partition_root}")
+    print("PVTU             : {}".format(pvtu))
+    print("VTU pieces       : {}".format(len(pieces)))
+    print("Partition root   : {}".format(partition_root))
 
-    for index, piece in enumerate(pieces, start=1):
+    for index, piece_path in enumerate(pieces, start=1):
         (
             material_counts,
             bc_counts,
@@ -227,7 +248,7 @@ def main() -> int:
             cell_arrays,
             local_points,
             ghost_points,
-        ) = audit_piece(piece)
+        ) = audit_piece(piece_path)
 
         total_material.update(material_counts)
         total_bc.update(bc_counts)
@@ -247,36 +268,49 @@ def main() -> int:
         )
 
         print(
-            f"  audited piece {index:02d}/{len(pieces):02d}: "
-            f"{piece.name}"
+            "  audited piece {:02d}/{:02d}: {}".format(
+                index,
+                len(pieces),
+                piece_path.name,
+            )
         )
 
     print("\n===== COMMON ARRAYS =====")
     print("PointData:")
     for name in sorted(point_array_intersection or []):
-        print(f"  {name}")
+        print("  {}".format(name))
+
     print("CellData:")
     for name in sorted(cell_array_intersection or []):
-        print(f"  {name}")
+        print("  {}".format(name))
 
     print("\n===== VOLUME MATERIAL COUNTS =====")
     for material, count in sorted(total_material.items()):
-        print(f"material_id {material:6d} : {count}")
+        print("material_id {:6d} : {}".format(material, count))
 
     print("\n===== BOUNDARY FACE COUNTS =====")
     for bc, count in sorted(total_bc.items()):
-        print(f"bc_id {bc:6d} : {count}")
+        print("bc_id {:6d} : {}".format(bc, count))
 
     print("\n===== BOUNDARY PARENT MATERIAL COUNTS =====")
     for (bc, material), count in sorted(
         total_parent_material.items(),
-        key=lambda item: (item[0][0], -999999 if item[0][1] is None else item[0][1]),
+        key=lambda item: (
+            item[0][0],
+            -999999 if item[0][1] is None else item[0][1],
+        ),
     ):
-        print(f"bc_id {bc:6d}, parent material {material!s:>6s} : {count}")
+        print(
+            "bc_id {:6d}, parent material {:>6s} : {}".format(
+                bc,
+                str(material),
+                count,
+            )
+        )
 
     print("\n===== POINT OWNERSHIP SUMMARY =====")
-    print(f"sum of rank-local points : {total_local_points}")
-    print(f"sum of ghost points      : {total_ghost_points}")
+    print("sum of rank-local points : {}".format(total_local_points))
+    print("sum of ghost points      : {}".format(total_ghost_points))
 
     audit_material_files(partition_root)
 
@@ -291,11 +325,15 @@ def main() -> int:
     print("\n===== AUDIT RESULT =====")
     if errors:
         for error in errors:
-            print(f"FAIL: {error}")
+            print("FAIL: {}".format(error))
         return 1
 
-    print("PASS: topology and material inputs needed for CHT post-processing exist")
-    print("Next: reconstruct P1 tetrahedral temperature gradients and interface fluxes")
+    print(
+        "PASS: topology and material inputs needed for CHT post-processing exist"
+    )
+    print(
+        "Next: reconstruct P1 tetrahedral temperature gradients and interface fluxes"
+    )
     return 0
 
 
@@ -303,5 +341,5 @@ if __name__ == "__main__":
     try:
         sys.exit(main())
     except Exception as error:
-        print(f"ERROR: {error}", file=sys.stderr)
+        print("ERROR: {}".format(error), file=sys.stderr)
         sys.exit(2)
