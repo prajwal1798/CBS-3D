@@ -157,6 +157,31 @@ if (CBS3D_BUILD_STEP4_VALIDATION)
             -pedantic
         )
     endif()
+
+    add_executable(cbs3d_step4_supg_comparison
+        tests/Step4SupgComparison.cpp
+        src/assembly/EnergyAssembly.cpp
+    )
+
+    target_include_directories(cbs3d_step4_supg_comparison PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/include"
+    )
+
+    target_compile_features(cbs3d_step4_supg_comparison PRIVATE cxx_std_20)
+
+    if (MSVC)
+        target_compile_options(cbs3d_step4_supg_comparison PRIVATE
+            /W4
+            /permissive-
+        )
+    else()
+        target_compile_options(cbs3d_step4_supg_comparison PRIVATE
+            -O2
+            -Wall
+            -Wextra
+            -pedantic
+        )
+    endif()
 endif()
 
 #==============================================================================
