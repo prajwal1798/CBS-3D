@@ -34,6 +34,17 @@ namespace cbs
             const PartitionMetadata& metadata,
             MPI_Comm communicator = MPI_COMM_WORLD);
 
+        // Reduces rank-local nodal lower/upper bounds onto the unique owner.
+        static void minGhostContributionsToOwners(
+            Array1D<Real>& values,
+            const PartitionMetadata& metadata,
+            MPI_Comm communicator = MPI_COMM_WORLD);
+
+        static void maxGhostContributionsToOwners(
+            Array1D<Real>& values,
+            const PartitionMetadata& metadata,
+            MPI_Comm communicator = MPI_COMM_WORLD);
+
         // Combines ghost material-mask bits on the owning node.
         static void orGhostMasksToOwners(
             Array1D<Int>& values,
