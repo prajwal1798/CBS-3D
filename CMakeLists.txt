@@ -182,6 +182,31 @@ if (CBS3D_BUILD_STEP4_VALIDATION)
             -pedantic
         )
     endif()
+
+    add_executable(cbs3d_step4_afc_low_order
+        tests/Step4AfcLowOrder.cpp
+        src/assembly/EnergyAssembly.cpp
+    )
+
+    target_include_directories(cbs3d_step4_afc_low_order PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/include"
+    )
+
+    target_compile_features(cbs3d_step4_afc_low_order PRIVATE cxx_std_20)
+
+    if (MSVC)
+        target_compile_options(cbs3d_step4_afc_low_order PRIVATE
+            /W4
+            /permissive-
+        )
+    else()
+        target_compile_options(cbs3d_step4_afc_low_order PRIVATE
+            -O2
+            -Wall
+            -Wextra
+            -pedantic
+        )
+    endif()
 endif()
 
 #==============================================================================
