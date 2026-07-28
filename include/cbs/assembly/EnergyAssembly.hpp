@@ -57,6 +57,19 @@ namespace cbs
         // Assembles the complete CBS Step 4 thermal residual.
         static void assembleStep4Rhs(CBSStateSI& s);
 
+        // Builds the four-node element transport matrix A_e defined by:
+        //
+        //     r_e(T) = -A_e T_e + b_e,
+        //
+        // where b_e contains volumetric and boundary loads and is deliberately
+        // excluded. The matrix contains exactly the same convection,
+        // characteristic and diffusion coefficients as assembleStep4Rhs().
+        // Positions 1..4 are active; row/column zero are unused.
+        static void buildElementTransportMatrix(
+            const CBSStateSI& s,
+            Int ie,
+            Real matrix[5][5]);
+
         // Reserved hook for future real-time or BDF thermal-history terms.
         static void applyRealTimeEnergyTerm(CBSStateSI& s);
     };
