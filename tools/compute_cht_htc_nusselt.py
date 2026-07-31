@@ -59,6 +59,9 @@ globals()["__name__"] = _original_name
 
 if _original_name == "__main__":
     try:
+        if len(sys.argv) == 3 and sys.argv[1] == "--plots-only":
+            regenerate_journal_plots(Path(sys.argv[2]))
+            sys.exit(0)
         sys.exit(main())
     except Exception as exc:
         print("ERROR: {}".format(exc), file=sys.stderr)
