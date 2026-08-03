@@ -135,5 +135,10 @@ namespace cbs
 
         // Checks whether the requested transient end time has been reached.
         [[nodiscard]] bool transientEndTimeReached() const;
+
+        // Restart-aware implementation hooks.  The validated distributed loop
+        // is compiled privately and called through runDistributedProductionLoop.
+        void runDistributedProductionLoopImpl();
+        void runDistributedPreprocessingWithRestart();
     };
 }
