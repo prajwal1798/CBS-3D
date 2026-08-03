@@ -34,7 +34,7 @@ set(CBS3D_SOURCES
     src/solver/SolverDistributedStep2.cpp
     src/solver/SolverDistributedStep3.cpp
     src/solver/SolverDistributedLoop.cpp
-    src/solver/SolverDistributedProductionLoopRestart.cpp
+    src/solver/SolverDistributedProductionLoopRestartAfc.cpp
     src/solver/SolverDistributedWallAudit.cpp
     src/solver/SolverDistributedPressureAudit.cpp
     src/solver/SolverDistributedVelocityBoundaryInventory.cpp
@@ -49,6 +49,7 @@ set(CBS3D_SOURCES
     src/assembly/VelocityCorrectionAssembly.cpp
     src/assembly/MomentumAssembly.cpp
     src/assembly/EnergyAssembly.cpp
+    src/assembly/TemperatureAFC.cpp
 
     src/assembly/SpalartAllmarasAssembly.cpp
 
