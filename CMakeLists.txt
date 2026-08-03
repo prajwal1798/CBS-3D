@@ -22,6 +22,7 @@ set(CBS3D_SOURCES
     src/io/MeshIO.cpp
     src/io/Post.cpp
     src/io/DistributedPost.cpp
+    src/io/RestartIO.cpp
 
     src/preprocess/Preprocess.cpp
     src/boundary/Boundary.cpp
@@ -33,7 +34,7 @@ set(CBS3D_SOURCES
     src/solver/SolverDistributedStep2.cpp
     src/solver/SolverDistributedStep3.cpp
     src/solver/SolverDistributedLoop.cpp
-    src/solver/SolverDistributedProductionLoop.cpp
+    src/solver/SolverDistributedProductionLoopRestart.cpp
     src/solver/SolverDistributedWallAudit.cpp
     src/solver/SolverDistributedPressureAudit.cpp
     src/solver/SolverDistributedVelocityBoundaryInventory.cpp
