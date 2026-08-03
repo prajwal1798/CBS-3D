@@ -16,6 +16,7 @@
 #include "cbs/core/CBSStateSI.hpp"
 #include "cbs/core/Types.hpp"
 
+#include <algorithm>
 #include <string>
 
 namespace cbs
