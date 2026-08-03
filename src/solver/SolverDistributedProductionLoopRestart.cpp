@@ -20,6 +20,7 @@
 #include "cbs/solver/Solver.hpp"
 #include "cbs/timestep/TimeStep.hpp"
 
+#include <cstdlib>
 #include <iostream>
 #include <limits>
 #include <stdexcept>
