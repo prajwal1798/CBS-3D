@@ -20,22 +20,49 @@
 #include "cbs/solver/Solver.hpp"
 #include "cbs/timestep/TimeStep.hpp"
 
-#include <algorithm>
-#include <cstdlib>
 #include <iostream>
+#include <limits>
+#include <stdexcept>
 #include <string>
 
 namespace cbs
 {
     namespace
     {
-        bool restart_environment_flag_enabled(const char* name)
+        Int continuation_iteration_override()
         {
-            const char* value = std::getenv(name);
+            const char* value =
+                std::getenv("CBS3D_CONTINUATION_ITERATIONS");
 
-            return value != nullptr &&
-                   value[0] != '\0' &&
-                   std::string(value) != "0";
+            if (value == nullptr || value[0] == '\0')
+            {
+                return 0;
+            }
+
+            const std::string text(value);
+            std::size_t parsed = 0;
+            long long iterations = 0;
+
+            try
+            {
+                iterations = std::stoll(text, &parsed, 10);
+            }
+            catch (const std::exception&)
+            {
+                throw std::runtime_error(
+                    "CBS3D_CONTINUATION_ITERATIONS is not a valid integer");
+            }
+
+            if (parsed != text.size() ||
+                iterations < 1 ||
+                iterations > std::numeric_limits<Int>::max())
+            {
+                throw std::runtime_error(
+                    "CBS3D_CONTINUATION_ITERATIONS must be in the positive "
+                    "CBS3D Int range");
+            }
+
+            return static_cast<Int>(iterations);
         }
 
 
@@ -225,8 +252,24 @@ namespace cbs
         // material masks and boundary state before any solution is imported.
         runDistributedPreprocessing();
 
+        const Int requested_segment_iterations =
+            continuation_iteration_override();
+
+        if (requested_segment_iterations > 0)
+        {
+            s_.cfg.ntime = requested_segment_iterations;
+        }
+
         const RestartIO::LoadResult restart =
             RestartIO::loadIfRequested(s_, case_name_);
+
+        if (s_.mpi_rank == 0 && requested_segment_iterations > 0)
+        {
+            std::cout
+                << "Continuation segment override\n"
+                << "  additional iterations: "
+                << requested_segment_iterations << "\n";
+        }
 
         if (!restart.loaded)
         {
