@@ -381,6 +381,125 @@ namespace cbs
             }
         }
 
+
+        //-------------------------------------------------------------------------
+        // Reads the optional Spalart-Allmaras turbulence-control block.
+        //
+        // The block is deliberately optional so that all older laminar and CHT
+        // parameter files remain valid.  If the file ends after the artificial
+        // diffusion line, the turbulence controls keep their RunConfig defaults:
+        //
+        //     turbulence_on = 0
+        //
+        // New SA cases append four labelled data blocks:
+        //
+        //     turbulence_on turbulence_model turbulent_thermal_diffusivity_on
+        //     sa_inlet_ratio sa_prandtl_t
+        //     sa_min_wall_distance sa_min_stilde sa_nu_tilde_floor
+        //     sa_use_stilde_limiter sa_implicit_destruction
+        //-------------------------------------------------------------------------
+        void read_optional_spalart_allmaras_controls(std::istream& in, CBSStateSI& s)
+        {
+            std::string label;
+            std::string line;
+
+            if (!read_data_line(in, label))
+            {
+                return;
+            }
+
+            if (!read_data_line(in, line))
+            {
+                throw std::runtime_error(
+                    "MeshIO::readParameterFile - missing Spalart-Allmaras control data line");
+            }
+
+            {
+                std::istringstream iss(line);
+
+                if (!(iss >> s.cfg.turbulence_on
+                    >> s.cfg.turbulence_model
+                    >> s.cfg.turbulent_thermal_diffusivity_on))
+                {
+                    throw std::runtime_error(
+                        "MeshIO::readParameterFile - invalid Spalart-Allmaras control line; "
+                        "expected turbulence_on turbulence_model turbulent_thermal_diffusivity_on");
+                }
+            }
+
+            if (!read_data_line(in, label))
+            {
+                throw std::runtime_error(
+                    "MeshIO::readParameterFile - missing Spalart-Allmaras inlet/thermal label line");
+            }
+
+            if (!read_data_line(in, line))
+            {
+                throw std::runtime_error(
+                    "MeshIO::readParameterFile - missing Spalart-Allmaras inlet/thermal data line");
+            }
+
+            {
+                std::istringstream iss(line);
+
+                if (!(iss >> s.cfg.sa_inlet_ratio >> s.cfg.sa_prandtl_t))
+                {
+                    throw std::runtime_error(
+                        "MeshIO::readParameterFile - invalid Spalart-Allmaras inlet/thermal line; "
+                        "expected sa_inlet_ratio sa_prandtl_t");
+                }
+            }
+
+            if (!read_data_line(in, label))
+            {
+                throw std::runtime_error(
+                    "MeshIO::readParameterFile - missing Spalart-Allmaras numerical-floor label line");
+            }
+
+            if (!read_data_line(in, line))
+            {
+                throw std::runtime_error(
+                    "MeshIO::readParameterFile - missing Spalart-Allmaras numerical-floor data line");
+            }
+
+            {
+                std::istringstream iss(line);
+
+                if (!(iss >> s.cfg.sa_min_wall_distance
+                    >> s.cfg.sa_min_stilde
+                    >> s.cfg.sa_nu_tilde_floor))
+                {
+                    throw std::runtime_error(
+                        "MeshIO::readParameterFile - invalid Spalart-Allmaras numerical-floor line; "
+                        "expected sa_min_wall_distance sa_min_stilde sa_nu_tilde_floor");
+                }
+            }
+
+            if (!read_data_line(in, label))
+            {
+                throw std::runtime_error(
+                    "MeshIO::readParameterFile - missing Spalart-Allmaras switch label line");
+            }
+
+            if (!read_data_line(in, line))
+            {
+                throw std::runtime_error(
+                    "MeshIO::readParameterFile - missing Spalart-Allmaras switch data line");
+            }
+
+            {
+                std::istringstream iss(line);
+
+                if (!(iss >> s.cfg.sa_use_stilde_limiter
+                    >> s.cfg.sa_implicit_destruction))
+                {
+                    throw std::runtime_error(
+                        "MeshIO::readParameterFile - invalid Spalart-Allmaras switch line; "
+                        "expected sa_use_stilde_limiter sa_implicit_destruction");
+                }
+            }
+        }
+
         bool material_files_required(const CBSStateSI& s)
         {
             // Strict rule:
@@ -419,6 +538,12 @@ namespace cbs
                 s.k_e(ie) = 1.0;
                 s.alpha_e(ie) = 1.0;
                 s.Qvol_e(ie) = 0.0;
+
+                s.mu_eff_e(ie) = s.mu_e(ie);
+                s.k_eff_e(ie) = s.k_e(ie);
+                s.nu_tilde_e(ie) = 0.0;
+                s.nu_t_e(ie) = 0.0;
+                s.mu_t_e(ie) = 0.0;
             }
         }
 
@@ -1189,6 +1314,7 @@ namespace cbs
         read_pressure_cg_controls(in, s);
         read_output_monitor_controls(in, s);
         read_artificial_diffusion_control(in, s);
+        read_optional_spalart_allmaras_controls(in, s);
 
         if (s.cfg.solver_opt < 1 || s.cfg.solver_opt > 3)
         {
@@ -1430,6 +1556,78 @@ namespace cbs
         {
             throw std::runtime_error(
                 "MeshIO::readParameterFile - NUSSELT_DIAMETER must be > 0");
+        }
+
+
+        if (s.cfg.turbulence_on < 0 || s.cfg.turbulence_on > 1)
+        {
+            throw std::runtime_error(
+                "MeshIO::readParameterFile - TURBULENCE_ON must be 0 or 1");
+        }
+
+        if (s.cfg.turbulence_model < 0 || s.cfg.turbulence_model > 1)
+        {
+            throw std::runtime_error(
+                "MeshIO::readParameterFile - TURBULENCE_MODEL must be 0 or 1");
+        }
+
+        if (s.cfg.turbulent_thermal_diffusivity_on < 0 ||
+            s.cfg.turbulent_thermal_diffusivity_on > 1)
+        {
+            throw std::runtime_error(
+                "MeshIO::readParameterFile - TURBULENT_THERMAL_DIFFUSIVITY_ON must be 0 or 1");
+        }
+
+        if (s.cfg.sa_inlet_ratio < 0.0)
+        {
+            throw std::runtime_error(
+                "MeshIO::readParameterFile - SA_INLET_RATIO must be non-negative");
+        }
+
+        if (s.cfg.sa_prandtl_t <= 0.0)
+        {
+            throw std::runtime_error(
+                "MeshIO::readParameterFile - SA_PRANDTL_T must be positive");
+        }
+
+        if (s.cfg.sa_min_wall_distance <= 0.0)
+        {
+            throw std::runtime_error(
+                "MeshIO::readParameterFile - SA_MIN_WALL_DISTANCE must be positive");
+        }
+
+        if (s.cfg.sa_min_stilde <= 0.0)
+        {
+            throw std::runtime_error(
+                "MeshIO::readParameterFile - SA_MIN_STILDE must be positive");
+        }
+
+        if (s.cfg.sa_nu_tilde_floor < 0.0)
+        {
+            throw std::runtime_error(
+                "MeshIO::readParameterFile - SA_NU_TILDE_FLOOR must be non-negative");
+        }
+
+        if (s.cfg.sa_use_stilde_limiter < 0 || s.cfg.sa_use_stilde_limiter > 1)
+        {
+            throw std::runtime_error(
+                "MeshIO::readParameterFile - SA_USE_STILDE_LIMITER must be 0 or 1");
+        }
+
+        if (s.cfg.sa_implicit_destruction < 0 || s.cfg.sa_implicit_destruction > 1)
+        {
+            throw std::runtime_error(
+                "MeshIO::readParameterFile - SA_IMPLICIT_DESTRUCTION must be 0 or 1");
+        }
+
+        if (s.cfg.turbulence_on > 0)
+        {
+            if (s.cfg.dimensional_mode < 1 || s.cfg.material_properties_enabled < 1)
+            {
+                throw std::runtime_error(
+                    "MeshIO::readParameterFile - Spalart-Allmaras requires dimensional_mode=1 "
+                    "and material_properties_enabled=1 so that nu = mu/rho is available");
+            }
         }
 
         s.cfg.istart = 1;
@@ -1691,6 +1889,12 @@ namespace cbs
                 s.k_e(ie) = 1.0;
                 s.alpha_e(ie) = 1.0;
                 s.Qvol_e(ie) = 0.0;
+
+                s.mu_eff_e(ie) = s.mu_e(ie);
+                s.k_eff_e(ie) = s.k_e(ie);
+                s.nu_tilde_e(ie) = 0.0;
+                s.nu_t_e(ie) = 0.0;
+                s.mu_t_e(ie) = 0.0;
             }
         }
 

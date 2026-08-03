@@ -38,6 +38,32 @@ namespace cbs
         // CBS equations. This is the first distributed-MPI integration stage.
         void runPartitionInitialisation();
 
+        // Executes rank-local geometric preprocessing and reconciles shared
+        // nodal mass quantities across MPI partition interfaces. CBS Steps
+        // 1 to 4 and the pressure solve are not advanced by this milestone.
+        void runDistributedPreprocessing();
+
+        // Preprocesses the distributed mesh and executes one complete
+        // owner/ghost-consistent CBS momentum-predictor step.
+        void runDistributedStep1();
+
+        // Executes distributed Step 1 followed by the MPI/PETSc pressure step.
+        void runDistributedStep2();
+
+        // Executes distributed Steps 1 to 3 and measures the post-correction
+        // weak-divergence residual on unconstrained pressure rows.
+        void runDistributedStep3();
+
+        // Executes the persistent distributed CBS iteration loop. Preprocessing,
+        // pressure-matrix assembly and AMG setup occur once; Steps 1 to 4 are
+        // then advanced for cfg.ntime iterations.
+        void runDistributedLoop();
+
+        // Executes the DD-4B/DD-4C production loop with globally reduced
+        // component-wise convergence, early stopping, rank-zero residual CSV,
+        // and per-rank VTU plus rank-zero PVTU/PVD output.
+        void runDistributedProductionLoop();
+
         // Returns read-only access to the complete solver state.
         [[nodiscard]] const CBSStateSI& state() const noexcept;
 
@@ -71,6 +97,29 @@ namespace cbs
         // Verifies the integrated owner-to-ghost halo communication.
         void auditPartitionHalo() const;
 
+        // Verifies that distributed nodal mass and thermal capacitance agree
+        // with independently integrated rank-local element contributions.
+        void auditDistributedPreprocessing() const;
+
+        // Verifies the globally reconciled fluid/solid nodal masks.
+        void auditDistributedMaterialMasks() const;
+
+        // Independently verifies distributed wall/interface classification and
+        // area-weighted wall-normal reconciliation.
+        void auditDistributedWallClassification() const;
+
+        // Independently reconstructs distributed prescribed-pressure state and
+        // validates owner/ghost flags and each rank-local pressure list.
+        void auditDistributedPressureBoundary() const;
+
+        // Inventories global velocity-relevant boundary classifications,
+        // overlaps and inlet-normal multiplicity without modifying solver state.
+        void auditDistributedVelocityBoundaryInventory() const;
+
+        // Independently validates the persistent distributed nodal velocity-
+        // boundary types, priorities, values, topology flags and inlet normals.
+        void auditDistributedVelocityBoundaryState() const;
+
         // Builds the element and global pressure operators used in CBS Step 2.
         void preparePressureSystem();
 
@@ -86,5 +135,10 @@ namespace cbs
 
         // Checks whether the requested transient end time has been reached.
         [[nodiscard]] bool transientEndTimeReached() const;
+
+        // Restart-aware implementation hooks.  The validated distributed loop
+        // is compiled privately and called through runDistributedProductionLoop.
+        void runDistributedProductionLoopImpl();
+        void runDistributedPreprocessingWithRestart();
     };
 }

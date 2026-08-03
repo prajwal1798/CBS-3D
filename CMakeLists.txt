@@ -21,6 +21,8 @@ set(CBS3D_SOURCES
 
     src/io/MeshIO.cpp
     src/io/Post.cpp
+    src/io/DistributedPost.cpp
+    src/io/RestartIO.cpp
 
     src/preprocess/Preprocess.cpp
     src/boundary/Boundary.cpp
@@ -29,6 +31,13 @@ set(CBS3D_SOURCES
     src/solver/Convergence.cpp
     src/solver/Steps.cpp
     src/solver/Solver.cpp
+    src/solver/SolverDistributedStep2.cpp
+    src/solver/SolverDistributedStep3.cpp
+    src/solver/SolverDistributedLoop.cpp
+    src/solver/SolverDistributedProductionLoopRestart.cpp
+    src/solver/SolverDistributedWallAudit.cpp
+    src/solver/SolverDistributedPressureAudit.cpp
+    src/solver/SolverDistributedVelocityBoundaryInventory.cpp
 
     src/linalg/BandedMatrix.cpp
     src/linalg/BandedGaussianSolver.cpp
@@ -37,8 +46,17 @@ set(CBS3D_SOURCES
     src/linalg/ConjugateGradient.cpp
 
     src/assembly/PressureAssembly.cpp
+    src/assembly/VelocityCorrectionAssembly.cpp
     src/assembly/MomentumAssembly.cpp
     src/assembly/EnergyAssembly.cpp
+
+    src/assembly/SpalartAllmarasAssembly.cpp
+
+    src/turbulence/SpalartAllmaras.cpp
+    src/turbulence/WallDistance.cpp
+    src/turbulence/TurbulencePreprocess.cpp
+
+    src/boundary/TurbulenceBoundary.cpp
 
     src/utils/SolverProfiler.cpp
 
@@ -49,6 +67,8 @@ set(CBS3D_SOURCES
 if (CBS3D_ENABLE_PETSC)
     list(APPEND CBS3D_SOURCES
         src/linalg/PetscPressureSolver.cpp
+        src/linalg/PetscDistributedPressureSolver.cpp
+        src/linalg/PetscPersistentDistributedPressureSystem.cpp
     )
 endif()
 

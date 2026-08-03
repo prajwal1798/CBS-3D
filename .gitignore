@@ -13,3 +13,6 @@ CMakeCache.txt
 CMakeFiles/
 
 input/blanket/partitions/40/
+
+# Generated solver output
+output/

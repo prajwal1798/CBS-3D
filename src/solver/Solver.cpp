@@ -30,6 +30,7 @@
 #include "cbs/solver/Convergence.hpp"
 #include "cbs/solver/Steps.hpp"
 #include "cbs/timestep/TimeStep.hpp"
+#include "cbs/turbulence/TurbulencePreprocess.hpp"
 
 #include <cmath>
 #include <cstdint>
@@ -124,6 +125,313 @@ namespace cbs
         MeshIO::readAll(case_name_, s_);
         readPartitionMetadata();
         auditPartitionHalo();
+    }
+
+
+
+    //=========================================================================
+    // Executes the fir
+    //
+    // Geometric quantities are calculated independently from each rank's owned
+    // tetrahedra. Shared nodal mass quantities are reconciled by massMatrix().
+    //
+    // This milestone intentionally stops before pressure assembly and CBS
+    // Steps 1 to 4.
+    //=========================================================================
+    void Solver::runDistributedPreprocessing()
+    {
+        if (!s_.mpi_enabled)
+        {
+            throw std::runtime_error(
+                "Solver::runDistributedPreprocessing requires more than one MPI rank");
+        }
+
+        MeshIO::readAll(case_name_, s_);
+        readPartitionMetadata();
+
+        // These operations use only owned tetrahedra or rank-local physical
+        // boundary faces.
+        Preprocess::validateBoundaryFlags(s_);
+        Preprocess::shapeFunctionDerivatives(s_);
+        Preprocess::assignBoundaryFaceNumbers(s_);
+        Preprocess::getNormals(s_);
+
+        // The first numerically meaningful reverse-add and forward halo stage.
+        Preprocess::massMatrix(s_);
+
+        // Reconcile the fluid/solid classification of every shared node.
+        Preprocess::buildMaterialNodeMasks(s_);
+
+        // Reconcile physical-wall flags, conformal-interface flags and
+        // area-weighted wall-normal contributions across shared nodes.
+        Preprocess::wallDetermination(s_);
+
+        // Globally sum all physical BC 511 face areas and calculate one
+        // identical mass-flow inlet velocity on every MPI rank.
+        Preprocess::computeMassFlowInletVelocity(s_);
+
+        // Reconcile all BC 520 pressure nodes and rebuild each rank's local
+        // prescribed-pressure list.
+        Preprocess::detectPressureBoundaryNodes(s_);
+
+        // Construct the persistent owner/ghost-consistent velocity-boundary
+        // classification, priority, prescribed values and BC 511 normals.
+        Preprocess::buildVelocityBoundaryState(s_);
+    }
+
+
+    //=========================================================================
+    // Executes one complete distributed CBS Step 1.
+    //
+    // The distributed finite-element sequence is:
+    //
+    //     1. Complete rank-local geometry and colouring.
+    //     2. Apply initial strong velocity values on owners.
+    //     3. Broadcast owner velocity to ghosts.
+    //     4. Compute one communicator-wide global time step.
+    //     5. Assemble the fluid momentum dia
+    //     6. Execute the distributed momentum predictor.
+    //
+    // Ste
+    // MPI_COMM_WORLD and a global pressure numbering.
+    //=========================================================================
+    void Solver::runDistributedStep1()
+    {
+#ifdef CBS3D_USE_MPI
+        if (!s_.mpi_enabled)
+        {
+            throw std::runtime_error(
+                "Solver::runDistributedStep1 requires more than one MPI rank");
+        }
+
+        runDistributedPreprocessing();
+
+        // Step-1 element kernels require exterior-face classification,
+        // characteristic lengths and race-free local OpenMP colouring.
+        Preprocess::classifyFaceEdges(s_);
+        Preprocess::elementSize(s_);
+        Coloring::build(s_);
+
+        // Establish one authoritative initial velocity value per global node.
+        Boundary::applyOwnedVelocityConstraints(s_);
+
+        HaloExchange::broadcastOwnedToGhosts(
+            s_.unkno,
+            s_.partition_metadata,
+            MPI_COMM_WORLD);
+
+        updateVelocityMagnitude();
+        s_.velocity_old = s_.velocity;
+
+        // Store u^n before calculating the predictor.
+        s_.unkn1 = s_.unkno;
+
+        // Calculate rank-local stability limits. A communicator-wide minimum
+        // is then used for this first distributed solver milestone.
+        TimeStep::computeTimeStep(s_, 1);
+
+        Real local_dt_min =
+            std::numeric_limits<Real>::max();
+
+        for (Int ie = 1; ie <= s_.cfg.nelem; ++ie)
+        {
+            if (s_.delte(ie) < local_dt_min)
+            {
+                local_dt_min = s_.delte(ie);
+            }
+        }
+
+        Real global_dt = 0.0;
+
+        checkMpi(
+            MPI_Allreduce(
+                &local_dt_min,
+                &global_dt,
+                1,
+                MPI_DOUBLE,
+                MPI_MIN,
+                MPI_COMM_WORLD),
+            "MPI_Allreduce distributed Step-1 timestep");
+
+        if (global_dt <= 0.0 || !std::isfinite(global_dt))
+        {
+            throw std::runtime_error(
+                "Solver::runDistributedStep1 obtained an invalid global timestep");
+        }
+
+        // DD-3A uses one communicator-wide time step. This gives one identical
+        // discrete momentum diagonal definition on all subdomains and matches
+        // the global-time-step semi-implicit CBS formulation.
+        for (Int ie = 1; ie <= s_.cfg.nelem; ++ie)
+        {
+            s_.delte(ie) = global_dt;
+        }
+
+        for (Int ip = 1; ip <= s_.cfg.npoin; ++ip)
+        {
+            s_.deltp(ip) = global_dt;
+            s_.deltp1(ip) = global_dt;
+            s_.deltp2(ip) = global_dt;
+        }
+
+        s_.cfg.dtreal = global_dt;
+
+        // Assemble the fluid-only momentum time diagonal:
+        //
+        //     D_i = sum_{fluid e incident on i} m_i^(e) / dt_e
+        //
+        // Each rank contributes only its owned tetrahedra. Shared-node
+        // contributions are reverse-summed onto the node owner.
+        Array1D<Real> momentum_diagonal(s_.cfg.npoin);
+        momentum_diagonal.fill(0.0);
+
+        for (Int ie = 1; ie <= s_.cfg.nelem; ++ie)
+        {
+            if (s_.mat_elem(ie) != 0)
+            {
+                continue;
+            }
+
+            const Real dt = s_.delte(ie);
+
+            for (Int in = 1; in <= s_.cfg.nep; ++in)
+            {
+                const Int ip = s_.intma(in, ie);
+
+                const Int coefficient_index =
+                    (ie - 1) * s_.cfg.nep + in;
+
+                const Real mass =
+                    s_.elcoe_e(coefficient_index);
+
+                if (mass <= 0.0 || !std::isfinite(mass))
+                {
+                    throw std::runtime_error(
+                        "Solver::runDistributedStep1 found an invalid "
+                        "fluid element-node mass");
+                }
+
+                momentum_diagonal(ip) += mass / dt;
+            }
+        }
+
+        HaloExchange::sumGhostContributionsToOwners(
+            momentum_diagonal,
+            s_.partition_metadata,
+            MPI_COMM_WORLD);
+
+        s_.elcoe2.fill(0.0);
+
+        for (const Int ip : s_.owned_nodes)
+        {
+            const bool touches_fluid =
+                (s_.node_material_mask(ip) &
+                 CBSStateSI::node_touches_fluid) != 0;
+
+            if (!touches_fluid)
+            {
+                // Solid-only nodes have no momentum equation.
+                s_.elcoe2(ip) = 0.0;
+                continue;
+            }
+
+            const Real diagonal =
+                momentum_diagonal(ip);
+
+            if (diagonal <= 0.0 || !std::isfinite(diagonal))
+            {
+                throw std::runtime_error(
+                    "Solver::runDistributedStep1 found a non-positive "
+                    "owned momentum diagonal");
+            }
+
+            s_.elcoe2(ip) = 1.0 / diagonal;
+        }
+
+        HaloExchange::broadcastOwnedToGhosts(
+            s_.elcoe2,
+            s_.partition_metadata,
+            MPI_COMM_WORLD);
+
+        // Execute the real distributed finite-element momentum predictor.
+        Steps::step1(s_);
+
+        updateVelocityMagnitude();
+
+        // Solver diagnostics are evaluated once per unique global node.
+        Real local_velocity_squared = 0.0;
+        Real local_velocity_max = 0.0;
+
+        for (const Int ip : s_.owned_nodes)
+        {
+            const Real u = s_.unkno(1, ip);
+            const Real v = s_.unkno(2, ip);
+            const Real w = s_.unkno(3, ip);
+
+            if (!std::isfinite(u) ||
+                !std::isfinite(v) ||
+                !std::isfinite(w))
+            {
+                throw std::runtime_error(
+                    "Solver::runDistributedStep1 produced a non-finite velocity");
+            }
+
+            const Real speed_squared =
+                u * u + v * v + w * w;
+
+            local_velocity_squared += speed_squared;
+
+            const Real speed =
+                std::sqrt(speed_squared);
+
+            if (speed > local_velocity_max)
+            {
+                local_velocity_max = speed;
+            }
+        }
+
+        Real global_velocity_squared = 0.0;
+        Real global_velocity_max = 0.0;
+
+        checkMpi(
+            MPI_Allreduce(
+                &local_velocity_squared,
+                &global_velocity_squared,
+                1,
+                MPI_DOUBLE,
+                MPI_SUM,
+                MPI_COMM_WORLD),
+            "MPI_Allreduce Step-1 velocity L2 norm");
+
+        checkMpi(
+            MPI_Allreduce(
+                &local_velocity_max,
+                &global_velocity_max,
+                1,
+                MPI_DOUBLE,
+                MPI_MAX,
+                MPI_COMM_WORLD),
+            "MPI_Allreduce Step-1 velocity maximum");
+
+        if (s_.mpi_rank == 0)
+        {
+            std::cout
+                << "============================================================\n"
+                << "CBS3D DISTRIBUTED STEP 1 COMPLETE\n"
+                << "============================================================\n"
+                << "MPI ranks            : " << s_.mpi_size << "\n"
+                << "global timestep      : " << global_dt << "\n"
+                << "velocity L2 norm     : "
+                << std::sqrt(global_velocity_squared) << "\n"
+                << "maximum velocity     : "
+                << global_velocity_max << "\n"
+                << "next solver stage    : distributed pressure RHS/PETSc\n"
+                << "============================================================\n";
+        }
+#else
+        throw std::runtime_error(
+            "Solver::runDistributedStep1 requires an MPI-enabled build");
+#endif
     }
 
 
@@ -238,6 +546,7 @@ namespace cbs
     //     6. Classify walls, pressure boundaries and special face edges.
     //     7. Build OpenMP element-colouring groups.
     //     8. Apply the initial velocity, pressure and temperature conditions.
+//     9. If requested, preprocess the Spalart-Allmaras turbulence model.
     //=========================================================================
     void Solver::initialise()
     {
@@ -274,7 +583,12 @@ namespace cbs
         // thermal capacitance used by the energy equation.
         Post::printStage("Mass matrix", "momentum and thermal capacitance");
         Preprocess::massMatrix(s_);
-        Post::printStageDone("Mass matrix", "lumped diagonals ready");
+
+        // Establish one persistent material classification for every node.
+        // In MPI mode this reconciles owner and ghost copies using bitwise OR.
+        Preprocess::buildMaterialNodeMasks(s_);
+
+        Post::printStageDone("Mass matrix", "lumped diagonals and material masks ready");
 
         // Identify all nodal and facial boundary groups required by the
         // momentum, pressure and energy equations.
@@ -299,6 +613,23 @@ namespace cbs
         Boundary::applyPressure(s_);
         updateVelocityMagnitude();
         Post::printStageDone("Initial boundary values", "initial field constrained");
+
+
+        // Precompute all geometry-dependent Spalart-Allmaras quantities before
+        // the CBS time loop.  In the current milestone this includes the
+        // OpenMP wall-distance search and the initial eddy-viscosity field.
+        if (s_.cfg.turbulence_on > 0)
+        {
+            Post::printStage(
+                "Turbulence preprocessing",
+                "Spalart-Allmaras wall distance");
+
+            TurbulencePreprocess::prepareSpalartAllmaras(s_);
+
+            Post::printStageDone(
+                "Turbulence preprocessing",
+                "SA wall distance ready");
+        }
     }
 
 
@@ -578,6 +909,368 @@ namespace cbs
     }
 
 
+
+    //=========================================================================
+    // Verifies distributed lumped-mass and thermal-capacitance reconciliation.
+    //
+    // Each element contributes:
+    //
+    //     nep * detJ * mass_factor
+    //
+    // to the total scalar lumped mass. Summing only owned nodal entries avoids
+    // counting replicated ghost values.
+    //=========================================================================
+    void Solver::auditDistributedPreprocessing() const
+    {
+#ifdef CBS3D_USE_MPI
+        Real local_element_mass = 0.0;
+        Real local_element_capacity = 0.0;
+
+        for (Int ie = 1; ie <= s_.cfg.nelem; ++ie)
+        {
+            if (s_.detJ(ie) <= 0.0 ||
+                !std::isfinite(s_.detJ(ie)))
+            {
+                throw std::runtime_error(
+                    "Distributed preprocessing audit found invalid detJ");
+            }
+
+            const Real element_lumped_mass =
+                static_cast<Real>(s_.cfg.nep)
+                * s_.detJ(ie)
+                * s_.cfg.mass_factor;
+
+            local_element_mass += element_lumped_mass;
+
+            local_element_capacity +=
+                s_.rho_cp_e(ie) * element_lumped_mass;
+        }
+
+        Real local_owned_mass = 0.0;
+        Real local_owned_capacity = 0.0;
+
+        for (const Int ip : s_.owned_nodes)
+        {
+            if (s_.Mdiag_real(ip) <= 0.0 ||
+                !std::isfinite(s_.Mdiag_real(ip)) ||
+                s_.elcoe2p(ip) <= 0.0 ||
+                !std::isfinite(s_.elcoe2p(ip)))
+            {
+                throw std::runtime_error(
+                    "Distributed preprocessing audit found an invalid owned-node coefficient");
+            }
+
+            local_owned_mass +=
+                s_.Mdiag_real(ip);
+
+            local_owned_capacity +=
+                1.0 / s_.elcoe2p(ip);
+        }
+
+        Real global_element_mass = 0.0;
+        Real global_element_capacity = 0.0;
+        Real global_owned_mass = 0.0;
+        Real global_owned_capacity = 0.0;
+
+        checkMpi(
+            MPI_Allreduce(
+                &local_element_mass,
+                &global_element_mass,
+                1,
+                MPI_DOUBLE,
+                MPI_SUM,
+                MPI_COMM_WORLD),
+            "MPI_Allreduce element lumped mass");
+
+        checkMpi(
+            MPI_Allreduce(
+                &local_element_capacity,
+                &global_element_capacity,
+                1,
+                MPI_DOUBLE,
+                MPI_SUM,
+                MPI_COMM_WORLD),
+            "MPI_Allreduce element thermal capacity");
+
+        checkMpi(
+            MPI_Allreduce(
+                &local_owned_mass,
+                &global_owned_mass,
+                1,
+                MPI_DOUBLE,
+                MPI_SUM,
+                MPI_COMM_WORLD),
+            "MPI_Allreduce owned nodal mass");
+
+        checkMpi(
+            MPI_Allreduce(
+                &local_owned_capacity,
+                &global_owned_capacity,
+                1,
+                MPI_DOUBLE,
+                MPI_SUM,
+                MPI_COMM_WORLD),
+            "MPI_Allreduce owned nodal thermal capacity");
+
+        const auto nearly_equal = [](const Real a, const Real b)
+        {
+            const Real scale =
+                std::fmax(
+                    1.0,
+                    std::fmax(std::fabs(a), std::fabs(b)));
+
+            return std::fabs(a - b) <= 1.0e-9 * scale;
+        };
+
+        if (!nearly_equal(global_owned_mass, global_element_mass) ||
+            !nearly_equal(
+                global_owned_capacity,
+                global_element_capacity))
+        {
+            throw std::runtime_error(
+                "Distributed preprocessing mass reconciliation failed");
+        }
+
+        if (s_.mpi_rank == 0)
+        {
+            std::cout
+                << "============================================================\n"
+                << "CBS3D DISTRIBUTED PREPROCESSING\n"
+                << "============================================================\n"
+                << "MPI ranks                    : " << s_.mpi_size << "\n"
+                << "element lumped mass          : " << global_element_mass << "\n"
+                << "unique owned nodal mass      : " << global_owned_mass << "\n"
+                << "element thermal capacity     : " << global_element_capacity << "\n"
+                << "owned nodal thermal capacity : " << global_owned_capacity << "\n"
+                << "mass reconciliation          : PASS\n"
+                << "thermal reconciliation       : PASS\n"
+                << "CBS Steps 1 to 4             : NOT STARTED\n"
+                << "RESULT                        : PASS\n"
+                << "============================================================\n";
+        }
+#else
+        throw std::runtime_error(
+            "Solver::auditDistributedPreprocessing requires an MPI build");
+#endif
+    }
+
+
+    //=========================================================================
+    // Independently verifies the distributed nodal material masks.
+    //
+    // A global reference mask is constructed directly from the owned
+    // tetrahedra using MPI_BOR over global node IDs. This reference does not
+    // depend on the neighbour halo maps, so it provides an independent check
+    // of the reverse-OR and forward-broadcast implementation.
+    //=========================================================================
+    void Solver::auditDistributedMaterialMasks() const
+    {
+#ifdef CBS3D_USE_MPI
+        const Int global_npoin =
+            static_cast<Int>(s_.partition_metadata.global_npoin);
+
+        if (global_npoin < 1)
+        {
+            throw std::runtime_error(
+                "Distributed material-mask audit found invalid global node count");
+        }
+
+        std::vector<Int> local_reference(
+            static_cast<Size>(global_npoin) + 1U,
+            0);
+
+        std::vector<Int> global_reference(
+            static_cast<Size>(global_npoin) + 1U,
+            0);
+
+        // Construct the independent rank-local contribution in global-node
+        // numbering directly from the owned tetrahedra.
+        for (Int ie = 1; ie <= s_.cfg.nelem; ++ie)
+        {
+            const Int material_bit =
+                s_.mat_elem(ie) == 0
+                    ? CBSStateSI::node_touches_fluid
+                    : CBSStateSI::node_touches_solid;
+
+            for (Int in = 1; in <= s_.cfg.nep; ++in)
+            {
+                const Int ip = s_.intma(in, ie);
+
+                if (ip < 1 || ip > s_.cfg.npoin)
+                {
+                    throw std::runtime_error(
+                        "Distributed material-mask audit found invalid local node");
+                }
+
+                const Size local_index = static_cast<Size>(ip);
+
+                if (local_index >= s_.local_to_global_node.size())
+                {
+                    throw std::runtime_error(
+                        "Distributed material-mask audit found incomplete "
+                        "local-to-global node map");
+                }
+
+                const Int global_id =
+                    s_.local_to_global_node[local_index];
+
+                if (global_id < 1 || global_id > global_npoin)
+                {
+                    throw std::runtime_error(
+                        "Distributed material-mask audit found invalid global node ID");
+                }
+
+                local_reference[static_cast<Size>(global_id)] |=
+                    material_bit;
+            }
+        }
+
+        checkMpi(
+            MPI_Allreduce(
+                local_reference.data(),
+                global_reference.data(),
+                global_npoin + 1,
+                MPI_INT,
+                MPI_BOR,
+                MPI_COMM_WORLD),
+            "MPI_Allreduce global material-mask reference");
+
+        Int local_copy_mismatches = 0;
+
+        for (Int ip = 1; ip <= s_.cfg.npoin; ++ip)
+        {
+            const Size local_index = static_cast<Size>(ip);
+
+            if (local_index >= s_.local_to_global_node.size())
+            {
+                ++local_copy_mismatches;
+                continue;
+            }
+
+            const Int global_id =
+                s_.local_to_global_node[local_index];
+
+            if (global_id < 1 || global_id > global_npoin)
+            {
+                ++local_copy_mismatches;
+                continue;
+            }
+
+            if (s_.node_material_mask(ip) !=
+                global_reference[static_cast<Size>(global_id)])
+            {
+                ++local_copy_mismatches;
+            }
+        }
+
+        Int global_copy_mismatches = 0;
+
+        checkMpi(
+            MPI_Allreduce(
+                &local_copy_mismatches,
+                &global_copy_mismatches,
+                1,
+                MPI_INT,
+                MPI_SUM,
+                MPI_COMM_WORLD),
+            "MPI_Allreduce material-mask mismatches");
+
+        Int local_owned_counts[4] = {0, 0, 0, 0};
+
+        for (const Int ip : s_.owned_nodes)
+        {
+            const Int mask = s_.node_material_mask(ip);
+
+            if (mask >= 0 && mask <= 3)
+            {
+                ++local_owned_counts[mask];
+            }
+            else
+            {
+                ++local_owned_counts[0];
+            }
+        }
+
+        Int global_owned_counts[4] = {0, 0, 0, 0};
+
+        checkMpi(
+            MPI_Allreduce(
+                local_owned_counts,
+                global_owned_counts,
+                4,
+                MPI_INT,
+                MPI_SUM,
+                MPI_COMM_WORLD),
+            "MPI_Allreduce owned material-mask counts");
+
+        Int reference_counts[4] = {0, 0, 0, 0};
+
+        for (Int global_id = 1;
+             global_id <= global_npoin;
+             ++global_id)
+        {
+            const Int mask =
+                global_reference[static_cast<Size>(global_id)];
+
+            if (mask >= 0 && mask <= 3)
+            {
+                ++reference_counts[mask];
+            }
+            else
+            {
+                ++reference_counts[0];
+            }
+        }
+
+        const Int global_owned_total =
+            global_owned_counts[1]
+            + global_owned_counts[2]
+            + global_owned_counts[3];
+
+        const bool counts_match =
+            global_owned_counts[0] == 0
+            && reference_counts[0] == 0
+            && global_owned_counts[1] == reference_counts[1]
+            && global_owned_counts[2] == reference_counts[2]
+            && global_owned_counts[3] == reference_counts[3]
+            && global_owned_total == global_npoin;
+
+        if (global_copy_mismatches != 0 || !counts_match)
+        {
+            throw std::runtime_error(
+                "Distributed material-mask reconciliation failed");
+        }
+
+        if (s_.mpi_rank == 0)
+        {
+            std::cout
+                << "============================================================\n"
+                << "CBS3D DISTRIBUTED MATERIAL MASKS\n"
+                << "============================================================\n"
+                << "MPI ranks                    : " << s_.mpi_size << "\n"
+                << "fluid-only owned nodes       : "
+                << global_owned_counts[1] << "\n"
+                << "solid-only owned nodes       : "
+                << global_owned_counts[2] << "\n"
+                << "fluid-solid interface nodes  : "
+                << global_owned_counts[3] << "\n"
+                << "unique owned nodes           : "
+                << global_owned_total << "\n"
+                << "invalid material masks       : "
+                << global_owned_counts[0] << "\n"
+                << "owner/ghost mask agreement   : PASS\n"
+                << "independent MPI_BOR reference: PASS\n"
+                << "CBS Steps 1 to 4             : NOT STARTED\n"
+                << "RESULT                        : PASS\n"
+                << "============================================================\n";
+        }
+#else
+        throw std::runtime_error(
+            "Solver::auditDistributedMaterialMasks requires an MPI build");
+#endif
+    }
+
+
     //=========================================================================
     // Builds the pressure operator required by CBS Step 2.
     //
@@ -614,6 +1307,14 @@ namespace cbs
         s_.unkn1 = s_.unkno;
         s_.pres1 = s_.pres;
         s_.temperature1 = s_.temperature;
+
+        // Store the SA working variable at the beginning of the current
+        // iteration.  The SA residual assembly is explicit in nu_tilde and
+        // therefore uses nu_tilde1 as q^n.
+        if (s_.cfg.turbulence_on > 0)
+        {
+            s_.nu_tilde1 = s_.nu_tilde;
+        }
 
         // Calculate the physical or pseudo-time step used by this iteration.
         {
@@ -658,6 +1359,16 @@ namespace cbs
         {
             auto timer = profiler_.time(SolverProfiler::Section::Step3VelocityCorrection);
             Steps::step3(s_);
+        }
+
+        // Optional Spalart-Allmaras transport step.  It is placed after
+        // Step 3 because the SA advection and production terms use the corrected
+        // velocity field.  It is placed before Step 4 so that the energy equation
+        // can use the updated turbulent thermal conductivity.
+        if (s_.cfg.turbulence_on > 0)
+        {
+            auto timer = profiler_.time(SolverProfiler::Section::StepSpalartAllmaras);
+            Steps::stepSpalartAllmaras(s_);
         }
 
         // CBS Step 4: advance the energy equation when temperature is enabled.

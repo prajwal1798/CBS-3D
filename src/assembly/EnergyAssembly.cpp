@@ -398,7 +398,35 @@ namespace cbs
             // External Neumann heat flux is not included here.  It is added
             // explicitly only for BC 532 in add_prescribed_heat_flux().
             const Real volume = s.detJ(ie) / 6.0;
-            const Real k = s.k_e(ie);
+
+            // Laminar and solid calculation:
+            //
+            //     k_used = k_e
+            //
+            // Turbulent fluid heat-transfer calculation:
+            //
+            //     k_used = k_eff_e
+            //
+            // where:
+            //
+            //     k_eff_e = k_e + rho cp nu_t / Pr_t
+            //
+            // The turbulent addition is never applied in solid elements.
+            Real k = s.k_e(ie);
+
+            if (s.cfg.turbulence_on > 0 &&
+                s.cfg.turbulent_thermal_diffusivity_on > 0 &&
+                is_fluid_element(s, ie))
+            {
+                k = s.k_eff_e(ie);
+            }
+
+            if (k <= 0.0 || !std::isfinite(k))
+            {
+                throw std::runtime_error(
+                    "EnergyAssembly::assembleStep4Rhs - invalid effective thermal conductivity at element "
+                    + std::to_string(ie));
+            }
 
             for (Int a = 1; a <= s.cfg.nep; ++a)
             {

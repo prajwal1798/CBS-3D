@@ -236,7 +236,33 @@ namespace cbs
                             + std::to_string(ie));
                     }
 
-                    const Real nu = s.mu_e(ie) / s.rho_e(ie);
+                    Real nu = s.mu_e(ie) / s.rho_e(ie);
+
+                    if (s.cfg.turbulence_on > 0)
+                    {
+                        if (s.mu_eff_e(ie) < 0.0 || !std::isfinite(s.mu_eff_e(ie)))
+                        {
+                            throw std::runtime_error(
+                                "TimeStep - invalid effective viscosity at element "
+                                + std::to_string(ie));
+                        }
+
+                        nu = s.mu_eff_e(ie) / s.rho_e(ie);
+
+                        if (s.cfg.turbulent_thermal_diffusivity_on > 0)
+                        {
+                            if (s.k_eff_e(ie) <= 0.0 || !std::isfinite(s.k_eff_e(ie)))
+                            {
+                                throw std::runtime_error(
+                                    "TimeStep - invalid effective thermal conductivity at element "
+                                    + std::to_string(ie));
+                            }
+
+                            const Real alpha_eff = s.k_eff_e(ie) / s.rho_cp_e(ie);
+                            diff = std::max(diff, alpha_eff);
+                        }
+                    }
+
                     diff = std::max(diff, nu);
                 }
             }

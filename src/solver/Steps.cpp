@@ -1,21 +1,26 @@
 //=============================================================================
 // CBS3D++_SI
 //
-// High-level execution of the four semi-implicit CBS steps.
+// High-level execution of the semi-implicit CBS steps and the optional
+// Spalart-Allmaras turbulence transport step.
 //
 // The sequence is:
 //
-//     Step 1  Build the momentum residual and calculate the predicted velocity.
+//     Step 1   Build the momentum residual and calculate the predicted velocity.
 //
-//     Step 2  Build and solve the pressure equation.
+//     Step 2   Build and solve the pressure equation.
 //
-//     Step 3  Correct the velocity using the new pressure gradient.
+//     Step 3   Correct the velocity using the new pressure gradient.
 //
-//     Step 4  Advance the temperature equation when thermal calculation is
-//             enabled.
+//     Step SA  Advance the Spalart-Allmaras working variable when turbulence is
+//              enabled.  This step uses the corrected velocity from Step 3.
 //
-// This file performs the nodal updates and controls the step order. The
-// detailed element residuals are assembled in the dedicated assembly modules.
+//     Step 4   Advance the temperature equation when thermal calculation is
+//              enabled.
+//
+// Step SA is not called Step 5 because it is not a fifth CBS splitting step.  It
+// is a transported turbulence scalar inserted between velocity correction and
+// energy update.
 //=============================================================================
 
 #include "cbs/solver/Steps.hpp"
@@ -23,8 +28,14 @@
 #include "cbs/assembly/EnergyAssembly.hpp"
 #include "cbs/assembly/MomentumAssembly.hpp"
 #include "cbs/assembly/PressureAssembly.hpp"
+#include "cbs/assembly/SpalartAllmarasAssembly.hpp"
 #include "cbs/boundary/Boundary.hpp"
+#include "cbs/boundary/TurbulenceBoundary.hpp"
 #include "cbs/linalg/ConjugateGradient.hpp"
+
+#ifdef CBS3D_USE_MPI
+#include "cbs/parallel/HaloExchange.hpp"
+#endif
 
 #ifdef CBS3D_USE_PETSC
 #include "cbs/linalg/PetscPressureSolver.hpp"
@@ -131,12 +142,35 @@ namespace cbs
         //     r_m       = rhs
         void update_velocity_from_rhs_using_predictor_mass(CBSStateSI& s)
         {
+#ifdef CBS3D_USE_MPI
+            if (s.mpi_enabled)
+            {
+                // Shared-node residuals have already been reverse-assembled
+                // onto their owners. Therefore only owners advance the
+                // predictor equation.
+                for (const Int ip : s.owned_nodes)
+                {
+                    for (Int idim = 1;
+                         idim <= s.cfg.ndim;
+                         ++idim)
+                    {
+                        s.unkno(idim, ip) =
+                            s.unkn1(idim, ip)
+                            + s.rhs(idim, ip) * s.elcoe2(ip);
+                    }
+                }
+
+                return;
+            }
+#endif
+
             for (Int ip = 1; ip <= s.cfg.npoin; ++ip)
             {
                 for (Int idim = 1; idim <= s.cfg.ndim; ++idim)
                 {
                     s.unkno(idim, ip) =
-                        s.unkn1(idim, ip) + s.rhs(idim, ip) * s.elcoe2(ip);
+                        s.unkn1(idim, ip)
+                        + s.rhs(idim, ip) * s.elcoe2(ip);
                 }
             }
         }
@@ -249,6 +283,33 @@ namespace cbs
 
 
     //=========================================================================
+    // Executes the optional Spalart-Allmaras turbulence transport step.
+    //
+    // This step is deliberately placed after Step 3.  The SA equation requires
+    // the corrected velocity field for both advection and vorticity production.
+    // After nu_tilde is updated, the eddy viscosity and effective material
+    // properties are refreshed before Step 4 uses the thermal conductivity.
+    //=========================================================================
+    void Steps::stepSpalartAllmaras(CBSStateSI& s)
+    {
+        if (s.cfg.turbulence_on < 1)
+        {
+            return;
+        }
+
+        validate_step_dimensions(s);
+
+        SpalartAllmarasAssembly::assembleTransportRhs(s);
+        SpalartAllmarasAssembly::updateNuTilde(s);
+
+        TurbulenceBoundary::applyWallValues(s);
+        TurbulenceBoundary::applyInletValues(s);
+
+        SpalartAllmarasAssembly::updateEddyViscosity(s);
+    }
+
+
+    //=========================================================================
     // Executes CBS Step 4 when temperature calculation is enabled.
     //=========================================================================
     void Steps::step4(CBSStateSI& s)
@@ -259,25 +320,64 @@ namespace cbs
 
     //=========================================================================
     // CBS Step 1: momentum predictor.
-    //
-    // The momentum assembly module forms the nodal momentum residual r_m.
-    // The predicted velocity is then calculated as:
-    //
-    //     u* = u^n + D_u^(-1) r_m
-    //
-    // where elcoe2 stores the inverse lumped momentum mass/time diagonal.
-    //
-    // The precise convection, diffusion and characteristic terms are
-    // documented in MomentumAssembly.
     //=========================================================================
     void Steps::step1SemiImplicit(CBSStateSI& s)
     {
         validate_step_dimensions(s);
 
+#ifdef CBS3D_USE_MPI
+        if (s.mpi_enabled)
+        {
+            // DD-3A currently supports strong Dirichlet velocity conditions.
+            // Symmetry requires a separately reconciled nodal normal operator.
+            // Do not silently apply an incomplete rank-local face projection.
+            for (const Int ip : s.owned_nodes)
+            {
+                if (s.node_symmetry(ip) != 0)
+                {
+                    throw std::runtime_error(
+                        "Steps::step1SemiImplicit - distributed symmetry "
+                        "projection requires a persistent nodal symmetry normal");
+                }
+            }
+
+            // Element kernels read u^n at all four local element nodes.
+            // Ghost copies must therefore contain the current owner value.
+            HaloExchange::broadcastOwnedToGhosts(
+                s.unkn1,
+                s.partition_metadata);
+
+            // Every rank integrates only its owned tetrahedra. Contributions
+            // at shared nodes are initially stored in local ghost entries.
+            MomentumAssembly::assembleStep1Rhs(s);
+
+            // Perform distributed finite-element vector assembly:
+            //
+            //     r_i = sum over all incident owned elements r_i^(e)
+            //
+            // The completed residual is retained on the node owner.
+            HaloExchange::sumGhostContributionsToOwners(
+                s.rhs,
+                s.partition_metadata);
+
+            // Advance only the unique owner copy of each global node.
+            update_velocity_from_rhs_using_predictor_mass(s);
+
+            // Strong velocity constraints are also owner-authoritative.
+            Boundary::applyOwnedVelocityConstraints(s);
+
+            // Make u* available to every rank containing a neighbouring
+            // tetrahedron before the next CBS operator is evaluated.
+            HaloExchange::broadcastOwnedToGhosts(
+                s.unkno,
+                s.partition_metadata);
+
+            return;
+        }
+#endif
+
         MomentumAssembly::assembleStep1Rhs(s);
 
-        // Step 1 predicts u*.  The mass/time diagonal elcoe2 already contains
-        // the timestep scaling from TimeStep::updateLhsDiagonal().
         update_velocity_from_rhs_using_predictor_mass(s);
 
         apply_velocity_boundary_package(s);
@@ -286,21 +386,6 @@ namespace cbs
 
     //=========================================================================
     // CBS Step 2: pressure-system assembly and solution.
-    //
-    // The pressure assembly module forms the discrete system:
-    //
-    //     A_p p = b_p
-    //
-    // The selected linear solver then calculates the new pressure field.
-    //
-    // solver_opt:
-    //
-    //     1  native Conjugate Gradient pressure solver
-    //     2  banded solver, not yet implemented
-    //     3  PETSc pressure solver
-    //
-    // The convergence information is copied into the solver state for
-    // monitoring, residual output and final reporting.
     //=========================================================================
     void Steps::step2SemiImplicit(CBSStateSI& s)
     {
@@ -352,27 +437,6 @@ namespace cbs
 
     //=========================================================================
     // CBS Step 3: pressure-gradient velocity correction.
-    //
-    // The pressure gradient in one P1 tetrahedron is:
-    //
-    //     grad(p) = sum_a p_a grad(N_a)
-    //
-    // Since grad(N_a) is constant inside the element, grad(p) is also constant.
-    //
-    // The local nodal contribution is:
-    //
-    //     r_p,a^(e) = -(V_e / 4) grad(p)
-    //
-    // because:
-    //
-    //     det(J_e) fcon[1] = det(J_e) / 24 = V_e / 4
-    //
-    // The nodal velocity is corrected by:
-    //
-    //     u^(n+1) = u* + D_u^(-1) r_p
-    //
-    // Pressure correction is assembled only over fluid elements. The solid
-    // velocity is reset to zero after the nodal update.
     //=========================================================================
     void Steps::step3SemiImplicit(CBSStateSI& s)
     {
@@ -401,10 +465,6 @@ namespace cbs
                 for (Int a = 1; a <= s.cfg.nep; ++a)
                 {
                     const Int ip = s.intma(a, ie);
-
-                    // The pressure solver stores the newest nodal pressure in
-                    // s.pres. The element pressure gradient is assembled from
-                    // this field.
                     grad_pres[idim] += grad(s, ie, idim, a) * s.pres(ip);
                 }
             }
@@ -430,20 +490,6 @@ namespace cbs
 
     //=========================================================================
     // CBS Step 4: temperature update.
-    //
-    // The energy assembly module forms the thermal residual r_T from the
-    // convection, diffusion, source and heat-flux terms.
-    //
-    // The nodal update is:
-    //
-    //     T^(n+1) = T^n + D_T^(-1) r_T
-    //
-    // where:
-    //
-    //     D_T^(-1) = elcoe2p
-    //
-    // elcoe2p is the inverse lumped thermal-capacitance/time diagonal. The
-    // detailed fluid and solid energy terms are documented in EnergyAssembly.
     //=========================================================================
     void Steps::step4Energy(CBSStateSI& s)
     {
@@ -454,8 +500,6 @@ namespace cbs
 
         EnergyAssembly::assembleStep4Rhs(s);
 
-        // CHT thermal update uses inverse thermal capacitance elcoe2p, not the
-        // momentum mass diagonal elcoe2.
 #pragma omp parallel for schedule(static)
         for (Int ip = 1; ip <= s.cfg.npoin; ++ip)
         {

@@ -56,6 +56,10 @@ namespace cbs
         // Applies prescribed nodal velocity values and no-slip conditions.
         static void applyVelocity(CBSStateSI& s);
 
+        // Applies the persistent strong velocity state only at MPI-owned nodes.
+        // The owner values must subsequently be broadcast to ghost copies.
+        static void applyOwnedVelocityConstraints(CBSStateSI& s);
+
         // Applies prescribed nodal pressure values.
         static void applyPressure(CBSStateSI& s);
 

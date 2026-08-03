@@ -51,6 +51,37 @@ namespace cbs
 {
     struct CBSStateSI
     {
+        // Nodal material-connectivity mask bits.
+        //
+        //     0  invalid/unclassified
+        //     1  touches at least one fluid element
+        //     2  touches at least one solid element
+        //     3  conformal fluid-solid interface
+        static constexpr Int node_touches_fluid = 1;
+        static constexpr Int node_touches_solid = 2;
+
+        // Nodal no-slip classification bits.
+        //
+        //     0  not a no-slip node
+        //     1  belongs to at least one physical no-slip boundary face
+        //     2  belongs to the conformal fluid-solid material interface
+        //     3  belongs to both classifications
+        static constexpr Int node_on_physical_wall = 1;
+        static constexpr Int node_on_material_interface = 2;
+
+        // Final strong nodal velocity-boundary type.
+        static constexpr Int velocity_bc_free = 0;
+        static constexpr Int velocity_bc_prescribed = 1;
+        static constexpr Int velocity_bc_noslip = 2;
+        static constexpr Int velocity_bc_moving_wall = 3;
+
+        // Priority used to resolve overlapping velocity conditions.
+        static constexpr Int velocity_priority_free = 0;
+        static constexpr Int velocity_priority_prescribed = 1;
+        static constexpr Int velocity_priority_physical_wall = 2;
+        static constexpr Int velocity_priority_moving_wall = 3;
+        static constexpr Int velocity_priority_material_solid = 4;
+
         // --------------------------------------------------------------------
         // Problem configuration
         // --------------------------------------------------------------------
@@ -70,6 +101,47 @@ namespace cbs
 
         Array2D<Real> coord;      // Nodal coordinates: (ndim, npoin)
         Array1D<Int> mat_elem;    // Element material: 0 fluid, greater than 0 solid
+        Array1D<Int> node_material_mask; // Nodal fluid/solid connectivity bits
+
+        // Reconciled no-slip classification for every local node.
+        Array1D<Int> node_wall_mask;
+
+        // Unnormalised area-weighted physical-wall normal sum indexed by local
+        // node. Interface-only nodes legitimately retain a zero vector.
+        Array2D<Real> node_wall_normal_sum;
+
+        // Reconciled prescribed-pressure classification:
+        //
+        //     0  pressure is not prescribed
+        //     1  pressure is prescribed at this node
+        Array1D<Int> node_pressure_fixed;
+
+        // Final distributed strong velocity-boundary classification.
+        Array1D<Int> node_velocity_bc_type;
+
+        // Final distributed velocity-boundary priority.
+        Array1D<Int> node_velocity_bc_priority;
+
+        // Final prescribed nodal velocity:
+        //
+        //     node_velocity_bc_value(1:3, ip)
+        Array2D<Real> node_velocity_bc_value;
+
+        // Unnormalised area-weighted BC 511 nodal normal:
+        //
+        //     sum over incident inlet faces of A_f n_f
+        Array2D<Real> node_inlet_normal_sum;
+
+        // Normalised outward BC 511 nodal normal.
+        Array2D<Real> node_inlet_normal;
+
+        // Boundary-topology flags kept separate from strong velocity state.
+        Array1D<Int> node_massflow_inlet;
+        Array1D<Int> node_pressure_outlet;
+        Array1D<Int> node_symmetry;
+
+
+
 
         // --------------------------------------------------------------------
         // Primary solution variables
@@ -173,6 +245,44 @@ namespace cbs
         Array1D<Real> rho_cp_e;
         Array1D<Real> alpha_e;
         Array1D<Real> Qvol_e;
+
+
+        // --------------------------------------------------------------------
+        // Spalart-Allmaras turbulence state
+        // --------------------------------------------------------------------
+        // nu_tilde is the transported SA working variable.  nu_t and mu_t are
+        // derived quantities and must never be prescribed independently.
+        Array1D<Real> nu_tilde;
+        Array1D<Real> nu_tilde1;
+        Array1D<Real> nu_t;
+        Array1D<Real> mu_t;
+
+        // True minimum distance from a fluid node to the nearest physical
+        // no-slip wall triangle.  This is geometric data, not a mesh-line
+        // index or nearest-wall-node approximation.
+        Array1D<Real> wall_distance;
+
+        // SA nodal assembly and diagnostics.
+        Array1D<Real> sa_rhs;
+        Array1D<Real> sa_source;
+        Array1D<Real> sa_production;
+        Array1D<Real> sa_destruction;
+        Array1D<Real> sa_diffusion;
+        Array1D<Real> sa_residual;
+
+        // Nodal turbulence classification flags.
+        Array1D<Int> sa_active_node;
+        Array1D<Int> sa_wall_node;
+        Array1D<Int> sa_inlet_node;
+
+        // Element-averaged turbulence quantities and effective properties used
+        // by momentum and energy assemblies.  Molecular values remain stored in
+        // mu_e and k_e and are not overwritten.
+        Array1D<Real> nu_tilde_e;
+        Array1D<Real> nu_t_e;
+        Array1D<Real> mu_t_e;
+        Array1D<Real> mu_eff_e;
+        Array1D<Real> k_eff_e;
 
         // --------------------------------------------------------------------
         // Right-hand sides and correction arrays
@@ -464,6 +574,21 @@ namespace cbs
             wall_node_list.resize(cfg.npoin);
             bc_values.resize(cfg.npoin);
             bc_list.resize(cfg.npoin);
+            node_material_mask.resize(cfg.npoin);
+            node_wall_mask.resize(cfg.npoin);
+            node_wall_normal_sum.resize(cfg.ndim, cfg.npoin);
+            node_pressure_fixed.resize(cfg.npoin);
+
+            node_velocity_bc_type.resize(cfg.npoin);
+            node_velocity_bc_priority.resize(cfg.npoin);
+            node_velocity_bc_value.resize(cfg.ndim, cfg.npoin);
+
+            node_inlet_normal_sum.resize(cfg.ndim, cfg.npoin);
+            node_inlet_normal.resize(cfg.ndim, cfg.npoin);
+
+            node_massflow_inlet.resize(cfg.npoin);
+            node_pressure_outlet.resize(cfg.npoin);
+            node_symmetry.resize(cfg.npoin);
 
             // Element geometry and coefficients.
             dNkdx.resize(cfg.ndim * cfg.nep * cfg.nelem);
@@ -525,9 +650,50 @@ namespace cbs
             alpha_e.resize(cfg.nelem);
             Qvol_e.resize(cfg.nelem);
 
+
+            // Spalart-Allmaras nodal fields.
+            nu_tilde.resize(cfg.npoin);
+            nu_tilde1.resize(cfg.npoin);
+            nu_t.resize(cfg.npoin);
+            mu_t.resize(cfg.npoin);
+            wall_distance.resize(cfg.npoin);
+
+            sa_rhs.resize(cfg.npoin);
+            sa_source.resize(cfg.npoin);
+            sa_production.resize(cfg.npoin);
+            sa_destruction.resize(cfg.npoin);
+            sa_diffusion.resize(cfg.npoin);
+            sa_residual.resize(cfg.npoin);
+
+            sa_active_node.resize(cfg.npoin);
+            sa_wall_node.resize(cfg.npoin);
+            sa_inlet_node.resize(cfg.npoin);
+
+            // Spalart-Allmaras element fields.
+            nu_tilde_e.resize(cfg.nelem);
+            nu_t_e.resize(cfg.nelem);
+            mu_t_e.resize(cfg.nelem);
+            mu_eff_e.resize(cfg.nelem);
+            k_eff_e.resize(cfg.nelem);
+
             // Default values before the input files are read.
             fedge.fill(0);
             mat_elem.fill(0);
+            node_material_mask.fill(0);
+            node_wall_mask.fill(0);
+            node_wall_normal_sum.fill(0.0);
+            node_pressure_fixed.fill(0);
+
+            node_velocity_bc_type.fill(velocity_bc_free);
+            node_velocity_bc_priority.fill(velocity_priority_free);
+            node_velocity_bc_value.fill(0.0);
+
+            node_inlet_normal_sum.fill(0.0);
+            node_inlet_normal.fill(0.0);
+
+            node_massflow_inlet.fill(0);
+            node_pressure_outlet.fill(0);
+            node_symmetry.fill(0);
 
             rho_e.fill(1.0);
             cp_e.fill(1.0);
@@ -536,6 +702,30 @@ namespace cbs
             rho_cp_e.fill(1.0);
             alpha_e.fill(1.0);
             Qvol_e.fill(0.0);
+
+
+            nu_tilde.fill(0.0);
+            nu_tilde1.fill(0.0);
+            nu_t.fill(0.0);
+            mu_t.fill(0.0);
+            wall_distance.fill(1.0e300);
+
+            sa_rhs.fill(0.0);
+            sa_source.fill(0.0);
+            sa_production.fill(0.0);
+            sa_destruction.fill(0.0);
+            sa_diffusion.fill(0.0);
+            sa_residual.fill(0.0);
+
+            sa_active_node.fill(0);
+            sa_wall_node.fill(0);
+            sa_inlet_node.fill(0);
+
+            nu_tilde_e.fill(0.0);
+            nu_t_e.fill(0.0);
+            mu_t_e.fill(0.0);
+            mu_eff_e.fill(0.0);
+            k_eff_e.fill(1.0);
 
             deltp.fill(0.0);
             deltp1.fill(0.0);
