@@ -391,18 +391,6 @@ namespace cbs
         {
             const Int bc = s.iside(s.cfg.bsid, ib);
 
-            Real nx = 0.0;
-            Real ny = 0.0;
-            Real nz = 0.0;
-
-            if (bc == s.cfg.bc_massflow_temperature_inlet &&
-                s.cfg.mass_flow_inlet_enabled > 0)
-            {
-                // Mass-flow inlet in 3D uses the inward normal direction.
-                // face_norm is outward from the domain, so inflow is -n.
-                unit_outward_normal(s, ib, nx, ny, nz);
-            }
-
             for (Int in = 1; in <= s.cfg.nsidp; ++in)
             {
                 const Int ip = s.iside(in, ib);
@@ -480,7 +468,8 @@ namespace cbs
                 // -------------------------------------------------------------
                 // 511 : mass-flow inlet + prescribed temperature.
                 //
-                // The scalar speed is computed from the inlet area in
+                // The priority-resolved nodal velocity is scaled from
+                // the final discrete P1 support in
                 // Preprocess::computeMassFlowInletVelocity().
                 // -------------------------------------------------------------
                 else if (bc == s.cfg.bc_massflow_temperature_inlet)
@@ -490,9 +479,9 @@ namespace cbs
                         set_velocity(
                             s,
                             ip,
-                            -s.cfg.inlet_u_from_massflow * nx,
-                            -s.cfg.inlet_u_from_massflow * ny,
-                            -s.cfg.inlet_u_from_massflow * nz);
+                            s.node_velocity_bc_value(1, ip),
+                            s.node_velocity_bc_value(2, ip),
+                            s.node_velocity_bc_value(3, ip));
                     }
                     else
                     {

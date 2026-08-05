@@ -166,17 +166,18 @@ namespace cbs
         // area-weighted wall-normal contributions across shared nodes.
         Preprocess::wallDetermination(s_);
 
-        // Globally sum all physical BC 511 face areas and calculate one
-        // identical mass-flow inlet velocity on every MPI rank.
-        Preprocess::computeMassFlowInletVelocity(s_);
-
         // Reconcile all BC 520 pressure nodes and rebuild each rank's local
         // prescribed-pressure list.
         Preprocess::detectPressureBoundaryNodes(s_);
 
-        // Construct the persistent owner/ghost-consistent velocity-boundary
-        // classification, priority, prescribed values and BC 511 normals.
+        // Construct the final owner/ghost-consistent velocity-boundary state
+        // before normalising BC 511. This identifies the inlet nodes removed
+        // by wall/material/interface priority.
         Preprocess::buildVelocityBoundaryState(s_);
+
+        // Scale the final discrete P1 BC 511 profile and verify that its
+        // integrated mass flow equals the requested value.
+        Preprocess::computeMassFlowInletVelocity(s_);
     }
 
 
@@ -596,6 +597,7 @@ namespace cbs
         Preprocess::classifyFaceEdges(s_);
         Preprocess::elementSize(s_);
         Preprocess::wallDetermination(s_);
+        Preprocess::buildVelocityBoundaryState(s_);
         Preprocess::computeMassFlowInletVelocity(s_);
         Preprocess::initialiseVelocityMagnitude(s_);
         Preprocess::detectPressureBoundaryNodes(s_);

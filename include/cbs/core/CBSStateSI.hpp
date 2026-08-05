@@ -137,6 +137,12 @@ namespace cbs
 
         // Boundary-topology flags kept separate from strong velocity state.
         Array1D<Int> node_massflow_inlet;
+
+        // Final BC 511 P1-profile support after all velocity priorities.
+        // A value of one means that the mass-flow profile survives at the node;
+        // wall, material-solid/interface and moving-wall overrides remain zero.
+        Array1D<Int> node_massflow_profile_active;
+
         Array1D<Int> node_pressure_outlet;
         Array1D<Int> node_symmetry;
 
@@ -587,6 +593,7 @@ namespace cbs
             node_inlet_normal.resize(cfg.ndim, cfg.npoin);
 
             node_massflow_inlet.resize(cfg.npoin);
+            node_massflow_profile_active.resize(cfg.npoin);
             node_pressure_outlet.resize(cfg.npoin);
             node_symmetry.resize(cfg.npoin);
 
@@ -692,6 +699,7 @@ namespace cbs
             node_inlet_normal.fill(0.0);
 
             node_massflow_inlet.fill(0);
+            node_massflow_profile_active.fill(0);
             node_pressure_outlet.fill(0);
             node_symmetry.fill(0);
 

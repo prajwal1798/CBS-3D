@@ -1252,25 +1252,32 @@ namespace cbs
 
 
     //=========================================================================
-    // Converts a prescribed inlet mass-flow rate into velocity magnitude.
+    // Normalises the final discrete BC 511 inlet profile to the requested
+    // mass-flow rate.
     //
-    // The total inlet area is the sum of all BC 511 face areas:
+    // For one linear triangular boundary face f,
     //
-    //     A_in = sum_f A_f
+    //     integral_f u_h . n_f dA
+    //         = (1/3) sum_{a=1}^3 u_a . (A_f n_f)
     //
-    // Conservation of mass gives
+    // The final priority-resolved nodal state is used. Active BC 511 nodes
+    // carry the unit inward profile
     //
-    //     m_dot = rho_in A_in U_in
+    //     phi_i = -n_i,
     //
-    // and therefore
+    // while wall/material/interface overrides remain zero. Any non-zero
+    // higher-priority velocity on a BC 511 node is treated as a fixed flux
+    // contribution. The scalar amplitude U is therefore calculated from
     //
-    //     U_in = m_dot / (rho_in A_in)
+    //     m_dot_target = m_dot_fixed + C_h U,
     //
-    // This routine calculates only the magnitude. The inlet direction and
-    // nodal velocity components are imposed later by Boundary::applyVelocity().
+    // where C_h is assembled from the actual P1 face interpolation. This makes
+    // the imposed mass flow independent of how many inlet-rim nodes are removed
+    // by the final no-slip priority.
     //
-    // Output:
+    // Outputs:
     //     s.cfg.inlet_u_from_massflow
+    //     s.node_velocity_bc_value(1:3, active BC 511 nodes)
     //=========================================================================
     void Preprocess::computeMassFlowInletVelocity(CBSStateSI& s)
     {
@@ -1289,12 +1296,32 @@ namespace cbs
                 "inlet density must be positive");
         }
 
-        Real local_inlet_area = 0.0;
+        if (s.cfg.inlet_mass_flow_rate <= 0.0 ||
+            !std::isfinite(s.cfg.inlet_mass_flow_rate))
+        {
+            throw std::runtime_error(
+                "Preprocess::computeMassFlowInletVelocity - "
+                "target inlet mass-flow rate must be positive");
+        }
+
+        if (s.cfg.nsidp != 3)
+        {
+            throw std::runtime_error(
+                "Preprocess::computeMassFlowInletVelocity - "
+                "BC 511 discrete normalisation requires triangular faces");
+        }
+
+        const Real face_weight =
+            1.0 / static_cast<Real>(s.cfg.nsidp);
+
+        Real local_geometric_area = 0.0;
+        Real local_profile_area = 0.0;
+        Real local_fixed_volume_flow = 0.0;
         Int local_inlet_faces = 0;
 
-        // Each physical inlet face occurs on exactly one rank-local
-        // partition. Artificial partition boundaries are not present in
-        // the physical boundary-face file.
+        // Each physical BC 511 face occurs on exactly one partition. Shared
+        // nodal state has already been reconciled by
+        // buildVelocityBoundaryState().
         for (Int ib = 1; ib <= s.cfg.nboun; ++ib)
         {
             const Int bc = s.iside(s.cfg.bsid, ib);
@@ -1306,38 +1333,124 @@ namespace cbs
 
             const Real area = s.face_norm(4, ib);
 
-            if (area <= 0.0 || !std::isfinite(area))
+            if (area <= 0.0 ||
+                !std::isfinite(area) ||
+                !std::isfinite(s.face_norm(1, ib)) ||
+                !std::isfinite(s.face_norm(2, ib)) ||
+                !std::isfinite(s.face_norm(3, ib)))
             {
                 throw std::runtime_error(
                     "Preprocess::computeMassFlowInletVelocity - "
-                    "invalid inlet face area");
+                    "invalid BC 511 face geometry");
             }
 
-            local_inlet_area += area;
+            local_geometric_area += area;
             ++local_inlet_faces;
+
+            for (Int in = 1; in <= s.cfg.nsidp; ++in)
+            {
+                const Int ip = s.iside(in, ib);
+
+                if (ip < 1 || ip > s.cfg.npoin)
+                {
+                    throw std::runtime_error(
+                        "Preprocess::computeMassFlowInletVelocity - "
+                        "BC 511 node is outside the local node range");
+                }
+
+                const Int active =
+                    s.node_massflow_profile_active(ip);
+
+                if (active < 0 || active > 1)
+                {
+                    throw std::runtime_error(
+                        "Preprocess::computeMassFlowInletVelocity - "
+                        "invalid BC 511 profile-support flag");
+                }
+
+                if (active != 0)
+                {
+                    // Unit inward profile: phi_i = -n_i. Because face_norm
+                    // stores A_f n_f, the leading minus sign converts the
+                    // outward surface flux into positive inward flow.
+                    const Real profile_projection =
+                        -s.node_inlet_normal(1, ip) *
+                            s.face_norm(1, ib) +
+                        -s.node_inlet_normal(2, ip) *
+                            s.face_norm(2, ib) +
+                        -s.node_inlet_normal(3, ip) *
+                            s.face_norm(3, ib);
+
+                    if (!std::isfinite(profile_projection))
+                    {
+                        throw std::runtime_error(
+                            "Preprocess::computeMassFlowInletVelocity - "
+                            "non-finite BC 511 profile projection");
+                    }
+
+                    local_profile_area -=
+                        face_weight * profile_projection;
+                }
+                else
+                {
+                    // Preserve any non-zero higher-priority velocity exactly.
+                    const Real fixed_projection =
+                        s.node_velocity_bc_value(1, ip) *
+                            s.face_norm(1, ib) +
+                        s.node_velocity_bc_value(2, ip) *
+                            s.face_norm(2, ib) +
+                        s.node_velocity_bc_value(3, ip) *
+                            s.face_norm(3, ib);
+
+                    if (!std::isfinite(fixed_projection))
+                    {
+                        throw std::runtime_error(
+                            "Preprocess::computeMassFlowInletVelocity - "
+                            "non-finite fixed BC 511 flux contribution");
+                    }
+
+                    local_fixed_volume_flow -=
+                        face_weight * fixed_projection;
+                }
+            }
         }
 
-        Real inlet_area = local_inlet_area;
+        Real geometric_area = local_geometric_area;
+        Real profile_area = local_profile_area;
+        Real fixed_volume_flow = local_fixed_volume_flow;
         Int inlet_faces = local_inlet_faces;
 
 #ifdef CBS3D_USE_MPI
         if (s.mpi_enabled)
         {
-            const int area_error =
+            const Real local_metrics[3] =
+            {
+                local_geometric_area,
+                local_profile_area,
+                local_fixed_volume_flow
+            };
+
+            Real global_metrics[3] = {0.0, 0.0, 0.0};
+
+            const int metric_error =
                 MPI_Allreduce(
-                    &local_inlet_area,
-                    &inlet_area,
-                    1,
+                    local_metrics,
+                    global_metrics,
+                    3,
                     MPI_DOUBLE,
                     MPI_SUM,
                     MPI_COMM_WORLD);
 
-            if (area_error != MPI_SUCCESS)
+            if (metric_error != MPI_SUCCESS)
             {
                 throw std::runtime_error(
                     "Preprocess::computeMassFlowInletVelocity - "
-                    "MPI_Allreduce failed for inlet area");
+                    "MPI_Allreduce failed for BC 511 metrics");
             }
+
+            geometric_area = global_metrics[0];
+            profile_area = global_metrics[1];
+            fixed_volume_flow = global_metrics[2];
 
             const int face_error =
                 MPI_Allreduce(
@@ -1352,7 +1465,7 @@ namespace cbs
             {
                 throw std::runtime_error(
                     "Preprocess::computeMassFlowInletVelocity - "
-                    "MPI_Allreduce failed for inlet face count");
+                    "MPI_Allreduce failed for BC 511 face count");
             }
         }
 #endif
@@ -1361,42 +1474,278 @@ namespace cbs
         {
             throw std::runtime_error(
                 "Preprocess::computeMassFlowInletVelocity - "
-                "mass-flow inlet enabled but no BC_ID 511 faces were found");
+                "mass-flow inlet enabled but no BC 511 faces were found");
         }
 
-        if (inlet_area <= 0.0 ||
-            !std::isfinite(inlet_area))
+        if (geometric_area <= 0.0 ||
+            !std::isfinite(geometric_area))
         {
             throw std::runtime_error(
                 "Preprocess::computeMassFlowInletVelocity - "
-                "global inlet area is invalid");
+                "global geometric inlet area is invalid");
+        }
+
+        if (profile_area <= 0.0 ||
+            !std::isfinite(profile_area))
+        {
+            throw std::runtime_error(
+                "Preprocess::computeMassFlowInletVelocity - "
+                "final BC 511 P1 profile has zero or invalid support");
+        }
+
+        if (profile_area >
+            geometric_area * (1.0 + 1.0e-10))
+        {
+            throw std::runtime_error(
+                "Preprocess::computeMassFlowInletVelocity - "
+                "discrete BC 511 support exceeds geometric inlet area");
+        }
+
+        const Real fixed_mass_flow =
+            s.cfg.inlet_density * fixed_volume_flow;
+
+        const Real required_profile_mass_flow =
+            s.cfg.inlet_mass_flow_rate - fixed_mass_flow;
+
+        const Real profile_mass_coefficient =
+            s.cfg.inlet_density * profile_area;
+
+        if (required_profile_mass_flow <= 0.0 ||
+            !std::isfinite(required_profile_mass_flow) ||
+            profile_mass_coefficient <= 0.0 ||
+            !std::isfinite(profile_mass_coefficient))
+        {
+            throw std::runtime_error(
+                "Preprocess::computeMassFlowInletVelocity - "
+                "target flow cannot be represented by the active BC 511 profile");
         }
 
         s.cfg.inlet_u_from_massflow =
-            s.cfg.inlet_mass_flow_rate /
-            (s.cfg.inlet_density * inlet_area);
+            required_profile_mass_flow /
+            profile_mass_coefficient;
 
-        if (!std::isfinite(s.cfg.inlet_u_from_massflow))
+        if (s.cfg.inlet_u_from_massflow <= 0.0 ||
+            !std::isfinite(s.cfg.inlet_u_from_massflow))
         {
             throw std::runtime_error(
                 "Preprocess::computeMassFlowInletVelocity - "
-                "computed inlet velocity is not finite");
+                "computed BC 511 profile amplitude is invalid");
         }
 
-        // Avoid duplicate MPI output. Every rank nevertheless stores the same
-        // globally calculated inlet velocity.
+        // Scale only the final priority-resolved BC 511 profile support.
+        for (Int ip = 1; ip <= s.cfg.npoin; ++ip)
+        {
+            if (s.node_massflow_profile_active(ip) == 0)
+            {
+                continue;
+            }
+
+            s.node_velocity_bc_value(1, ip) =
+                -s.cfg.inlet_u_from_massflow *
+                s.node_inlet_normal(1, ip);
+
+            s.node_velocity_bc_value(2, ip) =
+                -s.cfg.inlet_u_from_massflow *
+                s.node_inlet_normal(2, ip);
+
+            s.node_velocity_bc_value(3, ip) =
+                -s.cfg.inlet_u_from_massflow *
+                s.node_inlet_normal(3, ip);
+        }
+
+#ifdef CBS3D_USE_MPI
+        if (s.mpi_enabled)
+        {
+            // Owners remain authoritative for the completed prescribed state.
+            HaloExchange::broadcastOwnedToGhosts(
+                s.node_velocity_bc_value,
+                s.partition_metadata);
+        }
+#endif
+
+        // Independently integrate the completed P1 boundary field.
+        Real local_integrated_mass_flow = 0.0;
+
+        for (Int ib = 1; ib <= s.cfg.nboun; ++ib)
+        {
+            const Int bc = s.iside(s.cfg.bsid, ib);
+
+            if (!is_mass_flow_inlet_bc(bc))
+            {
+                continue;
+            }
+
+            Real nodal_projection_sum = 0.0;
+
+            for (Int in = 1; in <= s.cfg.nsidp; ++in)
+            {
+                const Int ip = s.iside(in, ib);
+
+                nodal_projection_sum +=
+                    s.node_velocity_bc_value(1, ip) *
+                        s.face_norm(1, ib) +
+                    s.node_velocity_bc_value(2, ip) *
+                        s.face_norm(2, ib) +
+                    s.node_velocity_bc_value(3, ip) *
+                        s.face_norm(3, ib);
+            }
+
+            local_integrated_mass_flow -=
+                s.cfg.inlet_density *
+                face_weight *
+                nodal_projection_sum;
+        }
+
+        Real integrated_mass_flow =
+            local_integrated_mass_flow;
+
+#ifdef CBS3D_USE_MPI
+        if (s.mpi_enabled)
+        {
+            const int verification_error =
+                MPI_Allreduce(
+                    &local_integrated_mass_flow,
+                    &integrated_mass_flow,
+                    1,
+                    MPI_DOUBLE,
+                    MPI_SUM,
+                    MPI_COMM_WORLD);
+
+            if (verification_error != MPI_SUCCESS)
+            {
+                throw std::runtime_error(
+                    "Preprocess::computeMassFlowInletVelocity - "
+                    "MPI_Allreduce failed for BC 511 verification");
+            }
+        }
+#endif
+
+        const Real relative_error =
+            std::abs(
+                integrated_mass_flow -
+                s.cfg.inlet_mass_flow_rate) /
+            std::abs(s.cfg.inlet_mass_flow_rate);
+
+        if (!std::isfinite(relative_error) ||
+            relative_error > 1.0e-10)
+        {
+            throw std::runtime_error(
+                "Preprocess::computeMassFlowInletVelocity - "
+                "discrete BC 511 mass-flow verification failed");
+        }
+
+        long long local_topological_nodes = 0;
+        long long local_active_nodes = 0;
+
+        const auto count_node = [&](Int ip)
+        {
+            if (s.node_massflow_inlet(ip) != 0)
+            {
+                ++local_topological_nodes;
+            }
+
+            if (s.node_massflow_profile_active(ip) != 0)
+            {
+                ++local_active_nodes;
+            }
+        };
+
+        if (s.mpi_enabled)
+        {
+            for (const Int ip : s.owned_nodes)
+            {
+                count_node(ip);
+            }
+        }
+        else
+        {
+            for (Int ip = 1; ip <= s.cfg.npoin; ++ip)
+            {
+                count_node(ip);
+            }
+        }
+
+        long long topological_nodes = local_topological_nodes;
+        long long active_nodes = local_active_nodes;
+
+#ifdef CBS3D_USE_MPI
+        if (s.mpi_enabled)
+        {
+            const long long local_counts[2] =
+            {
+                local_topological_nodes,
+                local_active_nodes
+            };
+
+            long long global_counts[2] = {0, 0};
+
+            const int count_error =
+                MPI_Allreduce(
+                    local_counts,
+                    global_counts,
+                    2,
+                    MPI_LONG_LONG,
+                    MPI_SUM,
+                    MPI_COMM_WORLD);
+
+            if (count_error != MPI_SUCCESS)
+            {
+                throw std::runtime_error(
+                    "Preprocess::computeMassFlowInletVelocity - "
+                    "MPI_Allreduce failed for BC 511 node counts");
+            }
+
+            topological_nodes = global_counts[0];
+            active_nodes = global_counts[1];
+        }
+#endif
+
+        if (active_nodes < 1 ||
+            active_nodes > topological_nodes)
+        {
+            throw std::runtime_error(
+                "Preprocess::computeMassFlowInletVelocity - "
+                "invalid global BC 511 profile-support inventory");
+        }
+
         if (!s.mpi_enabled || s.mpi_rank == 0)
         {
+            const std::ios::fmtflags old_flags =
+                std::cout.flags();
+
+            const std::streamsize old_precision =
+                std::cout.precision();
+
             std::cout
-                << "Mass-flow inlet faces: "
+                << std::scientific
+                << std::setprecision(12)
+                << "Mass-flow inlet faces              : "
                 << inlet_faces << "\n"
-                << "Mass-flow inlet area : "
-                << inlet_area << "\n"
-                << "Mass-flow velocity magnitude: "
-                << s.cfg.inlet_u_from_massflow << "\n";
+                << "Mass-flow geometric area           : "
+                << geometric_area << "\n"
+                << "Mass-flow active P1 support area    : "
+                << profile_area << "\n"
+                << "Mass-flow fixed-priority contribution: "
+                << fixed_mass_flow << "\n"
+                << "Mass-flow topological inlet nodes   : "
+                << topological_nodes << "\n"
+                << "Mass-flow active profile nodes      : "
+                << active_nodes << "\n"
+                << "Mass-flow overridden inlet nodes    : "
+                << (topological_nodes - active_nodes) << "\n"
+                << "Mass-flow profile amplitude         : "
+                << s.cfg.inlet_u_from_massflow << "\n"
+                << "Mass-flow requested                 : "
+                << s.cfg.inlet_mass_flow_rate << "\n"
+                << "Mass-flow integrated P1 verification: "
+                << integrated_mass_flow << "\n"
+                << "Mass-flow relative verification error: "
+                << relative_error << "\n";
+
+            std::cout.flags(old_flags);
+            std::cout.precision(old_precision);
         }
     }
-
 
     //=========================================================================
     // Builds the persistent distributed nodal velocity-boundary state.
@@ -1457,6 +1806,7 @@ namespace cbs
         s.node_inlet_normal.fill(0.0);
 
         s.node_massflow_inlet.fill(0);
+        s.node_massflow_profile_active.fill(0);
         s.node_pressure_outlet.fill(0);
         s.node_symmetry.fill(0);
 
@@ -1867,17 +2217,20 @@ namespace cbs
                 {
                     if (s.cfg.mass_flow_inlet_enabled > 0)
                     {
+                        // The final priority has left BC 511 active at this
+                        // node. Store a unit inward profile; the discrete
+                        // normalisation routine scales it after all active and
+                        // overridden inlet nodes are known.
+                        s.node_massflow_profile_active(ip) = 1;
+
                         s.node_velocity_bc_value(1, ip) =
-                            -s.cfg.inlet_u_from_massflow *
-                            s.node_inlet_normal(1, ip);
+                            -s.node_inlet_normal(1, ip);
 
                         s.node_velocity_bc_value(2, ip) =
-                            -s.cfg.inlet_u_from_massflow *
-                            s.node_inlet_normal(2, ip);
+                            -s.node_inlet_normal(2, ip);
 
                         s.node_velocity_bc_value(3, ip) =
-                            -s.cfg.inlet_u_from_massflow *
-                            s.node_inlet_normal(3, ip);
+                            -s.node_inlet_normal(3, ip);
                     }
                     else
                     {
@@ -1933,6 +2286,10 @@ namespace cbs
 
             HaloExchange::broadcastOwnedToGhosts(
                 s.node_massflow_inlet,
+                s.partition_metadata);
+
+            HaloExchange::broadcastOwnedToGhosts(
+                s.node_massflow_profile_active,
                 s.partition_metadata);
 
             HaloExchange::broadcastOwnedToGhosts(
