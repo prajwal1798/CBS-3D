@@ -14,26 +14,16 @@ permissions:
 
 jobs:
   linux-serial:
-    name: Linux serial and OpenMP
+    name: Linux ${{ matrix.preset }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        preset:
-          - serial-release
-          - serial-openmp-release
-        build_preset:
-          - placeholder
         include:
           - preset: serial-release
             build_preset: build-serial-release
           - preset: serial-openmp-release
             build_preset: build-serial-openmp-release
-        exclude:
-          - preset: serial-release
-            build_preset: placeholder
-          - preset: serial-openmp-release
-            build_preset: placeholder
 
     steps:
       - name: Check out repository
