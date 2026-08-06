@@ -1,0 +1,77 @@
+name: Production serial build matrix
+
+on:
+  push:
+    branches:
+      - integration/production-consolidation
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  linux-serial:
+    name: Linux serial and OpenMP
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        preset:
+          - serial-release
+          - serial-openmp-release
+        build_preset:
+          - placeholder
+        include:
+          - preset: serial-release
+            build_preset: build-serial-release
+          - preset: serial-openmp-release
+            build_preset: build-serial-openmp-release
+        exclude:
+          - preset: serial-release
+            build_preset: placeholder
+          - preset: serial-openmp-release
+            build_preset: placeholder
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Configure
+        run: cmake --preset "${{ matrix.preset }}"
+
+      - name: Build
+        run: cmake --build --preset "${{ matrix.build_preset }}" --parallel 2
+
+      - name: Verify executable
+        run: test -x "build/${{ matrix.preset }}/cbs3d_serial"
+
+  windows-serial:
+    name: Windows MSVC serial
+    runs-on: windows-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Configure
+        shell: pwsh
+        run: >-
+          cmake -S . -B build/windows-serial
+          -DCBS3D_ENABLE_OPENMP=OFF
+          -DCBS3D_ENABLE_MPI=OFF
+          -DCBS3D_ENABLE_PETSC=OFF
+          -DCBS3D_KEEP_LEGACY_EXECUTABLE_NAME=OFF
+
+      - name: Build
+        shell: pwsh
+        run: cmake --build build/windows-serial --config Release --target cbs3d_serial --parallel 2
+
+      - name: Verify executable
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "build/windows-serial/Release/cbs3d_serial.exe")) {
+            throw "cbs3d_serial.exe was not produced"
+          }
