@@ -6,19 +6,32 @@ project(CBS3Dpp_SI LANGUAGES CXX)
 # Optional solver capabilities
 #==============================================================================
 option(CBS3D_ENABLE_OPENMP "Enable OpenMP shared-memory parallelism" ON)
-option(CBS3D_ENABLE_MPI "Enable MPI partitioned-solver development" OFF)
+option(CBS3D_ENABLE_MPI "Build the MPI distributed application" OFF)
 option(CBS3D_ENABLE_PETSC "Enable the PETSc pressure-solver path" OFF)
+option(
+    CBS3D_KEEP_LEGACY_EXECUTABLE_NAME
+    "Write the selected application as cbs3dpp_si for existing run scripts"
+    ON
+)
+
+if (CBS3D_ENABLE_MPI AND NOT CBS3D_ENABLE_PETSC)
+    message(FATAL_ERROR
+        "The production MPI application requires PETSc. Configure with "
+        "CBS3D_ENABLE_MPI=ON and CBS3D_ENABLE_PETSC=ON.")
+endif()
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 #==============================================================================
-# Source files
+# Shared numerical source tree
 #==============================================================================
-set(CBS3D_SOURCES
-    src/main.cpp
-
+# Serial and parallel applications have separate entry points, but they compile
+# the same numerical kernels. This prevents the two execution modes from
+# developing independent momentum, pressure, energy and boundary-condition
+# implementations.
+set(CBS3D_CORE_SOURCES
     src/io/MeshIO.cpp
     src/io/Post.cpp
     src/io/DistributedPost.cpp
@@ -50,7 +63,6 @@ set(CBS3D_SOURCES
     src/assembly/MomentumAssembly.cpp
     src/assembly/EnergyAssembly.cpp
     src/assembly/TemperatureAFC.cpp
-
     src/assembly/SpalartAllmarasAssembly.cpp
 
     src/turbulence/SpalartAllmaras.cpp
@@ -66,31 +78,53 @@ set(CBS3D_SOURCES
 )
 
 if (CBS3D_ENABLE_PETSC)
-    list(APPEND CBS3D_SOURCES
+    list(APPEND CBS3D_CORE_SOURCES
         src/linalg/PetscPressureSolver.cpp
         src/linalg/PetscDistributedPressureSolver.cpp
         src/linalg/PetscPersistentDistributedPressureSystem.cpp
     )
 endif()
 
-add_executable(cbs3dpp_si ${CBS3D_SOURCES})
+#==============================================================================
+# Application selection
+#==============================================================================
+if (CBS3D_ENABLE_MPI)
+    set(CBS3D_APPLICATION_TARGET cbs3d_parallel)
+    set(CBS3D_APPLICATION_SOURCE apps/parallel/main.cpp)
+else()
+    set(CBS3D_APPLICATION_TARGET cbs3d_serial)
+    set(CBS3D_APPLICATION_SOURCE apps/serial/main.cpp)
+endif()
 
-target_include_directories(cbs3dpp_si PRIVATE
+add_executable(
+    ${CBS3D_APPLICATION_TARGET}
+    ${CBS3D_APPLICATION_SOURCE}
+    ${CBS3D_CORE_SOURCES}
+)
+
+if (CBS3D_KEEP_LEGACY_EXECUTABLE_NAME)
+    set_target_properties(
+        ${CBS3D_APPLICATION_TARGET}
+        PROPERTIES OUTPUT_NAME cbs3dpp_si
+    )
+endif()
+
+target_include_directories(${CBS3D_APPLICATION_TARGET} PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/include"
 )
 
-target_compile_features(cbs3dpp_si PRIVATE cxx_std_20)
+target_compile_features(${CBS3D_APPLICATION_TARGET} PRIVATE cxx_std_20)
 
 #==============================================================================
 # Compiler warnings and optimisation
 #==============================================================================
 if (MSVC)
-    target_compile_options(cbs3dpp_si PRIVATE
+    target_compile_options(${CBS3D_APPLICATION_TARGET} PRIVATE
         /W4
         /permissive-
     )
 else()
-    target_compile_options(cbs3dpp_si PRIVATE
+    target_compile_options(${CBS3D_APPLICATION_TARGET} PRIVATE
         -O2
         -Wall
         -Wextra
@@ -105,8 +139,15 @@ if (CBS3D_ENABLE_OPENMP)
     find_package(OpenMP)
 
     if (OpenMP_CXX_FOUND)
-        target_link_libraries(cbs3dpp_si PRIVATE OpenMP::OpenMP_CXX)
-        target_compile_definitions(cbs3dpp_si PRIVATE CBS3D_USE_OPENMP=1)
+        target_link_libraries(
+            ${CBS3D_APPLICATION_TARGET}
+            PRIVATE OpenMP::OpenMP_CXX
+        )
+
+        target_compile_definitions(
+            ${CBS3D_APPLICATION_TARGET}
+            PRIVATE CBS3D_USE_OPENMP=1
+        )
     else()
         message(WARNING
             "OpenMP was requested but no C++ OpenMP implementation was found. "
@@ -120,8 +161,15 @@ endif()
 if (CBS3D_ENABLE_MPI)
     find_package(MPI REQUIRED COMPONENTS CXX)
 
-    target_link_libraries(cbs3dpp_si PRIVATE MPI::MPI_CXX)
-    target_compile_definitions(cbs3dpp_si PRIVATE CBS3D_USE_MPI=1)
+    target_link_libraries(
+        ${CBS3D_APPLICATION_TARGET}
+        PRIVATE MPI::MPI_CXX
+    )
+
+    target_compile_definitions(
+        ${CBS3D_APPLICATION_TARGET}
+        PRIVATE CBS3D_USE_MPI=1
+    )
 endif()
 
 #==============================================================================
@@ -149,28 +197,49 @@ if (CBS3D_ENABLE_PETSC)
         REQUIRED
     )
 
-    target_compile_definitions(cbs3dpp_si PRIVATE CBS3D_USE_PETSC=1)
+    target_compile_definitions(
+        ${CBS3D_APPLICATION_TARGET}
+        PRIVATE CBS3D_USE_PETSC=1
+    )
 
-    target_include_directories(cbs3dpp_si PRIVATE
+    target_include_directories(${CBS3D_APPLICATION_TARGET} PRIVATE
         "${PETSC_DIR}/include"
         "${PETSC_PREFIX}/include"
     )
 
-    target_link_libraries(cbs3dpp_si PRIVATE
+    target_link_libraries(${CBS3D_APPLICATION_TARGET} PRIVATE
         "${PETSC_LIBRARY}"
     )
 
     if (UNIX AND NOT APPLE)
-        set_target_properties(cbs3dpp_si PROPERTIES
-            BUILD_RPATH "${PETSC_PREFIX}/lib"
+        set_target_properties(
+            ${CBS3D_APPLICATION_TARGET}
+            PROPERTIES BUILD_RPATH "${PETSC_PREFIX}/lib"
         )
     endif()
 endif()
 
+install(
+    TARGETS ${CBS3D_APPLICATION_TARGET}
+    RUNTIME DESTINATION bin
+)
+
 #==============================================================================
 # Configuration summary
 #==============================================================================
+get_target_property(
+    CBS3D_CONFIGURED_OUTPUT_NAME
+    ${CBS3D_APPLICATION_TARGET}
+    OUTPUT_NAME
+)
+
+if (NOT CBS3D_CONFIGURED_OUTPUT_NAME)
+    set(CBS3D_CONFIGURED_OUTPUT_NAME ${CBS3D_APPLICATION_TARGET})
+endif()
+
 message(STATUS "CBS3D++_SI configuration")
-message(STATUS "  OpenMP : ${CBS3D_ENABLE_OPENMP}")
-message(STATUS "  MPI    : ${CBS3D_ENABLE_MPI}")
-message(STATUS "  PETSc  : ${CBS3D_ENABLE_PETSC}")
+message(STATUS "  Application target : ${CBS3D_APPLICATION_TARGET}")
+message(STATUS "  Executable name     : ${CBS3D_CONFIGURED_OUTPUT_NAME}")
+message(STATUS "  OpenMP              : ${CBS3D_ENABLE_OPENMP}")
+message(STATUS "  MPI                 : ${CBS3D_ENABLE_MPI}")
+message(STATUS "  PETSc               : ${CBS3D_ENABLE_PETSC}")
