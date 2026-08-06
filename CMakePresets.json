@@ -1,0 +1,138 @@
+{
+  "version": 3,
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 21,
+    "patch": 0
+  },
+  "configurePresets": [
+    {
+      "name": "serial-release",
+      "displayName": "Serial Release",
+      "description": "Single-thread deterministic serial reference build",
+      "binaryDir": "${sourceDir}/build/serial-release",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CBS3D_ENABLE_OPENMP": "OFF",
+        "CBS3D_ENABLE_MPI": "OFF",
+        "CBS3D_ENABLE_PETSC": "OFF",
+        "CBS3D_KEEP_LEGACY_EXECUTABLE_NAME": "OFF"
+      }
+    },
+    {
+      "name": "serial-openmp-release",
+      "displayName": "Serial OpenMP Release",
+      "description": "Shared-memory workstation build",
+      "binaryDir": "${sourceDir}/build/serial-openmp-release",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CBS3D_ENABLE_OPENMP": "ON",
+        "CBS3D_ENABLE_MPI": "OFF",
+        "CBS3D_ENABLE_PETSC": "OFF",
+        "CBS3D_KEEP_LEGACY_EXECUTABLE_NAME": "OFF"
+      }
+    },
+    {
+      "name": "serial-petsc-release",
+      "displayName": "Serial PETSc Release",
+      "description": "Serial/OpenMP build with the PETSc pressure-solver path; PETSC_DIR must be set",
+      "binaryDir": "${sourceDir}/build/serial-petsc-release",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CBS3D_ENABLE_OPENMP": "ON",
+        "CBS3D_ENABLE_MPI": "OFF",
+        "CBS3D_ENABLE_PETSC": "ON",
+        "CBS3D_KEEP_LEGACY_EXECUTABLE_NAME": "OFF"
+      }
+    },
+    {
+      "name": "mpi-release",
+      "displayName": "MPI PETSc Release",
+      "description": "Validated distributed-memory production configuration; PETSC_DIR must be set",
+      "binaryDir": "${sourceDir}/build/mpi-release",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CBS3D_ENABLE_OPENMP": "OFF",
+        "CBS3D_ENABLE_MPI": "ON",
+        "CBS3D_ENABLE_PETSC": "ON",
+        "CBS3D_KEEP_LEGACY_EXECUTABLE_NAME": "OFF"
+      }
+    },
+    {
+      "name": "hybrid-release",
+      "displayName": "Hybrid MPI OpenMP Release",
+      "description": "MPI plus OpenMP build for scaling validation; PETSC_DIR must be set",
+      "binaryDir": "${sourceDir}/build/hybrid-release",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CBS3D_ENABLE_OPENMP": "ON",
+        "CBS3D_ENABLE_MPI": "ON",
+        "CBS3D_ENABLE_PETSC": "ON",
+        "CBS3D_KEEP_LEGACY_EXECUTABLE_NAME": "OFF"
+      }
+    },
+    {
+      "name": "sa-serial-dev",
+      "displayName": "Serial Spalart-Allmaras Development",
+      "description": "Serial OpenMP development build for the SA model",
+      "binaryDir": "${sourceDir}/build/sa-serial-dev",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+        "CBS3D_ENABLE_OPENMP": "ON",
+        "CBS3D_ENABLE_MPI": "OFF",
+        "CBS3D_ENABLE_PETSC": "OFF",
+        "CBS3D_KEEP_LEGACY_EXECUTABLE_NAME": "OFF"
+      }
+    },
+    {
+      "name": "sa-mpi-dev",
+      "displayName": "Distributed Spalart-Allmaras Development",
+      "description": "Future distributed SA development build; the runtime guard remains active until validation",
+      "binaryDir": "${sourceDir}/build/sa-mpi-dev",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+        "CBS3D_ENABLE_OPENMP": "ON",
+        "CBS3D_ENABLE_MPI": "ON",
+        "CBS3D_ENABLE_PETSC": "ON",
+        "CBS3D_KEEP_LEGACY_EXECUTABLE_NAME": "OFF"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "build-serial-release",
+      "configurePreset": "serial-release",
+      "targets": ["cbs3d_serial"]
+    },
+    {
+      "name": "build-serial-openmp-release",
+      "configurePreset": "serial-openmp-release",
+      "targets": ["cbs3d_serial"]
+    },
+    {
+      "name": "build-serial-petsc-release",
+      "configurePreset": "serial-petsc-release",
+      "targets": ["cbs3d_serial"]
+    },
+    {
+      "name": "build-mpi-release",
+      "configurePreset": "mpi-release",
+      "targets": ["cbs3d_parallel"]
+    },
+    {
+      "name": "build-hybrid-release",
+      "configurePreset": "hybrid-release",
+      "targets": ["cbs3d_parallel"]
+    },
+    {
+      "name": "build-sa-serial-dev",
+      "configurePreset": "sa-serial-dev",
+      "targets": ["cbs3d_serial"]
+    },
+    {
+      "name": "build-sa-mpi-dev",
+      "configurePreset": "sa-mpi-dev",
+      "targets": ["cbs3d_parallel"]
+    }
+  ]
+}
