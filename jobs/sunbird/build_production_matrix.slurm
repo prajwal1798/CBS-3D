@@ -38,6 +38,7 @@ build_preset()
     local configure_preset="$1"
     local build_preset="$2"
     local executable="$3"
+    local build_directory="${SOURCE}/build/${configure_preset}"
 
     echo
     echo "============================================================"
@@ -47,6 +48,17 @@ build_preset()
     cmake --preset "${configure_preset}"
     cmake --build --preset "${build_preset}" \
         --parallel "${SLURM_CPUS_PER_TASK}"
+
+    # Production presets may build only the selected solver application.
+    # Build and execute the shared Step-4 volumetric-source validation
+    # explicitly so every Sunbird variant is checked against the same source
+    # kernel before it is accepted as ready for use.
+    cmake --build "${build_directory}" \
+        --target cbs3d_source_validation \
+        --parallel "${SLURM_CPUS_PER_TASK}"
+
+    ctest --test-dir "${build_directory}" \
+        --output-on-failure
 
     if [[ ! -x "${executable}" ]]; then
         echo "ERROR: expected executable was not produced: ${executable}" >&2
