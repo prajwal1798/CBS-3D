@@ -32,8 +32,14 @@ jobs:
       - name: Configure
         run: cmake --preset "${{ matrix.preset }}"
 
-      - name: Build
+      - name: Build solver
         run: cmake --build --preset "${{ matrix.build_preset }}" --parallel 2
+
+      - name: Build Step-4 source validation
+        run: >-
+          cmake --build "build/${{ matrix.preset }}"
+          --target cbs3d_source_validation
+          --parallel 2
 
       - name: Run Step-4 source validation
         run: ctest --test-dir "build/${{ matrix.preset }}" --output-on-failure
