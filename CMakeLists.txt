@@ -13,6 +13,11 @@ option(
     "Write the selected application as cbs3dpp_si for existing run scripts"
     ON
 )
+option(
+    CBS3D_BUILD_SOURCE_VALIDATION
+    "Build the Step-4 solid volumetric-source validation"
+    ON
+)
 
 if (CBS3D_ENABLE_MPI AND NOT CBS3D_ENABLE_PETSC)
     message(FATAL_ERROR
@@ -27,10 +32,6 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 #==============================================================================
 # Shared numerical source tree
 #==============================================================================
-# Serial and parallel applications have separate entry points, but they compile
-# the same numerical kernels. This prevents the two execution modes from
-# developing independent momentum, pressure, energy and boundary-condition
-# implementations.
 set(CBS3D_CORE_SOURCES
     src/io/MeshIO.cpp
     src/io/Post.cpp
@@ -129,6 +130,43 @@ else()
         -Wall
         -Wextra
         -pedantic
+    )
+endif()
+
+#==============================================================================
+# Step-4 solid volumetric-source validation
+#==============================================================================
+if (CBS3D_BUILD_SOURCE_VALIDATION)
+    enable_testing()
+
+    add_executable(cbs3d_source_validation
+        tests/Step4SourceSolidValidation.cpp
+        src/assembly/EnergyAssembly.cpp
+    )
+
+    target_include_directories(cbs3d_source_validation PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/include"
+    )
+
+    target_compile_features(cbs3d_source_validation PRIVATE cxx_std_20)
+
+    if (MSVC)
+        target_compile_options(cbs3d_source_validation PRIVATE
+            /W4
+            /permissive-
+        )
+    else()
+        target_compile_options(cbs3d_source_validation PRIVATE
+            -O2
+            -Wall
+            -Wextra
+            -pedantic
+        )
+    endif()
+
+    add_test(
+        NAME step4_solid_volumetric_source
+        COMMAND cbs3d_source_validation
     )
 endif()
 
@@ -243,3 +281,4 @@ message(STATUS "  Executable name     : ${CBS3D_CONFIGURED_OUTPUT_NAME}")
 message(STATUS "  OpenMP              : ${CBS3D_ENABLE_OPENMP}")
 message(STATUS "  MPI                 : ${CBS3D_ENABLE_MPI}")
 message(STATUS "  PETSc               : ${CBS3D_ENABLE_PETSC}")
+message(STATUS "  Source validation   : ${CBS3D_BUILD_SOURCE_VALIDATION}")
