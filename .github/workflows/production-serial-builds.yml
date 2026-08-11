@@ -35,6 +35,9 @@ jobs:
       - name: Build
         run: cmake --build --preset "${{ matrix.build_preset }}" --parallel 2
 
+      - name: Run Step-4 source validation
+        run: ctest --test-dir "build/${{ matrix.preset }}" --output-on-failure
+
       - name: Verify executable
         run: test -x "build/${{ matrix.preset }}/cbs3d_serial"
 
@@ -57,7 +60,11 @@ jobs:
 
       - name: Build
         shell: pwsh
-        run: cmake --build build/windows-serial --config Release --target cbs3d_serial --parallel 2
+        run: cmake --build build/windows-serial --config Release --parallel 2
+
+      - name: Run Step-4 source validation
+        shell: pwsh
+        run: ctest --test-dir build/windows-serial -C Release --output-on-failure
 
       - name: Verify executable
         shell: pwsh
