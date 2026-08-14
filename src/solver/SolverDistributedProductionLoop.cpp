@@ -16,6 +16,8 @@
 #include "cbs/solver/Solver.hpp"
 
 #include "cbs/assembly/EnergyAssembly.hpp"
+#include "cbs/solver/Steps.hpp"
+#include "cbs/turbulence/TurbulencePreprocess.hpp"
 #include "cbs/assembly/MomentumAssembly.hpp"
 #include "cbs/assembly/PressureAssembly.hpp"
 #include "cbs/assembly/VelocityCorrectionAssembly.hpp"
@@ -353,10 +355,22 @@ namespace cbs
                     "Distributed production loop requires ntime >= 1");
             }
 
-            if (s.cfg.turbulence_on > 0)
+            // Spalart-Allmaras is supported in the distributed loop.  The
+            // wall-distance search gathers the global wall surface, the SA
+            // classification is reduced over shared nodes, and the transport
+            // step exchanges its element-assembled accumulators before the nodal
+            // update.  Only the non-dimensional path is rejected: SA computes an
+            // eddy viscosity from cfg.ani there, but MomentumAssembly ignores
+            // mu_eff_e unless dimensional material properties are active, so the
+            // turbulence would be computed and then silently discarded.
+            if (s.cfg.turbulence_on > 0 &&
+                !(s.cfg.dimensional_mode > 0 &&
+                  s.cfg.material_properties_enabled > 0))
             {
                 throw std::runtime_error(
-                    "Distributed Spalart-Allmaras transport is not yet enabled");
+                    "Spalart-Allmaras requires dimensional_mode and "
+                    "material_properties_enabled; in non-dimensional mode the "
+                    "momentum assembly ignores the turbulent viscosity");
             }
 
             if (s.cfg.step2_check > 0)
@@ -962,6 +976,12 @@ namespace cbs
             }
 
             updateVelocityMagnitude();
+
+            // Wall distance, SA node classification and the initial eddy
+            // viscosity.  This must run before the first Step 1, because the
+            // momentum assembly reads mu_eff_e.
+            TurbulencePreprocess::prepareSpalartAllmaras(s_);
+
             pressure_system.initialise(s_);
         }
 
@@ -1149,6 +1169,21 @@ namespace cbs
                 s_.unkno,
                 s_.partition_metadata,
                 MPI_COMM_WORLD);
+
+            // Step SA: Spalart-Allmaras transport.
+            //
+            // It runs after Step 3 because the SA advection and vorticity
+            // production need the corrected velocity, and before Step 4 because
+            // the energy assembly reads k_eff_e.  Steps::stepSpalartAllmaras
+            // performs its own interface exchanges: the element-assembled
+            // accumulators are summed onto their owners before the nodal update
+            // and nu_tilde is broadcast back to the ghost layer afterwards.
+            if (s_.cfg.turbulence_on > 0)
+            {
+                s_.nu_tilde1 = s_.nu_tilde;
+
+                Steps::stepSpalartAllmaras(s_);
+            }
 
             // CBS Step 4: thermal assembly over fluid and solid elements.
             if (s_.cfg.temp_calc > 0)

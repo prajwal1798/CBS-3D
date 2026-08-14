@@ -76,5 +76,17 @@ namespace cbs
 
         // Returns the relative temperature residual.
         static Real temperatureResidual(const CBSStateSI& s);
+
+        // Returns the relative L2 residual of the Spalart-Allmaras working
+        // variable:
+        //
+        //     R_nu = ||nu_tilde^(n+1) - nu_tilde^n|| / max(||nu_tilde^(n+1)||, eps)
+        //
+        // Under MPI the two sums are accumulated over owned nodes only and then
+        // reduced with MPI_Allreduce, so the reported value is the global
+        // residual and does not change with the number of partitions.  Summing
+        // over all local nodes instead would count every interface node once per
+        // rank that holds a copy.
+        static Real turbulenceResidual(const CBSStateSI& s);
     };
 }

@@ -13,6 +13,7 @@ option(
     "Write the selected application as cbs3dpp_si for existing run scripts"
     ON
 )
+option(CBS3D_BUILD_TESTS "Build the verification and regression tests" OFF)
 option(
     CBS3D_BUILD_SOURCE_VALIDATION
     "Build the Step-4 solid volumetric-source validation"
@@ -276,9 +277,56 @@ if (NOT CBS3D_CONFIGURED_OUTPUT_NAME)
 endif()
 
 message(STATUS "CBS3D++_SI configuration")
+<<<<<<< HEAD
 message(STATUS "  Application target : ${CBS3D_APPLICATION_TARGET}")
 message(STATUS "  Executable name     : ${CBS3D_CONFIGURED_OUTPUT_NAME}")
 message(STATUS "  OpenMP              : ${CBS3D_ENABLE_OPENMP}")
 message(STATUS "  MPI                 : ${CBS3D_ENABLE_MPI}")
 message(STATUS "  PETSc               : ${CBS3D_ENABLE_PETSC}")
 message(STATUS "  Source validation   : ${CBS3D_BUILD_SOURCE_VALIDATION}")
+=======
+message(STATUS "  OpenMP : ${CBS3D_ENABLE_OPENMP}")
+message(STATUS "  MPI    : ${CBS3D_ENABLE_MPI}")
+message(STATUS "  PETSc  : ${CBS3D_ENABLE_PETSC}")
+
+#==============================================================================
+# Wall-distance verification test
+#
+# Checks the Spalart-Allmaras BVH nearest-wall search against an exhaustive
+# point-to-triangle search on a graded flat-plate node distribution, and reports
+# the timing of both.  The BVH is a pruning structure rather than an
+# approximation, so the two results must agree to round-off; any larger
+# difference is a defect and the test fails.
+#
+# Build and run:
+#     cmake -B build -DCBS3D_ENABLE_OPENMP=ON
+#     cmake --build build --target wall_distance_verification
+#     ./build/wall_distance_verification 140 80 40
+#==============================================================================
+if (CBS3D_BUILD_TESTS)
+    add_executable(wall_distance_verification
+        tests/WallDistanceVerification.cpp
+        src/turbulence/WallDistance.cpp
+    )
+
+    target_include_directories(wall_distance_verification PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/include"
+    )
+
+    target_compile_features(wall_distance_verification PRIVATE cxx_std_20)
+
+    if (CBS3D_ENABLE_OPENMP AND OpenMP_CXX_FOUND)
+        target_link_libraries(wall_distance_verification
+            PRIVATE OpenMP::OpenMP_CXX)
+        target_compile_definitions(wall_distance_verification
+            PRIVATE CBS3D_USE_OPENMP=1)
+    endif()
+
+    enable_testing()
+
+    add_test(
+        NAME wall_distance_exactness
+        COMMAND wall_distance_verification 60 40 20
+    )
+endif()
+>>>>>>> d5f4226 (SA: BVH wall distance, MPI-correct SA transport, assembly fixes)

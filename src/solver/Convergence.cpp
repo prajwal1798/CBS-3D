@@ -31,6 +31,10 @@
 
 #include "cbs/solver/Convergence.hpp"
 
+#ifdef CBS3D_USE_MPI
+#include <mpi.h>
+#endif
+
 #include <algorithm>
 #include <cmath>
 #include <stdexcept>
@@ -375,6 +379,86 @@ namespace cbs
     Real Convergence::temperatureResidual(const CBSStateSI& s)
     {
         return s.hb[12];
+    }
+
+
+    //=========================================================================
+    // Returns the global relative L2 residual of the SA working variable.
+    //=========================================================================
+    Real Convergence::turbulenceResidual(const CBSStateSI& s)
+    {
+        if (s.cfg.turbulence_on < 1)
+        {
+            return 0.0;
+        }
+
+        Real delta_sum = 0.0;
+        Real value_sum = 0.0;
+
+        // Owned nodes only.  owned_nodes is empty in a serial run, in which case
+        // every local node is owned by definition.
+        if (!s.owned_nodes.empty())
+        {
+            for (Size i = 0; i < s.owned_nodes.size(); ++i)
+            {
+                const Int ip = s.owned_nodes[i];
+
+                if (s.sa_active_node(ip) == 0)
+                {
+                    continue;
+                }
+
+                const Real delta = s.sa_residual(ip);
+                const Real value = s.nu_tilde(ip);
+
+                delta_sum += delta * delta;
+                value_sum += value * value;
+            }
+        }
+        else
+        {
+            for (Int ip = 1; ip <= s.cfg.npoin; ++ip)
+            {
+                if (s.sa_active_node(ip) == 0)
+                {
+                    continue;
+                }
+
+                const Real delta = s.sa_residual(ip);
+                const Real value = s.nu_tilde(ip);
+
+                delta_sum += delta * delta;
+                value_sum += value * value;
+            }
+        }
+
+#ifdef CBS3D_USE_MPI
+        if (s.mpi_enabled && s.mpi_size > 1)
+        {
+            Real local[2] = { delta_sum, value_sum };
+            Real global[2] = { 0.0, 0.0 };
+
+            MPI_Allreduce(
+                local,
+                global,
+                2,
+                MPI_DOUBLE,
+                MPI_SUM,
+                MPI_COMM_WORLD);
+
+            delta_sum = global[0];
+            value_sum = global[1];
+        }
+#endif
+
+        const Real denominator = std::sqrt(value_sum);
+
+        if (!(denominator > 1.0e-30) || !std::isfinite(denominator))
+        {
+            return 0.0;
+        }
+
+        return std::sqrt(delta_sum) / denominator;
     }
 
 

@@ -147,6 +147,11 @@ SRC := \
     src/assembly/PressureAssembly.cpp \
     src/assembly/MomentumAssembly.cpp \
     src/assembly/EnergyAssembly.cpp \
+    src/assembly/SpalartAllmarasAssembly.cpp \
+    src/boundary/TurbulenceBoundary.cpp \
+    src/turbulence/SpalartAllmaras.cpp \
+    src/turbulence/WallDistance.cpp \
+    src/turbulence/TurbulencePreprocess.cpp \
     src/utils/SolverProfiler.cpp \
     src/parallel/PartitionMetadata.cpp \
     src/parallel/HaloExchange.cpp

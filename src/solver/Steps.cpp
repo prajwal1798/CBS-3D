@@ -32,6 +32,7 @@
 #include "cbs/boundary/Boundary.hpp"
 #include "cbs/boundary/TurbulenceBoundary.hpp"
 #include "cbs/linalg/ConjugateGradient.hpp"
+#include "cbs/parallel/HaloExchange.hpp"
 
 #ifdef CBS3D_USE_MPI
 #include "cbs/parallel/HaloExchange.hpp"
@@ -300,11 +301,84 @@ namespace cbs
         validate_step_dimensions(s);
 
         SpalartAllmarasAssembly::assembleTransportRhs(s);
+
+        // A node on a partition interface is shared by elements on both sides
+        // of the cut, so after the local element loop it holds only part of its
+        // finite-element residual.  The nodal update divides by elcoe2, which is
+        // the fully assembled lumped mass, so the residual has to be completed
+        // first or every interface node is advanced with a fraction of its true
+        // right-hand side.  Both accumulators are element-assembled and both
+        // therefore need the sum-to-owner reduction:
+        //
+        //     sa_rhs              explicit residual R_SA
+        //     sa_destruction_lhs  semi-implicit destruction coefficient
+        //
+        // The diagnostic accumulators are reduced as well so that the SA
+        // production, destruction and diffusion written to the VTU output are
+        // the true nodal values rather than partial sums that change with the
+        // partition count.
+#ifdef CBS3D_USE_MPI
+        if (s.mpi_enabled && s.mpi_size > 1)
+        {
+            HaloExchange::sumGhostContributionsToOwners(
+                s.sa_rhs,
+                s.partition_metadata,
+                MPI_COMM_WORLD);
+
+            HaloExchange::sumGhostContributionsToOwners(
+                s.sa_destruction_lhs,
+                s.partition_metadata,
+                MPI_COMM_WORLD);
+
+            HaloExchange::sumGhostContributionsToOwners(
+                s.sa_production,
+                s.partition_metadata,
+                MPI_COMM_WORLD);
+
+            HaloExchange::sumGhostContributionsToOwners(
+                s.sa_destruction,
+                s.partition_metadata,
+                MPI_COMM_WORLD);
+
+            HaloExchange::sumGhostContributionsToOwners(
+                s.sa_diffusion,
+                s.partition_metadata,
+                MPI_COMM_WORLD);
+
+            HaloExchange::sumGhostContributionsToOwners(
+                s.sa_source,
+                s.partition_metadata,
+                MPI_COMM_WORLD);
+        }
+#endif
+
         SpalartAllmarasAssembly::updateNuTilde(s);
 
         TurbulenceBoundary::applyWallValues(s);
         TurbulenceBoundary::applyInletValues(s);
 
+        // The update and the strong boundary conditions are applied on owned
+        // nodes.  Ghost copies must be refreshed before the next step, because
+        // the following assembly reads nu_tilde on every node of every local
+        // element, including the ghost layer.
+#ifdef CBS3D_USE_MPI
+        if (s.mpi_enabled && s.mpi_size > 1)
+        {
+            HaloExchange::broadcastOwnedToGhosts(
+                s.nu_tilde,
+                s.partition_metadata,
+                MPI_COMM_WORLD);
+
+            HaloExchange::broadcastOwnedToGhosts(
+                s.sa_residual,
+                s.partition_metadata,
+                MPI_COMM_WORLD);
+        }
+#endif
+
+        // updateEddyViscosity performs its own interface reduction of the nodal
+        // averages.  mu_eff_e and k_eff_e are element quantities owned by the
+        // rank that owns the element and need no exchange.
         SpalartAllmarasAssembly::updateEddyViscosity(s);
     }
 
