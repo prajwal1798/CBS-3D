@@ -2,6 +2,8 @@
 
 #include "cbs/turbulence/SpalartAllmaras.hpp"
 
+#include "cbs/parallel/HaloExchange.hpp"
+
 #include <algorithm>
 #include <cmath>
 #include <stdexcept>
@@ -42,24 +44,33 @@ namespace cbs
             return value > 0.0 ? value : 0.0;
         }
 
+        // Returns the molecular kinematic viscosity of an element.
+        //
+        // This routine is called from inside an OpenMP parallel region, so it
+        // must not throw: an exception that leaves a structured parallel block
+        // terminates the process instead of unwinding, and under MPI it would
+        // abort one rank while the others waited in the next collective.  Invalid
+        // input is reported through ok and converted into a single exception on
+        // the master thread after the parallel region has closed.
         Real molecular_kinematic_viscosity(
             const CBSStateSI& s,
-            Int ie)
+            Int ie,
+            bool& ok)
         {
+            ok = true;
+
             if (s.cfg.dimensional_mode > 0 && s.cfg.material_properties_enabled > 0)
             {
                 if (s.rho_e(ie) <= 0.0 || !std::isfinite(s.rho_e(ie)))
                 {
-                    throw std::runtime_error(
-                        "SpalartAllmarasAssembly - invalid density at element "
-                        + std::to_string(ie));
+                    ok = false;
+                    return 0.0;
                 }
 
                 if (s.mu_e(ie) < 0.0 || !std::isfinite(s.mu_e(ie)))
                 {
-                    throw std::runtime_error(
-                        "SpalartAllmarasAssembly - invalid molecular viscosity at element "
-                        + std::to_string(ie));
+                    ok = false;
+                    return 0.0;
                 }
 
                 return s.mu_e(ie) / s.rho_e(ie);
@@ -67,17 +78,22 @@ namespace cbs
 
             if (s.cfg.ani <= 0.0 || !std::isfinite(s.cfg.ani))
             {
-                throw std::runtime_error(
-                    "SpalartAllmarasAssembly - non-dimensional molecular viscosity ani must be positive");
+                ok = false;
+                return 0.0;
             }
 
             return s.cfg.ani;
         }
 
+        // Element-averaged wall distance.  Non-throwing for the same reason as
+        // molecular_kinematic_viscosity.
         Real element_wall_distance(
             const CBSStateSI& s,
-            Int ie)
+            Int ie,
+            bool& ok)
         {
+            ok = true;
+
             Real d = 0.0;
 
             for (Int a = 1; a <= s.cfg.nep; ++a)
@@ -87,9 +103,8 @@ namespace cbs
 
                 if (node_distance <= 0.0 || !std::isfinite(node_distance))
                 {
-                    throw std::runtime_error(
-                        "SpalartAllmarasAssembly - invalid wall distance at node "
-                        + std::to_string(ip));
+                    ok = false;
+                    return s.cfg.sa_min_wall_distance;
                 }
 
                 d += node_distance;
@@ -186,6 +201,7 @@ namespace cbs
     //=========================================================================
     void SpalartAllmarasAssembly::resetEffectiveProperties(CBSStateSI& s)
     {
+#pragma omp parallel for schedule(static)
         for (Int ie = 1; ie <= s.cfg.nelem; ++ie)
         {
             s.nu_tilde_e(ie) = 0.0;
@@ -214,86 +230,163 @@ namespace cbs
 
         turbulence::SpalartAllmarasConstants constants;
 
-        std::vector<Real> nodal_nu_t_sum(
-            static_cast<std::size_t>(s.cfg.npoin + 1),
-            0.0);
+        // The nodal averages are accumulated directly into state arrays rather
+        // than local vectors, because under domain decomposition the sums and
+        // the counts both have to cross partition interfaces before the division
+        // is performed.  Averaging local contributions first and exchanging
+        // afterwards would make the interface value depend on how the mesh was
+        // partitioned.
+        s.nu_t.fill(0.0);
+        s.mu_t.fill(0.0);
+        s.sa_nodal_weight.fill(0.0);
 
-        std::vector<Real> nodal_mu_t_sum(
-            static_cast<std::size_t>(s.cfg.npoin + 1),
-            0.0);
+        bool bad_material = false;
 
-        std::vector<Int> nodal_count(
-            static_cast<std::size_t>(s.cfg.npoin + 1),
-            0);
-
-        for (Int ie = 1; ie <= s.cfg.nelem; ++ie)
+        // The element loop scatters into nodal accumulators, so it is driven by
+        // the same colour arrays used by every other assembly in the solver.
+        // Within one colour no two elements share a node, so the scatter needs
+        // neither atomics nor per-thread buffers.
+        for (Int colour = 0; colour < s.ncolor; ++colour)
         {
-            if (!is_fluid_element(s, ie))
+            const Int cbeg = s.color_ptr[static_cast<std::size_t>(colour)];
+            const Int cend = s.color_ptr[static_cast<std::size_t>(colour) + 1];
+
+#pragma omp parallel for schedule(static)
+            for (Int k = cbeg; k < cend; ++k)
             {
-                continue;
-            }
+                const Int ie = s.color_elem[static_cast<std::size_t>(k)];
 
-            Real nu_tilde_avg = 0.0;
+                if (!is_fluid_element(s, ie))
+                {
+                    continue;
+                }
 
-            for (Int in = 1; in <= s.cfg.nep; ++in)
-            {
-                const Int ip = s.intma(in, ie);
-                const Real limited_value = std::max(
-                    s.cfg.sa_nu_tilde_floor,
-                    s.nu_tilde(ip));
+                Real nu_tilde_avg = 0.0;
 
-                nu_tilde_avg += limited_value;
-            }
+                for (Int in = 1; in <= s.cfg.nep; ++in)
+                {
+                    const Int ip = s.intma(in, ie);
 
-            nu_tilde_avg /= static_cast<Real>(s.cfg.nep);
+                    // A node on a no-slip wall carries nu_tilde = 0.  Using the
+                    // floor there instead would leave a non-zero working
+                    // variable on the wall and produce a spurious eddy viscosity
+                    // in the first cell, which is exactly where the log law is
+                    // most sensitive.  This matches the treatment in
+                    // assembleTransportRhs.
+                    const Real nodal_value = s.sa_wall_node(ip) != 0
+                        ? 0.0
+                        : std::max(s.cfg.sa_nu_tilde_floor, s.nu_tilde(ip));
 
-            const Real molecular_nu = molecular_kinematic_viscosity(s, ie);
+                    nu_tilde_avg += nodal_value;
+                }
 
-            Real nu_t = 0.0;
-            if (molecular_nu > 0.0)
-            {
-                nu_t = turbulence::eddyKinematicViscosity(
-                    nu_tilde_avg,
-                    molecular_nu,
-                    constants);
-            }
+                nu_tilde_avg /= static_cast<Real>(s.cfg.nep);
 
-            const Real mu_t = s.rho_e(ie) * nu_t;
+                bool material_ok = true;
+                const Real molecular_nu =
+                    molecular_kinematic_viscosity(s, ie, material_ok);
 
-            s.nu_tilde_e(ie) = nu_tilde_avg;
-            s.nu_t_e(ie) = nu_t;
-            s.mu_t_e(ie) = mu_t;
-            s.mu_eff_e(ie) = s.mu_e(ie) + mu_t;
+                if (!material_ok)
+                {
+#pragma omp atomic write
+                    bad_material = true;
+                    continue;
+                }
 
-            if (s.cfg.turbulent_thermal_diffusivity_on > 0)
-            {
-                s.k_eff_e(ie) = s.k_e(ie)
-                    + s.rho_cp_e(ie) * nu_t / s.cfg.sa_prandtl_t;
-            }
+                Real nu_t = 0.0;
+                if (molecular_nu > 0.0)
+                {
+                    nu_t = turbulence::eddyKinematicViscosity(
+                        nu_tilde_avg,
+                        molecular_nu,
+                        constants);
+                }
 
-            for (Int in = 1; in <= s.cfg.nep; ++in)
-            {
-                const Int ip = s.intma(in, ie);
+                const Real mu_t = s.rho_e(ie) * nu_t;
 
-                nodal_nu_t_sum[static_cast<std::size_t>(ip)] += nu_t;
-                nodal_mu_t_sum[static_cast<std::size_t>(ip)] += mu_t;
-                ++nodal_count[static_cast<std::size_t>(ip)];
+                s.nu_tilde_e(ie) = nu_tilde_avg;
+                s.nu_t_e(ie) = nu_t;
+                s.mu_t_e(ie) = mu_t;
+                s.mu_eff_e(ie) = s.mu_e(ie) + mu_t;
+
+                if (s.cfg.turbulent_thermal_diffusivity_on > 0)
+                {
+                    s.k_eff_e(ie) = s.k_e(ie)
+                        + s.rho_cp_e(ie) * nu_t / s.cfg.sa_prandtl_t;
+                }
+
+                for (Int in = 1; in <= s.cfg.nep; ++in)
+                {
+                    const Int ip = s.intma(in, ie);
+
+                    s.nu_t(ip) += nu_t;
+                    s.mu_t(ip) += mu_t;
+                    s.sa_nodal_weight(ip) += 1.0;
+                }
             }
         }
 
+        if (bad_material)
+        {
+            throw std::runtime_error(
+                "SpalartAllmarasAssembly::updateEddyViscosity - invalid density,"
+                " molecular viscosity or non-dimensional ani at one or more elements");
+        }
+
+        // Complete the sums and the counts on the owning rank before dividing.
+#ifdef CBS3D_USE_MPI
+        if (s.mpi_enabled && s.mpi_size > 1)
+        {
+            HaloExchange::sumGhostContributionsToOwners(
+                s.nu_t,
+                s.partition_metadata,
+                MPI_COMM_WORLD);
+
+            HaloExchange::sumGhostContributionsToOwners(
+                s.mu_t,
+                s.partition_metadata,
+                MPI_COMM_WORLD);
+
+            HaloExchange::sumGhostContributionsToOwners(
+                s.sa_nodal_weight,
+                s.partition_metadata,
+                MPI_COMM_WORLD);
+        }
+#endif
+
+#pragma omp parallel for schedule(static)
         for (Int ip = 1; ip <= s.cfg.npoin; ++ip)
         {
-            const Int count = nodal_count[static_cast<std::size_t>(ip)];
+            const Real weight = s.sa_nodal_weight(ip);
 
-            if (count > 0)
+            if (weight > 0.0)
             {
-                s.nu_t(ip) = nodal_nu_t_sum[static_cast<std::size_t>(ip)]
-                    / static_cast<Real>(count);
-
-                s.mu_t(ip) = nodal_mu_t_sum[static_cast<std::size_t>(ip)]
-                    / static_cast<Real>(count);
+                s.nu_t(ip) /= weight;
+                s.mu_t(ip) /= weight;
+            }
+            else
+            {
+                s.nu_t(ip) = 0.0;
+                s.mu_t(ip) = 0.0;
             }
         }
+
+        // Push the completed averages back onto the ghost copies so that every
+        // rank sees the same nodal eddy-viscosity field.
+#ifdef CBS3D_USE_MPI
+        if (s.mpi_enabled && s.mpi_size > 1)
+        {
+            HaloExchange::broadcastOwnedToGhosts(
+                s.nu_t,
+                s.partition_metadata,
+                MPI_COMM_WORLD);
+
+            HaloExchange::broadcastOwnedToGhosts(
+                s.mu_t,
+                s.partition_metadata,
+                MPI_COMM_WORLD);
+        }
+#endif
     }
 
     //=========================================================================
@@ -332,6 +425,7 @@ namespace cbs
         s.sa_destruction.fill(0.0);
         s.sa_diffusion.fill(0.0);
         s.sa_residual.fill(0.0);
+        s.sa_destruction_lhs.fill(0.0);
 
         if (s.cfg.turbulence_on < 1)
         {
@@ -339,7 +433,14 @@ namespace cbs
         }
 
         turbulence::SpalartAllmarasConstants constants;
+
+        // Error flags raised inside the OpenMP region and acted on afterwards.
+        // Every write stores the same value, true, so the only requirement is
+        // that the store is not torn; the atomic write makes that explicit
+        // rather than relying on it.
         bool bad_detj = false;
+        bool bad_material = false;
+        bool bad_wall_distance = false;
 
         for (Int colour = 0; colour < s.ncolor; ++colour)
         {
@@ -358,6 +459,7 @@ namespace cbs
 
                 if (s.detJ(ie) <= 0.0 || !std::isfinite(s.detJ(ie)))
                 {
+#pragma omp atomic write
                     bad_detj = true;
                     continue;
                 }
@@ -386,8 +488,28 @@ namespace cbs
                 }
 
                 const Real q_average = q_sum / static_cast<Real>(s.cfg.nep);
-                const Real molecular_nu = molecular_kinematic_viscosity(s, ie);
-                const Real wall_distance = element_wall_distance(s, ie);
+
+                bool material_ok = true;
+                const Real molecular_nu =
+                    molecular_kinematic_viscosity(s, ie, material_ok);
+
+                if (!material_ok)
+                {
+#pragma omp atomic write
+                    bad_material = true;
+                    continue;
+                }
+
+                bool distance_ok = true;
+                const Real wall_distance =
+                    element_wall_distance(s, ie, distance_ok);
+
+                if (!distance_ok)
+                {
+#pragma omp atomic write
+                    bad_wall_distance = true;
+                    continue;
+                }
 
                 Real grad_q[4] = {};
                 compute_sa_gradient(s, ie, q_node, grad_q);
@@ -467,8 +589,12 @@ namespace cbs
                 //
                 //     D = C_D q^2  ->  C_D q_old q_new
                 //
-                // The global temporary storage is sa_residual during assembly.
-                // It is overwritten by the actual nodal update after updateNuTilde().
+                // It is accumulated into sa_destruction_lhs, which has this
+                // single meaning.  It must not be stored in sa_residual: the
+                // distributed solver sums sa_rhs and sa_destruction_lhs across
+                // partition interfaces before the nodal update, and sa_residual
+                // holds the post-update increment used by the convergence
+                // monitor.  Overloading one array for both breaks the exchange.
                 Real local_destruction_lhs[5] = {};
 
                 for (Int a = 1; a <= s.cfg.nep; ++a)
@@ -535,7 +661,7 @@ namespace cbs
                     s.sa_destruction(ip) += local_destruction[a];
                     s.sa_diffusion(ip) += local_diffusion[a];
                     s.sa_source(ip) += local_source[a];
-                    s.sa_residual(ip) += local_destruction_lhs[a];
+                    s.sa_destruction_lhs(ip) += local_destruction_lhs[a];
                 }
             }
         }
@@ -544,6 +670,21 @@ namespace cbs
         {
             throw std::runtime_error(
                 "SpalartAllmarasAssembly::assembleTransportRhs - invalid detJ at one or more elements");
+        }
+
+        if (bad_material)
+        {
+            throw std::runtime_error(
+                "SpalartAllmarasAssembly::assembleTransportRhs - invalid density,"
+                " molecular viscosity or non-dimensional ani at one or more elements");
+        }
+
+        if (bad_wall_distance)
+        {
+            throw std::runtime_error(
+                "SpalartAllmarasAssembly::assembleTransportRhs - invalid wall"
+                " distance at one or more element nodes;"
+                " check that WallDistance::compute ran during preprocessing");
         }
     }
 
@@ -601,7 +742,7 @@ namespace cbs
             Real denominator = 1.0;
             if (s.cfg.sa_implicit_destruction > 0)
             {
-                denominator += s.elcoe2(ip) * s.sa_residual(ip);
+                denominator += s.elcoe2(ip) * s.sa_destruction_lhs(ip);
             }
 
             if (denominator <= 0.0 || !std::isfinite(denominator))

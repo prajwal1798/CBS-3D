@@ -1,5 +1,7 @@
 #include "cbs/boundary/TurbulenceBoundary.hpp"
 
+#include "cbs/parallel/HaloExchange.hpp"
+
 #include <algorithm>
 #include <vector>
 
@@ -143,6 +145,62 @@ namespace cbs
             }
         }
     }
+
+    //=========================================================================
+    // Reduces the three SA node flags over every copy of a shared node.
+    //
+    // Each flag is written into a real buffer, summed onto the owning rank and
+    // broadcast back to the ghost copies.  A non-zero total means at least one
+    // rank classified the node, so the reduction is a logical OR.  Summing and
+    // then thresholding is used because the halo exchange is defined for real
+    // arrays, and an OR is what is wanted here rather than a sum.
+    //=========================================================================
+    void TurbulenceBoundary::synchroniseClassification(CBSStateSI& s)
+    {
+#ifdef CBS3D_USE_MPI
+        if (!s.mpi_enabled || s.mpi_size <= 1)
+        {
+            return;
+        }
+
+        Array1D<Int>* flags[3] =
+        {
+            &s.sa_active_node,
+            &s.sa_wall_node,
+            &s.sa_inlet_node
+        };
+
+        Array1D<Real> buffer(s.cfg.npoin);
+
+        for (Int f = 0; f < 3; ++f)
+        {
+            Array1D<Int>& flag = *flags[f];
+
+            for (Int ip = 1; ip <= s.cfg.npoin; ++ip)
+            {
+                buffer(ip) = flag(ip) != 0 ? 1.0 : 0.0;
+            }
+
+            HaloExchange::sumGhostContributionsToOwners(
+                buffer,
+                s.partition_metadata,
+                MPI_COMM_WORLD);
+
+            HaloExchange::broadcastOwnedToGhosts(
+                buffer,
+                s.partition_metadata,
+                MPI_COMM_WORLD);
+
+            for (Int ip = 1; ip <= s.cfg.npoin; ++ip)
+            {
+                flag(ip) = buffer(ip) > 0.5 ? 1 : 0;
+            }
+        }
+#else
+        (void)s;
+#endif
+    }
+
 
     //=========================================================================
     // Initialises the transported SA working variable.

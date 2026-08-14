@@ -276,6 +276,21 @@ namespace cbs
         Array1D<Real> sa_diffusion;
         Array1D<Real> sa_residual;
 
+        // Nodal coefficient multiplying nu_tilde_new when the SA destruction
+        // term is treated semi-implicitly.  It is assembled element by element
+        // and must be summed across partition interfaces before the nodal
+        // update, exactly like sa_rhs.  It is kept separate from sa_residual so
+        // that each array carries one meaning and the halo exchange is
+        // unambiguous.
+        Array1D<Real> sa_destruction_lhs;
+
+        // Number of local fluid elements contributing to each node's eddy
+        // viscosity average.  Stored as a real so that it can be reduced across
+        // partition interfaces with the existing halo exchange: the owner needs
+        // the global count, not its local one, or the interface average depends
+        // on how the mesh was cut.
+        Array1D<Real> sa_nodal_weight;
+
         // Nodal turbulence classification flags.
         Array1D<Int> sa_active_node;
         Array1D<Int> sa_wall_node;
@@ -671,6 +686,8 @@ namespace cbs
             sa_destruction.resize(cfg.npoin);
             sa_diffusion.resize(cfg.npoin);
             sa_residual.resize(cfg.npoin);
+            sa_destruction_lhs.resize(cfg.npoin);
+            sa_nodal_weight.resize(cfg.npoin);
 
             sa_active_node.resize(cfg.npoin);
             sa_wall_node.resize(cfg.npoin);
@@ -724,6 +741,8 @@ namespace cbs
             sa_destruction.fill(0.0);
             sa_diffusion.fill(0.0);
             sa_residual.fill(0.0);
+            sa_destruction_lhs.fill(0.0);
+            sa_nodal_weight.fill(0.0);
 
             sa_active_node.fill(0);
             sa_wall_node.fill(0);
