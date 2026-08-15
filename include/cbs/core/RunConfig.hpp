@@ -103,6 +103,16 @@ namespace cbs
         Int vel_check = 0;
         Int temp_check = 0;
 
+        // Include the Spalart-Allmaras residual in the steady-state stop rule.
+        //
+        // Velocity and pressure can settle while nu_tilde is still evolving,
+        // because the SA equation is advanced explicitly alongside the flow and
+        // relaxes on its own timescale.  Stopping on the flow residuals alone
+        // can therefore terminate a RANS calculation whose eddy viscosity, and
+        // hence whose skin friction, has not converged.  Disabled by default so
+        // that existing cases keep their previous stopping behaviour.
+        Int sa_check = 0;
+
         // Restart, wall and iteration bookkeeping.
         Int istart = 1;
         Int iitime_start = 1;
@@ -339,6 +349,10 @@ namespace cbs
 
         Real l2norm_vel_tolerance = 0.0;
         Real l2norm_pres_tolerance = 0.0;
+
+        // Tolerance on the relative L2 residual of nu_tilde, used when
+        // sa_check is enabled.
+        Real l2norm_sa_tolerance = 1.0e-6;
         Real l2norm_temp_tolerance = 0.0;
 
         // --------------------------------------------------------------------

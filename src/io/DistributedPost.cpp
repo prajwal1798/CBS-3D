@@ -126,6 +126,46 @@ namespace cbs
                 (case_name + "_distributed.pvd");
         }
 
+        // Molecular dynamic viscosity used to normalise mu_t at a node.
+        //
+        // There is no node-to-element adjacency in the state, so a single sweep
+        // builds the nodal value from the fluid elements that contain the node.
+        // The result is cached because the VTU writer needs it for every node
+        // and the sweep is over the whole element list.
+        Real nodal_reference_mu(const CBSStateSI& s, const Int ip)
+        {
+            static thread_local const CBSStateSI* cached_state = nullptr;
+            static thread_local std::vector<Real> cached_mu;
+
+            if (cached_state != &s ||
+                cached_mu.size() != static_cast<std::size_t>(s.cfg.npoin) + 1U)
+            {
+                cached_mu.assign(
+                    static_cast<std::size_t>(s.cfg.npoin) + 1U,
+                    0.0);
+
+                for (Int ie = 1; ie <= s.cfg.nelem; ++ie)
+                {
+                    if (s.mat_elem(ie) != 0)
+                    {
+                        continue;
+                    }
+
+                    for (Int a = 1; a <= s.cfg.nep; ++a)
+                    {
+                        const Int node = s.intma(a, ie);
+
+                        cached_mu[static_cast<std::size_t>(node)] = s.mu_e(ie);
+                    }
+                }
+
+                cached_state = &s;
+            }
+
+            return cached_mu[static_cast<std::size_t>(ip)];
+        }
+
+
         bool touches_fluid(const CBSStateSI& s, const Int ip)
         {
             return
@@ -330,6 +370,104 @@ namespace cbs
             }
             output << "        </DataArray>\n";
 
+            // Spalart-Allmaras nodal fields.
+            //
+            // These are written whenever turbulence is enabled so that the
+            // distributed output carries the same SA state as the serial path.
+            // Without them the post-processing has to infer nu_t from nu_tilde
+            // and a viscosity quoted elsewhere, which silently breaks for a
+            // variable-property case, and the SA budget terms cannot be
+            // examined at all.
+            //
+            // Every array is written on all local nodes including the ghost
+            // layer.  Ghost entries carry the owner's value because the SA step
+            // broadcasts after the update, and vtkGhostType is already written
+            // above so a reader can drop duplicates.
+            if (s.cfg.turbulence_on > 0)
+            {
+                struct SaPointField
+                {
+                    const char* name;
+                    const Array1D<Real>* values;
+                };
+
+                const SaPointField sa_fields[] =
+                {
+                    { "nu_tilde",       &s.nu_tilde },
+                    { "nu_t",           &s.nu_t },
+                    { "mu_t",           &s.mu_t },
+                    { "wall_distance",  &s.wall_distance },
+                    { "sa_rhs",         &s.sa_rhs },
+                    { "sa_residual",    &s.sa_residual },
+                    { "sa_production",  &s.sa_production },
+                    { "sa_destruction", &s.sa_destruction },
+                    { "sa_diffusion",   &s.sa_diffusion },
+                    { "sa_source",      &s.sa_source }
+                };
+
+                for (const SaPointField& field : sa_fields)
+                {
+                    output << "        <DataArray type=\"Float64\" Name=\""
+                           << field.name
+                           << "\" NumberOfComponents=\"1\" format=\"ascii\">\n";
+
+                    for (Int ip = 1; ip <= s.cfg.npoin; ++ip)
+                    {
+                        output << "          "
+                               << safe_value((*field.values)(ip)) << '\n';
+                    }
+
+                    output << "        </DataArray>\n";
+                }
+
+                // mu_t/mu is the quantity the NASA TMR reference plots use, so
+                // it is exported directly rather than left to be reconstructed
+                // by a post-processor that would have to guess the molecular
+                // viscosity at each node.
+                output << "        <DataArray type=\"Float64\" Name=\"mu_t_over_mu\""
+                          " NumberOfComponents=\"1\" format=\"ascii\">\n";
+
+                for (Int ip = 1; ip <= s.cfg.npoin; ++ip)
+                {
+                    const Real reference_mu = nodal_reference_mu(s, ip);
+
+                    output << "          "
+                           << (reference_mu > 0.0
+                               ? safe_value(s.mu_t(ip) / reference_mu)
+                               : 0.0)
+                           << '\n';
+                }
+
+                output << "        </DataArray>\n";
+
+                struct SaFlagField
+                {
+                    const char* name;
+                    const Array1D<Int>* values;
+                };
+
+                const SaFlagField sa_flags[] =
+                {
+                    { "sa_active_node", &s.sa_active_node },
+                    { "sa_wall_node",   &s.sa_wall_node },
+                    { "sa_inlet_node",  &s.sa_inlet_node }
+                };
+
+                for (const SaFlagField& flag : sa_flags)
+                {
+                    output << "        <DataArray type=\"Int32\" Name=\""
+                           << flag.name
+                           << "\" NumberOfComponents=\"1\" format=\"ascii\">\n";
+
+                    for (Int ip = 1; ip <= s.cfg.npoin; ++ip)
+                    {
+                        output << "          " << (*flag.values)(ip) << '\n';
+                    }
+
+                    output << "        </DataArray>\n";
+                }
+            }
+
             output << "        <DataArray type=\"Int64\" Name=\"global_node_id\" NumberOfComponents=\"1\" format=\"ascii\">\n";
             for (Int ip = 1; ip <= s.cfg.npoin; ++ip)
             {
@@ -427,6 +565,51 @@ namespace cbs
             }
             output << "        </DataArray>\n";
 
+            // Spalart-Allmaras element fields.
+            //
+            // The eddy viscosity actually used by the momentum and energy
+            // assemblies is the element quantity mu_eff_e, not the nodal
+            // average written above, so it is exported directly.  Boundary
+            // faces are appended to the cell list and carry -1.
+            if (s.cfg.turbulence_on > 0)
+            {
+                struct SaCellField
+                {
+                    const char* name;
+                    const Array1D<Real>* values;
+                };
+
+                const SaCellField sa_cells[] =
+                {
+                    { "nu_tilde_e", &s.nu_tilde_e },
+                    { "nu_t_e",     &s.nu_t_e },
+                    { "mu_t_e",     &s.mu_t_e },
+                    { "mu_eff_e",   &s.mu_eff_e },
+                    { "rho_e",      &s.rho_e },
+                    { "mu_e",       &s.mu_e }
+                };
+
+                for (const SaCellField& field : sa_cells)
+                {
+                    output << "        <DataArray type=\"Float64\" Name=\""
+                           << field.name
+                           << "\" NumberOfComponents=\"1\" format=\"ascii\">\n";
+
+                    for (Int ie = 1; ie <= s.cfg.nelem; ++ie)
+                    {
+                        output << "          "
+                               << safe_value((*field.values)(ie)) << '\n';
+                    }
+
+                    for (Int ib = 1; ib <= s.cfg.nboun; ++ib)
+                    {
+                        output << "          -1\n";
+                    }
+
+                    output << "        </DataArray>\n";
+                }
+            }
+
             output << "        <DataArray type=\"Int32\" Name=\"bc_id\" NumberOfComponents=\"1\" format=\"ascii\">\n";
             for (Int ie = 1; ie <= s.cfg.nelem; ++ie)
             {
@@ -481,6 +664,36 @@ namespace cbs
             output << "      <PDataArray type=\"Float64\" Name=\"temperature\" NumberOfComponents=\"1\"/>\n";
             output << "      <PDataArray type=\"Float64\" Name=\"velocity\" NumberOfComponents=\"3\"/>\n";
             output << "      <PDataArray type=\"Float64\" Name=\"velocity_magnitude\" NumberOfComponents=\"1\"/>\n";
+            // The SA declarations must match the piece files exactly, or a
+            // reader silently drops the arrays it cannot find in every piece.
+            if (s.cfg.turbulence_on > 0)
+            {
+                const char* sa_real_names[] =
+                {
+                    "nu_tilde", "nu_t", "mu_t", "wall_distance",
+                    "sa_rhs", "sa_residual", "sa_production",
+                    "sa_destruction", "sa_diffusion", "sa_source",
+                    "mu_t_over_mu"
+                };
+
+                for (const char* name : sa_real_names)
+                {
+                    output << "      <PDataArray type=\"Float64\" Name=\""
+                           << name << "\" NumberOfComponents=\"1\"/>\n";
+                }
+
+                const char* sa_flag_names[] =
+                {
+                    "sa_active_node", "sa_wall_node", "sa_inlet_node"
+                };
+
+                for (const char* name : sa_flag_names)
+                {
+                    output << "      <PDataArray type=\"Int32\" Name=\""
+                           << name << "\" NumberOfComponents=\"1\"/>\n";
+                }
+            }
+
             output << "      <PDataArray type=\"Int64\" Name=\"global_node_id\" NumberOfComponents=\"1\"/>\n";
             output << "      <PDataArray type=\"Int32\" Name=\"owner_rank\" NumberOfComponents=\"1\"/>\n";
             output << "      <PDataArray type=\"UInt8\" Name=\"is_owned\" NumberOfComponents=\"1\"/>\n";
@@ -493,6 +706,21 @@ namespace cbs
             output << "      <PDataArray type=\"UInt8\" Name=\"cell_kind\" NumberOfComponents=\"1\"/>\n";
             output << "      <PDataArray type=\"Int64\" Name=\"global_element_id\" NumberOfComponents=\"1\"/>\n";
             output << "      <PDataArray type=\"Int32\" Name=\"material_id\" NumberOfComponents=\"1\"/>\n";
+            if (s.cfg.turbulence_on > 0)
+            {
+                const char* sa_cell_names[] =
+                {
+                    "nu_tilde_e", "nu_t_e", "mu_t_e",
+                    "mu_eff_e", "rho_e", "mu_e"
+                };
+
+                for (const char* name : sa_cell_names)
+                {
+                    output << "      <PDataArray type=\"Float64\" Name=\""
+                           << name << "\" NumberOfComponents=\"1\"/>\n";
+                }
+            }
+
             output << "      <PDataArray type=\"Int32\" Name=\"bc_id\" NumberOfComponents=\"1\"/>\n";
             output << "      <PDataArray type=\"Int64\" Name=\"parent_global_element\" NumberOfComponents=\"1\"/>\n";
             output << "    </PCellData>\n";

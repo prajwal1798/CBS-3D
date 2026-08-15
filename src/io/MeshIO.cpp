@@ -1300,6 +1300,43 @@ namespace cbs
                 throw std::runtime_error(
                     "MeshIO::readParameterFile - invalid steady-state tolerance line");
             }
+
+            // Optional trailing pair: sa_check and l2norm_sa_tolerance.
+            //
+            // Read only when present so that existing parameter files stay
+            // valid and keep the previous stopping behaviour, in which the SA
+            // residual is reported but does not gate the stop.
+            Int sa_check = 0;
+            Real sa_tolerance = 0.0;
+
+            if (iss >> sa_check)
+            {
+                if (sa_check < 0 || sa_check > 1)
+                {
+                    throw std::runtime_error(
+                        "MeshIO::readParameterFile - sa_check must be 0 or 1");
+                }
+
+                s.cfg.sa_check = sa_check;
+
+                if (iss >> sa_tolerance)
+                {
+                    if (!(sa_tolerance > 0.0) || !std::isfinite(sa_tolerance))
+                    {
+                        throw std::runtime_error(
+                            "MeshIO::readParameterFile - l2norm_sa_tolerance "
+                            "must be positive");
+                    }
+
+                    s.cfg.l2norm_sa_tolerance = sa_tolerance;
+                }
+                else if (sa_check > 0)
+                {
+                    throw std::runtime_error(
+                        "MeshIO::readParameterFile - sa_check=1 requires "
+                        "l2norm_sa_tolerance on the same line");
+                }
+            }
         }
 
         next_data_line(in, files.par);
