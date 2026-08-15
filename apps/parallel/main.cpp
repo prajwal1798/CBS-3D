@@ -241,7 +241,7 @@ namespace
     }
 
 
-    void reject_unsupported_distributed_turbulence(
+    void check_consistent_turbulence_flag(
         const std::string& solver_case_name,
         const int mpi_size)
     {
@@ -283,15 +283,23 @@ namespace
                 "turbulence_on values");
         }
 
-        if (maximum_flag > 0)
-        {
-            throw std::runtime_error(
-                "Distributed Spalart-Allmaras is not implemented in the "
-                "production MPI loop. Run the case with the serial SA "
-                "development executable or set turbulence_on=0 until the "
-                "distributed SA assembly, halo exchange and convergence path "
-                "has been validated.");
-        }
+        // Distributed Spalart-Allmaras is implemented in the production MPI
+        // loop: the wall-distance search gathers the global wall surface, the
+        // SA node classification is reduced over shared nodes, and the
+        // transport step sums its element-assembled accumulators onto their
+        // owners before the nodal update.  The blanket rejection that used to
+        // stand here is therefore removed.
+        //
+        // The remaining check is a consistency check only.  It verifies that
+        // every rank read the same turbulence_on value from its parameter file,
+        // because a mismatch would make some ranks execute the SA step and its
+        // collectives while others skipped them, which deadlocks rather than
+        // failing.  That check is performed above and applies whatever the
+        // value is.
+        //
+        // Model selection is validated in the solver, not here, so that the
+        // serial and distributed paths cannot disagree about which models
+        // exist.
     }
 
 
@@ -412,7 +420,7 @@ int main(int argc, char** argv)
                 partition_root,
                 mpi_rank);
 
-            reject_unsupported_distributed_turbulence(
+            check_consistent_turbulence_flag(
                 solver_case_name,
                 mpi_size);
         }

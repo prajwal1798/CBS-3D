@@ -5,6 +5,7 @@
 
 #include "cbs/io/MeshIO.hpp"
 
+#include <cmath>
 #include <fstream>
 #include <iostream>
 #include <sstream>
@@ -396,7 +397,7 @@ namespace cbs
         //     turbulence_on turbulence_model turbulent_thermal_diffusivity_on
         //     sa_inlet_ratio sa_prandtl_t
         //     sa_min_wall_distance sa_min_stilde sa_nu_tilde_floor
-        //     sa_use_stilde_limiter sa_implicit_destruction
+        //     sa_use_stilde_limiter sa_implicit_destruction [sa_nu_tilde_ceiling_ratio]
         //-------------------------------------------------------------------------
         void read_optional_spalart_allmaras_controls(std::istream& in, CBSStateSI& s)
         {
@@ -496,6 +497,25 @@ namespace cbs
                     throw std::runtime_error(
                         "MeshIO::readParameterFile - invalid Spalart-Allmaras switch line; "
                         "expected sa_use_stilde_limiter sa_implicit_destruction");
+                }
+
+                // Optional third field: sa_nu_tilde_ceiling_ratio.
+                //
+                // It is read only if present so that existing parameter files
+                // remain valid and keep the built-in default.  Zero disables the
+                // divergence bound.
+                Real ceiling_ratio = 0.0;
+
+                if (iss >> ceiling_ratio)
+                {
+                    if (ceiling_ratio < 0.0 || !std::isfinite(ceiling_ratio))
+                    {
+                        throw std::runtime_error(
+                            "MeshIO::readParameterFile - sa_nu_tilde_ceiling_ratio "
+                            "must be zero (disabled) or positive");
+                    }
+
+                    s.cfg.sa_nu_tilde_ceiling_ratio = ceiling_ratio;
                 }
             }
         }
@@ -1565,10 +1585,22 @@ namespace cbs
                 "MeshIO::readParameterFile - TURBULENCE_ON must be 0 or 1");
         }
 
-        if (s.cfg.turbulence_model < 0 || s.cfg.turbulence_model > 1)
+        // turbulence_model selects the SA variant:
+        //
+        //     0  standard Spalart-Allmaras
+        //     1  SA-neg, reserved
+        //
+        // SA-neg is not implemented.  The transported variable is clipped at
+        // sa_nu_tilde_floor rather than following the negative branch of the
+        // model, so accepting turbulence_model = 1 would silently run standard
+        // SA under an SA-neg label and invalidate any result reported as SA-neg.
+        if (s.cfg.turbulence_model != 0)
         {
             throw std::runtime_error(
-                "MeshIO::readParameterFile - TURBULENCE_MODEL must be 0 or 1");
+                "MeshIO::readParameterFile - turbulence_model must be 0."
+                " Value 1 is reserved for SA-neg, which is not implemented:"
+                " the solver clips nu_tilde at sa_nu_tilde_floor instead of"
+                " integrating the negative branch of the model.");
         }
 
         if (s.cfg.turbulent_thermal_diffusivity_on < 0 ||

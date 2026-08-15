@@ -6,6 +6,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <ios>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -39,28 +41,105 @@ namespace cbs
             return s.dNkdx(dNkdx_index(s, ie, dim, local_node));
         }
 
-        Real positive_part(Real value)
-        {
-            return value > 0.0 ? value : 0.0;
-        }
 
         // Representative molecular kinematic viscosity of the fluid, used only
         // for the divergence bound and the diagnostics.
-        Real molecular_reference_viscosity(const CBSStateSI& s)
+
+
+        // Builds a full state description of a failing SA node.
+        //
+        // A bare "something went wrong" message costs a whole cluster run to
+        // diagnose, so every quantity needed to identify which term diverged is
+        // attached: the identity of the node on both the local and the global
+        // numbering, the transported variable before and after, the assembled
+        // residual and its individual contributions, the wall distance and the
+        // time-step factor.
+        std::string describe_sa_node_failure(
+            const CBSStateSI& s,
+            Int ip,
+            const char* reason)
         {
-            if (s.cfg.dimensional_mode > 0 &&
-                s.cfg.material_properties_enabled > 0)
+            const Int global_node =
+                ip < static_cast<Int>(s.local_to_global_node.size())
+                    ? s.local_to_global_node[static_cast<Size>(ip)]
+                    : ip;
+
+            std::ostringstream text;
+            text.setf(std::ios::scientific);
+            text.precision(8);
+
+            text << "SpalartAllmarasAssembly - " << reason
+                 << "\n    rank                 " << s.mpi_rank
+                 << "\n    local node           " << ip
+                 << "\n    global node          " << global_node
+                 << "\n    coordinates          ("
+                 << s.coord(1, ip) << ", "
+                 << s.coord(2, ip) << ", "
+                 << s.coord(3, ip) << ")"
+                 << "\n    wall distance        " << s.wall_distance(ip)
+                 << "\n    nu_tilde old         " << s.nu_tilde1(ip)
+                 << "\n    nu_tilde new         " << s.nu_tilde(ip)
+                 << "\n    sa_rhs               " << s.sa_rhs(ip)
+                 << "\n    sa_production        " << s.sa_production(ip)
+                 << "\n    sa_destruction       " << s.sa_destruction(ip)
+                 << "\n    sa_diffusion         " << s.sa_diffusion(ip)
+                 << "\n    sa_source            " << s.sa_source(ip)
+                 << "\n    sa_destruction_lhs   " << s.sa_destruction_lhs(ip)
+                 << "\n    elcoe2 (dt/M_lumped) " << s.elcoe2(ip)
+                 << "\n    wall node            " << s.sa_wall_node(ip)
+                 << "\n    active node          " << s.sa_active_node(ip);
+
+            return text.str();
+        }
+
+
+        // Describes a diverging element, including the state of each of its
+        // nodes, so that a divergence can be located without rerunning.
+        std::string describe_sa_element_failure(
+            const CBSStateSI& s,
+            Int ie,
+            Real ratio,
+            Real molecular_nu)
+        {
+            const Int global_element =
+                ie < static_cast<Int>(s.local_to_global_element.size())
+                    ? s.local_to_global_element[static_cast<Size>(ie)]
+                    : ie;
+
+            std::ostringstream text;
+            text.setf(std::ios::scientific);
+            text.precision(8);
+
+            text << "SpalartAllmarasAssembly::updateEddyViscosity - nu_tilde/nu = "
+                 << ratio << " exceeded sa_nu_tilde_ceiling_ratio = "
+                 << s.cfg.sa_nu_tilde_ceiling_ratio
+                 << "\n    the SA transport equation is diverging; check the cell"
+                    " Peclet number of the mesh and reduce dtfix"
+                 << "\n    rank                 " << s.mpi_rank
+                 << "\n    local element        " << ie
+                 << "\n    global element       " << global_element
+                 << "\n    molecular nu         " << molecular_nu;
+
+            for (Int a = 1; a <= s.cfg.nep; ++a)
             {
-                for (Int ie = 1; ie <= s.cfg.nelem; ++ie)
-                {
-                    if (is_fluid_element(s, ie) && s.rho_e(ie) > 0.0)
-                    {
-                        return s.mu_e(ie) / s.rho_e(ie);
-                    }
-                }
+                const Int ip = s.intma(a, ie);
+
+                const Int global_node =
+                    ip < static_cast<Int>(s.local_to_global_node.size())
+                        ? s.local_to_global_node[static_cast<Size>(ip)]
+                        : ip;
+
+                text << "\n    node " << a
+                     << " (global " << global_node << ")"
+                     << "  nu_tilde " << s.nu_tilde(ip)
+                     << "  d " << s.wall_distance(ip)
+                     << "  rhs " << s.sa_rhs(ip)
+                     << "  prod " << s.sa_production(ip)
+                     << "  dest " << s.sa_destruction(ip)
+                     << "  diff " << s.sa_diffusion(ip);
             }
 
-            return s.cfg.ani > 0.0 ? s.cfg.ani : 1.0;
+            return text.str();
         }
 
 
@@ -262,6 +341,10 @@ namespace cbs
 
         bool bad_material = false;
 
+        Int diverged_element = 0;
+        Real diverged_ratio = 0.0;
+        Real diverged_nu = 0.0;
+
         // The element loop scatters into nodal accumulators, so it is driven by
         // the same colour arrays used by every other assembly in the solver.
         // Within one colour no two elements share a node, so the scatter needs
@@ -322,6 +405,34 @@ namespace cbs
                         constants);
                 }
 
+                // Divergence bound.
+                //
+                // updateNuTilde guarantees a finite, non-negative nu_tilde, so a
+                // diverging SA field does not fail there: it grows silently
+                // until chi^3 overflows and the resulting NaN reaches
+                // MomentumAssembly, which then reports an invalid effective
+                // viscosity at an element unrelated to the cause.  The bound is
+                // applied here because this is where the molecular viscosity of
+                // the element is already known, so each element is compared with
+                // the viscosity of the fluid it actually contains rather than
+                // with one rank-local sample.  Elements are owned by exactly one
+                // rank, so there is no ghost false positive to guard against.
+                if (s.cfg.sa_nu_tilde_ceiling_ratio > 0.0 &&
+                    molecular_nu > 0.0 &&
+                    nu_tilde_avg >
+                        s.cfg.sa_nu_tilde_ceiling_ratio * molecular_nu)
+                {
+#pragma omp critical(sa_ceiling_failure)
+                    {
+                        if (diverged_element == 0)
+                        {
+                            diverged_element = ie;
+                            diverged_ratio = nu_tilde_avg / molecular_nu;
+                            diverged_nu = molecular_nu;
+                        }
+                    }
+                }
+
                 const Real mu_t = s.rho_e(ie) * nu_t;
 
                 s.nu_tilde_e(ie) = nu_tilde_avg;
@@ -351,6 +462,16 @@ namespace cbs
             throw std::runtime_error(
                 "SpalartAllmarasAssembly::updateEddyViscosity - invalid density,"
                 " molecular viscosity or non-dimensional ani at one or more elements");
+        }
+
+        if (diverged_element != 0)
+        {
+            throw std::runtime_error(
+                describe_sa_element_failure(
+                    s,
+                    diverged_element,
+                    diverged_ratio,
+                    diverged_nu));
         }
 
         // Complete the sums and the counts on the owning rank before dividing.
@@ -801,9 +922,31 @@ namespace cbs
             return;
         }
 
+        // Owner-authoritative update.
+        //
+        // The SA residual is reverse-assembled so that the owning rank receives
+        // the completed nodal value; a ghost copy holds only the contribution of
+        // the elements that happen to be local.  Updating a ghost from that
+        // partial residual produces a value that is not the solution of anything
+        // and is then overwritten by the owner broadcast, so it is at best
+        // wasted work.  It is worse than wasted for the divergence check below,
+        // which would be inspecting a quantity that was never meant to be a
+        // solution.  Under MPI the loop therefore runs over owned nodes only.
+        Int failed_node = 0;
+
+        const bool have_owned = !s.owned_nodes.empty();
+
+        const Int update_count = have_owned
+            ? static_cast<Int>(s.owned_nodes.size())
+            : s.cfg.npoin;
+
 #pragma omp parallel for schedule(static)
-        for (Int ip = 1; ip <= s.cfg.npoin; ++ip)
+        for (Int index = 0; index < update_count; ++index)
         {
+            const Int ip = have_owned
+                ? s.owned_nodes[static_cast<Size>(index)]
+                : index + 1;
+
             if (s.sa_active_node(ip) == 0)
             {
                 s.nu_tilde(ip) = 0.0;
@@ -841,8 +984,24 @@ namespace cbs
             Real new_value =
                 (old_value + s.elcoe2(ip) * s.sa_rhs(ip)) / denominator;
 
+            // A non-finite update is a hard failure, not something to paper
+            // over.  Restoring the previous value would let the calculation
+            // continue past the first sign of instability and surface it later
+            // somewhere unrelated, which is exactly how the invalid effective
+            // viscosity in the momentum assembly came to be reported at
+            // elements that had nothing to do with the cause.  The node is
+            // recorded here and the run is stopped after the loop, with enough
+            // state attached to identify what diverged.
             if (!std::isfinite(new_value))
             {
+#pragma omp critical(sa_update_failure)
+                {
+                    if (failed_node == 0)
+                    {
+                        failed_node = ip;
+                    }
+                }
+
                 new_value = old_value;
             }
 
@@ -852,54 +1011,13 @@ namespace cbs
             s.sa_residual(ip) = new_value - old_value;
         }
 
-        // Divergence check.
-        //
-        // updateNuTilde already guarantees a finite, non-negative nu_tilde, so a
-        // diverging SA field does not fail here: it grows silently until chi^3
-        // overflows and the resulting NaN reaches MomentumAssembly, which
-        // reports an invalid effective viscosity at an element that has nothing
-        // to do with the cause.  Bounding nu_tilde converts that into a failure
-        // reported at the point and iteration where it starts.
-        if (s.cfg.sa_nu_tilde_ceiling_ratio > 0.0)
+        if (failed_node != 0)
         {
-            const Real reference_nu = molecular_reference_viscosity(s);
-            const Real ceiling =
-                s.cfg.sa_nu_tilde_ceiling_ratio * reference_nu;
-
-            Real worst_value = 0.0;
-            Int worst_node = 0;
-
-            for (Int ip = 1; ip <= s.cfg.npoin; ++ip)
-            {
-                if (s.nu_tilde(ip) > worst_value)
-                {
-                    worst_value = s.nu_tilde(ip);
-                    worst_node = ip;
-                }
-            }
-
-            if (worst_value > ceiling)
-            {
-                const Int global_node =
-                    worst_node < static_cast<Int>(s.local_to_global_node.size())
-                        ? s.local_to_global_node[
-                              static_cast<Size>(worst_node)]
-                        : worst_node;
-
-                throw std::runtime_error(
-                    "SpalartAllmarasAssembly::updateNuTilde - nu_tilde exceeded "
-                    "sa_nu_tilde_ceiling_ratio * nu at local node "
-                    + std::to_string(worst_node)
-                    + " (global " + std::to_string(global_node)
-                    + ", rank " + std::to_string(s.mpi_rank)
-                    + "): nu_tilde = " + std::to_string(worst_value)
-                    + ", nu = " + std::to_string(reference_nu)
-                    + ", ratio = " + std::to_string(worst_value / reference_nu)
-                    + ", wall distance = "
-                    + std::to_string(s.wall_distance(worst_node))
-                    + ". The SA transport equation is diverging; reduce dtfix or "
-                    "check the cell Peclet number of the mesh.");
-            }
+            throw std::runtime_error(
+                describe_sa_node_failure(
+                    s,
+                    failed_node,
+                    "non-finite nu_tilde produced by the SA nodal update"));
         }
     }
 }
