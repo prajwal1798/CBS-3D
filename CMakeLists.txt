@@ -277,17 +277,12 @@ if (NOT CBS3D_CONFIGURED_OUTPUT_NAME)
 endif()
 
 message(STATUS "CBS3D++_SI configuration")
-<<<<<<< HEAD
 message(STATUS "  Application target : ${CBS3D_APPLICATION_TARGET}")
 message(STATUS "  Executable name     : ${CBS3D_CONFIGURED_OUTPUT_NAME}")
 message(STATUS "  OpenMP              : ${CBS3D_ENABLE_OPENMP}")
 message(STATUS "  MPI                 : ${CBS3D_ENABLE_MPI}")
 message(STATUS "  PETSc               : ${CBS3D_ENABLE_PETSC}")
 message(STATUS "  Source validation   : ${CBS3D_BUILD_SOURCE_VALIDATION}")
-=======
-message(STATUS "  OpenMP : ${CBS3D_ENABLE_OPENMP}")
-message(STATUS "  MPI    : ${CBS3D_ENABLE_MPI}")
-message(STATUS "  PETSc  : ${CBS3D_ENABLE_PETSC}")
 
 #==============================================================================
 # Wall-distance verification test
@@ -329,4 +324,3 @@ if (CBS3D_BUILD_TESTS)
         COMMAND wall_distance_verification 60 40 20
     )
 endif()
->>>>>>> d5f4226 (SA: BVH wall distance, MPI-correct SA transport, assembly fixes)
