@@ -620,6 +620,15 @@ namespace cbs
             (s.cfg.l2norm_pres_tolerance <= 0.0) ||
             (pressureResidual(s) < s.cfg.l2norm_pres_tolerance);
 
-        return velocity_ok && temperature_ok && pressure_ok;
+        // The turbulence criterion is opt-in through sa_check.  When it is
+        // enabled the SA residual must have converged as well, so a RANS run
+        // cannot be declared steady on the flow residuals alone while the eddy
+        // viscosity is still developing.
+        const bool turbulence_ok =
+            (s.cfg.sa_check < 1) ||
+            (s.cfg.turbulence_on < 1) ||
+            (turbulenceResidual(s) < s.cfg.l2norm_sa_tolerance);
+
+        return velocity_ok && temperature_ok && pressure_ok && turbulence_ok;
     }
 }

@@ -933,6 +933,7 @@ namespace cbs
         // which would be inspecting a quantity that was never meant to be a
         // solution.  Under MPI the loop therefore runs over owned nodes only.
         Int failed_node = 0;
+        const char* failure_reason = "";
 
         const bool have_owned = !s.owned_nodes.empty();
 
@@ -976,8 +977,30 @@ namespace cbs
                 denominator += s.elcoe2(ip) * s.sa_destruction_lhs(ip);
             }
 
-            if (denominator <= 0.0 || !std::isfinite(denominator))
+            // A non-positive or non-finite semi-implicit denominator is a hard
+            // failure.
+            //
+            // The denominator is 1 + elcoe2 * C_D q_old, and the assembly only
+            // accumulates C_D when it is positive, so for a well-posed state it
+            // is always at least one.  Reaching zero or below therefore means
+            // the destruction linearisation has lost its sign, which silently
+            // reverses the sink into a source at that node.  Substituting 1.0
+            // hides that and lets the run continue on an equation that is no
+            // longer the SA model.
+            if (!(denominator > 0.0) || !std::isfinite(denominator))
             {
+#pragma omp critical(sa_update_failure)
+                {
+                    if (failed_node == 0)
+                    {
+                        failed_node = ip;
+                        failure_reason =
+                            "non-positive or non-finite semi-implicit"
+                            " destruction denominator; the destruction"
+                            " linearisation has lost its sign";
+                    }
+                }
+
                 denominator = 1.0;
             }
 
@@ -999,6 +1022,9 @@ namespace cbs
                     if (failed_node == 0)
                     {
                         failed_node = ip;
+                        failure_reason =
+                            "non-finite nu_tilde produced by the SA nodal"
+                            " update";
                     }
                 }
 
@@ -1014,10 +1040,7 @@ namespace cbs
         if (failed_node != 0)
         {
             throw std::runtime_error(
-                describe_sa_node_failure(
-                    s,
-                    failed_node,
-                    "non-finite nu_tilde produced by the SA nodal update"));
+                describe_sa_node_failure(s, failed_node, failure_reason));
         }
     }
 }
