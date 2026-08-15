@@ -88,5 +88,27 @@ namespace cbs
         // over all local nodes instead would count every interface node once per
         // rank that holds a copy.
         static Real turbulenceResidual(const CBSStateSI& s);
+
+        // Global extrema of the Spalart-Allmaras fields.
+        //
+        // All values are reduced with MPI_Allreduce over owned nodes and local
+        // elements, so they are independent of the partition count and can be
+        // compared directly between a serial and a distributed run.  They exist
+        // to make a diverging SA field visible in the iteration monitor while it
+        // is still growing, rather than after it has produced a non-finite
+        // effective viscosity.
+        struct TurbulenceDiagnostics
+        {
+            Real nu_tilde_min = 0.0;
+            Real nu_tilde_max = 0.0;
+            Real nu_t_min = 0.0;
+            Real nu_t_max = 0.0;
+            Real mu_t_max = 0.0;
+            Real mu_eff_max = 0.0;
+            Real chi_max = 0.0;
+            Real residual = 0.0;
+        };
+
+        static TurbulenceDiagnostics turbulenceDiagnostics(const CBSStateSI& s);
     };
 }

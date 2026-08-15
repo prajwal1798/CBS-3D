@@ -44,6 +44,26 @@ namespace cbs
             return value > 0.0 ? value : 0.0;
         }
 
+        // Representative molecular kinematic viscosity of the fluid, used only
+        // for the divergence bound and the diagnostics.
+        Real molecular_reference_viscosity(const CBSStateSI& s)
+        {
+            if (s.cfg.dimensional_mode > 0 &&
+                s.cfg.material_properties_enabled > 0)
+            {
+                for (Int ie = 1; ie <= s.cfg.nelem; ++ie)
+                {
+                    if (is_fluid_element(s, ie) && s.rho_e(ie) > 0.0)
+                    {
+                        return s.mu_e(ie) / s.rho_e(ie);
+                    }
+                }
+            }
+
+            return s.cfg.ani > 0.0 ? s.cfg.ani : 1.0;
+        }
+
+
         // Returns the molecular kinematic viscosity of an element.
         //
         // This routine is called from inside an OpenMP parallel region, so it
@@ -522,6 +542,17 @@ namespace cbs
                 Real velocity_sum[4] = {};
                 compute_velocity_sum(s, ie, velocity_sum);
 
+                // Element-average velocity, used by the characteristic
+                // stabilisation below.  compute_velocity_sum returns the sum
+                // over the element nodes.
+                Real mean_velocity[4] = {};
+
+                for (Int k = 1; k <= 3; ++k)
+                {
+                    mean_velocity[k] =
+                        velocity_sum[k] / static_cast<Real>(s.cfg.nep);
+                }
+
                 const Real omega = element_vorticity_magnitude(s, ie);
 
                 Real s_bar = 0.0;
@@ -577,6 +608,56 @@ namespace cbs
                 const Real nonlinear_gradient_source =
                     constants.cb2 * grad_q_squared / constants.sigma;
 
+                // Characteristic (CBS) stabilisation of the SA advection term.
+                //
+                // The momentum predictor is stabilised by
+                // step1_characteristic_correction, but the SA transport
+                // equation was assembled with pure Galerkin advection.  Galerkin
+                // advection of a scalar is oscillatory for cell Peclet numbers
+                // above 2,
+                //
+                //     Pe = |u| h / (2 (nu + nu_tilde) / sigma)
+                //
+                // and on a flat-plate RANS mesh at Re = 1e6 the freestream value
+                // is of order 1000 on every element, because the SA diffusivity
+                // is only a few times the molecular value outside the boundary
+                // layer.  The resulting node-to-node oscillation is then
+                // rectified by the floor applied in updateNuTilde: the negative
+                // half of each wiggle is clipped to sa_nu_tilde_floor while the
+                // positive half survives, so nu_tilde acquires a systematic
+                // upward drift and grows without bound over several thousand
+                // iterations until chi^3 overflows and the eddy viscosity
+                // becomes non-finite.
+                //
+                // The CBS remedy is the same characteristic term used for
+                // momentum, applied to the scalar:
+                //
+                //     + (dt/2) u_k d/dx_k ( u_j dq/dx_j )
+                //
+                // whose weak form, integrated by parts and evaluated with the
+                // element-average velocity and the element-constant gradient of
+                // a linear tetrahedron, contributes
+                //
+                //     - (dt/2) V (u_k dN_a/dx_k) (u_j dq/dx_j)
+                //
+                // to the residual of node a.  This is a consistent term: it is
+                // proportional to dt and vanishes with mesh refinement, so it
+                // does not alter the converged steady solution.
+                const Real element_dt = s.delte(ie);
+
+                Real characteristic_factor = 0.0;
+                Real advective_derivative = 0.0;
+
+                if (element_dt > 0.0 && std::isfinite(element_dt))
+                {
+                    characteristic_factor = 0.5 * element_dt * volume;
+
+                    advective_derivative =
+                        mean_velocity[1] * grad_q[1] +
+                        mean_velocity[2] * grad_q[2] +
+                        mean_velocity[3] * grad_q[3];
+                }
+
                 Real local_rhs[5] = {};
                 Real local_production[5] = {};
                 Real local_destruction[5] = {};
@@ -619,7 +700,14 @@ namespace cbs
                     const Real destruction_rhs = nodal_volume * destruction;
                     const Real nonlinear_rhs = nodal_volume * nonlinear_gradient_source;
 
+                    const Real characteristic =
+                        -characteristic_factor * advective_derivative *
+                        (mean_velocity[1] * grad(s, ie, 1, a) +
+                         mean_velocity[2] * grad(s, ie, 2, a) +
+                         mean_velocity[3] * grad(s, ie, 3, a));
+
                     local_rhs[a] += advection;
+                    local_rhs[a] += characteristic;
                     local_rhs[a] += diffusion;
                     local_rhs[a] += production_rhs;
                     local_rhs[a] += nonlinear_rhs;
@@ -762,6 +850,56 @@ namespace cbs
 
             s.nu_tilde(ip) = new_value;
             s.sa_residual(ip) = new_value - old_value;
+        }
+
+        // Divergence check.
+        //
+        // updateNuTilde already guarantees a finite, non-negative nu_tilde, so a
+        // diverging SA field does not fail here: it grows silently until chi^3
+        // overflows and the resulting NaN reaches MomentumAssembly, which
+        // reports an invalid effective viscosity at an element that has nothing
+        // to do with the cause.  Bounding nu_tilde converts that into a failure
+        // reported at the point and iteration where it starts.
+        if (s.cfg.sa_nu_tilde_ceiling_ratio > 0.0)
+        {
+            const Real reference_nu = molecular_reference_viscosity(s);
+            const Real ceiling =
+                s.cfg.sa_nu_tilde_ceiling_ratio * reference_nu;
+
+            Real worst_value = 0.0;
+            Int worst_node = 0;
+
+            for (Int ip = 1; ip <= s.cfg.npoin; ++ip)
+            {
+                if (s.nu_tilde(ip) > worst_value)
+                {
+                    worst_value = s.nu_tilde(ip);
+                    worst_node = ip;
+                }
+            }
+
+            if (worst_value > ceiling)
+            {
+                const Int global_node =
+                    worst_node < static_cast<Int>(s.local_to_global_node.size())
+                        ? s.local_to_global_node[
+                              static_cast<Size>(worst_node)]
+                        : worst_node;
+
+                throw std::runtime_error(
+                    "SpalartAllmarasAssembly::updateNuTilde - nu_tilde exceeded "
+                    "sa_nu_tilde_ceiling_ratio * nu at local node "
+                    + std::to_string(worst_node)
+                    + " (global " + std::to_string(global_node)
+                    + ", rank " + std::to_string(s.mpi_rank)
+                    + "): nu_tilde = " + std::to_string(worst_value)
+                    + ", nu = " + std::to_string(reference_nu)
+                    + ", ratio = " + std::to_string(worst_value / reference_nu)
+                    + ", wall distance = "
+                    + std::to_string(s.wall_distance(worst_node))
+                    + ". The SA transport equation is diverging; reduce dtfix or "
+                    "check the cell Peclet number of the mesh.");
+            }
         }
     }
 }

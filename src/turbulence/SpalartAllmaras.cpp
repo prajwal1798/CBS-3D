@@ -76,8 +76,39 @@ namespace cbs
         //=========================================================================
         Real fv1(Real chi_value, const SpalartAllmarasConstants& c)
         {
-            const Real chi3 = chi_value * chi_value * chi_value;
+            if (!(chi_value > 0.0) || !std::isfinite(chi_value))
+            {
+                return 0.0;
+            }
+
             const Real cv13 = c.cv1 * c.cv1 * c.cv1;
+
+            // For large chi the direct form overflows: chi^3 exceeds the double
+            // range once chi passes roughly 5.6e102, and the expression then
+            // evaluates as inf/inf = NaN, which propagates silently into nu_t,
+            // mu_t and mu_eff.  The algebraically identical reciprocal form
+            //
+            //     fv1 = 1 / (1 + (cv1/chi)^3)
+            //
+            // is exact for the same inputs and cannot overflow, because
+            // cv1/chi < 1 in this branch.  The crossover is placed well below
+            // the overflow limit so that both branches are evaluated in a range
+            // where each is accurate.
+            //
+            // This is a robustness guard, not a stability fix.  A chi large
+            // enough to reach either branch already indicates a diverging
+            // solution; the value of this change is that the divergence is
+            // reported by the SA ceiling check rather than surfacing several
+            // steps later as a non-finite viscosity in the momentum assembly.
+            if (chi_value > 1.0e6)
+            {
+                const Real ratio = c.cv1 / chi_value;
+                const Real ratio3 = ratio * ratio * ratio;
+
+                return 1.0 / (1.0 + ratio3);
+            }
+
+            const Real chi3 = chi_value * chi_value * chi_value;
             const Real denominator = chi3 + cv13;
 
             if (std::abs(denominator) <= small_number)
