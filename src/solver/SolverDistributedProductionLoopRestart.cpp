@@ -163,7 +163,8 @@ namespace cbs
                 const Real continuity_max,
                 const Real maximum_velocity,
                 const Real maximum_velocity_correction,
-                const Real iteration_wall_seconds)
+                const Real iteration_wall_seconds,
+                const Convergence::TurbulenceDiagnostics& turbulence)
             {
                 const Int global_iteration =
                     globalIteration(s, local_iteration);
@@ -178,7 +179,8 @@ namespace cbs
                     continuity_max,
                     maximum_velocity,
                     maximum_velocity_correction,
-                    iteration_wall_seconds);
+                    iteration_wall_seconds,
+                    turbulence);
 
                 const Int checkpoint_interval =
                     RestartIO::checkpointInterval();

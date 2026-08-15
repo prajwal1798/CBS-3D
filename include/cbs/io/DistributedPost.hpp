@@ -11,6 +11,7 @@
 //=============================================================================
 
 #include "cbs/core/CBSStateSI.hpp"
+#include "cbs/solver/Convergence.hpp"
 #include "cbs/core/Types.hpp"
 
 #include <string>
@@ -44,6 +45,10 @@ namespace cbs
             Int iteration);
 
         // Appends one globally reduced convergence row on rank zero.
+        //
+        // The turbulence diagnostics are passed in rather than recomputed here,
+        // because they are produced by MPI collectives that every rank must
+        // enter.  Computing them inside a rank-zero-only writer would deadlock.
         static void writeResidualRow(
             const CBSStateSI& s,
             const std::string& rank_local_case_name,
@@ -52,7 +57,8 @@ namespace cbs
             Real continuity_max,
             Real maximum_velocity,
             Real maximum_velocity_correction,
-            Real iteration_wall_seconds);
+            Real iteration_wall_seconds,
+            const Convergence::TurbulenceDiagnostics& turbulence);
 
         // Tests whether the requested iteration has already been recorded in
         // the distributed PVD history.
