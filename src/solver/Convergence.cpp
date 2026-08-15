@@ -463,6 +463,96 @@ namespace cbs
 
 
     //=========================================================================
+    // Collects globally reduced SA extrema for the iteration monitor.
+    //=========================================================================
+    Convergence::TurbulenceDiagnostics
+    Convergence::turbulenceDiagnostics(const CBSStateSI& s)
+    {
+        TurbulenceDiagnostics d;
+
+        if (s.cfg.turbulence_on < 1)
+        {
+            return d;
+        }
+
+        Real nu_tilde_min = 1.0e300;
+        Real nu_tilde_max = -1.0e300;
+        Real nu_t_min = 1.0e300;
+        Real nu_t_max = -1.0e300;
+
+        const bool have_owned = !s.owned_nodes.empty();
+        const Size node_count = have_owned
+            ? s.owned_nodes.size()
+            : static_cast<Size>(s.cfg.npoin);
+
+        for (Size i = 0; i < node_count; ++i)
+        {
+            const Int ip = have_owned
+                ? s.owned_nodes[i]
+                : static_cast<Int>(i) + 1;
+
+            if (s.sa_active_node(ip) == 0)
+            {
+                continue;
+            }
+
+            nu_tilde_min = std::min(nu_tilde_min, s.nu_tilde(ip));
+            nu_tilde_max = std::max(nu_tilde_max, s.nu_tilde(ip));
+            nu_t_min = std::min(nu_t_min, s.nu_t(ip));
+            nu_t_max = std::max(nu_t_max, s.nu_t(ip));
+        }
+
+        Real mu_t_max = -1.0e300;
+        Real mu_eff_max = -1.0e300;
+
+        for (Int ie = 1; ie <= s.cfg.nelem; ++ie)
+        {
+            mu_t_max = std::max(mu_t_max, s.mu_t_e(ie));
+            mu_eff_max = std::max(mu_eff_max, s.mu_eff_e(ie));
+        }
+
+        // Elements are owned by exactly one rank, so no ownership filter is
+        // needed for the element extrema.
+
+#ifdef CBS3D_USE_MPI
+        if (s.mpi_enabled && s.mpi_size > 1)
+        {
+            Real local_min[2] = { nu_tilde_min, nu_t_min };
+            Real global_min[2] = { 0.0, 0.0 };
+
+            MPI_Allreduce(
+                local_min, global_min, 2, MPI_DOUBLE, MPI_MIN, MPI_COMM_WORLD);
+
+            nu_tilde_min = global_min[0];
+            nu_t_min = global_min[1];
+
+            Real local_max[4] =
+                { nu_tilde_max, nu_t_max, mu_t_max, mu_eff_max };
+            Real global_max[4] = { 0.0, 0.0, 0.0, 0.0 };
+
+            MPI_Allreduce(
+                local_max, global_max, 4, MPI_DOUBLE, MPI_MAX, MPI_COMM_WORLD);
+
+            nu_tilde_max = global_max[0];
+            nu_t_max = global_max[1];
+            mu_t_max = global_max[2];
+            mu_eff_max = global_max[3];
+        }
+#endif
+
+        d.nu_tilde_min = nu_tilde_min;
+        d.nu_tilde_max = nu_tilde_max;
+        d.nu_t_min = nu_t_min;
+        d.nu_t_max = nu_t_max;
+        d.mu_t_max = mu_t_max;
+        d.mu_eff_max = mu_eff_max;
+        d.residual = turbulenceResidual(s);
+
+        return d;
+    }
+
+
+    //=========================================================================
     // Checks the enabled steady-state stopping criteria.
     //
     // Velocity criterion:

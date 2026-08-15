@@ -260,6 +260,16 @@ namespace cbs
         Real sa_min_stilde = 1.0e-14;
         Real sa_nu_tilde_floor = 0.0;
 
+        // Upper bound on nu_tilde/nu, enforced after every SA update.
+        //
+        // A converged flat-plate boundary layer reaches nu_tilde/nu of order
+        // 1e3; a value far above that is not a physical state but a diverging
+        // one.  Bounding it turns an unbounded exponential growth into an
+        // immediate, located, reportable failure instead of a non-finite
+        // effective viscosity discovered several steps later in the momentum
+        // assembly.  Set to zero to disable the check.
+        Real sa_nu_tilde_ceiling_ratio = 1.0e6;
+
         Int sa_use_stilde_limiter = 1;
         Int sa_implicit_destruction = 1;
 

@@ -1225,6 +1225,11 @@ namespace cbs
                     s_,
                     local_maximum_velocity_correction);
 
+            // Collective, so it must be executed by every rank on every
+            // iteration rather than only on the ranks that print.
+            const Convergence::TurbulenceDiagnostics turbulence_diagnostics =
+                Convergence::turbulenceDiagnostics(s_);
+
             const Real continuity_l2 =
                 std::sqrt(continuity.l2_squared);
 
@@ -1309,6 +1314,18 @@ namespace cbs
                         << "  RelT=" << metrics.relative_temperature
                         << "  Tmin=" << metrics.minimum_temperature
                         << "  Tmax=" << metrics.maximum_temperature;
+                }
+
+                if (s_.cfg.turbulence_on > 0)
+                {
+                    std::cout
+                        << "  RelSA=" << turbulence_diagnostics.residual
+                        << "  NuTilde=[" << turbulence_diagnostics.nu_tilde_min
+                        << "," << turbulence_diagnostics.nu_tilde_max << "]"
+                        << "  NuT=[" << turbulence_diagnostics.nu_t_min
+                        << "," << turbulence_diagnostics.nu_t_max << "]"
+                        << "  MuTmax=" << turbulence_diagnostics.mu_t_max
+                        << "  MuEffmax=" << turbulence_diagnostics.mu_eff_max;
                 }
 
                 std::cout
