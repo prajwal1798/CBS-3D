@@ -194,7 +194,9 @@ namespace cbs
                 << "continuity_rms,continuity_max,"
                 << "maximum_velocity,maximum_velocity_correction,"
                 << "cg_iterations,cg_initial_l2,cg_final_l2,"
-                << "cg_relative_l2,cg_max_abs,iteration_wall_seconds\n";
+                << "cg_relative_l2,cg_max_abs,iteration_wall_seconds,"
+                << "sa_rel,sa_nu_tilde_min,sa_nu_tilde_max,sa_chi_max,"
+                << "sa_nu_t_min,sa_nu_t_max,sa_mu_t_max,sa_mu_eff_max\n";
         }
 
         void write_piece(
@@ -697,7 +699,8 @@ namespace cbs
         const Real continuity_max,
         const Real maximum_velocity,
         const Real maximum_velocity_correction,
-        const Real iteration_wall_seconds)
+        const Real iteration_wall_seconds,
+        const Convergence::TurbulenceDiagnostics& turbulence)
     {
 #if defined(CBS3D_USE_MPI)
         if (s.mpi_rank != 0 || s.cfg.residual_log_enabled < 1)
@@ -745,7 +748,15 @@ namespace cbs
             << safe_value(s.last_cg_final_l2) << ','
             << safe_value(s.last_cg_relative_l2) << ','
             << safe_value(s.last_cg_max_abs) << ','
-            << safe_value(iteration_wall_seconds)
+            << safe_value(iteration_wall_seconds) << ','
+            << safe_value(turbulence.residual) << ','
+            << safe_value(turbulence.nu_tilde_min) << ','
+            << safe_value(turbulence.nu_tilde_max) << ','
+            << safe_value(turbulence.chi_max) << ','
+            << safe_value(turbulence.nu_t_min) << ','
+            << safe_value(turbulence.nu_t_max) << ','
+            << safe_value(turbulence.mu_t_max) << ','
+            << safe_value(turbulence.mu_eff_max)
             << '\n';
 #else
         (void)s;
@@ -756,6 +767,7 @@ namespace cbs
         (void)maximum_velocity;
         (void)maximum_velocity_correction;
         (void)iteration_wall_seconds;
+        (void)turbulence;
         throw std::runtime_error(
             "DistributedPost::writeResidualRow requires an MPI-enabled build");
 #endif

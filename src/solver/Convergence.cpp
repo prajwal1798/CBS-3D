@@ -502,6 +502,36 @@ namespace cbs
             nu_t_max = std::max(nu_t_max, s.nu_t(ip));
         }
 
+        // chi = nu_tilde/nu is the quantity that actually overflows when the SA
+        // equation diverges, so it is tracked directly rather than inferred from
+        // nu_tilde and a viscosity quoted elsewhere.  It is formed per element,
+        // where the molecular viscosity of that element is known, so a
+        // variable-property case reports a meaningful maximum.
+        Real chi_max = 0.0;
+
+        for (Int ie = 1; ie <= s.cfg.nelem; ++ie)
+        {
+            Real molecular_nu = 0.0;
+
+            if (s.cfg.dimensional_mode > 0 &&
+                s.cfg.material_properties_enabled > 0)
+            {
+                if (s.rho_e(ie) > 0.0)
+                {
+                    molecular_nu = s.mu_e(ie) / s.rho_e(ie);
+                }
+            }
+            else
+            {
+                molecular_nu = s.cfg.ani;
+            }
+
+            if (molecular_nu > 0.0)
+            {
+                chi_max = std::max(chi_max, s.nu_tilde_e(ie) / molecular_nu);
+            }
+        }
+
         Real mu_t_max = -1.0e300;
         Real mu_eff_max = -1.0e300;
 
@@ -526,17 +556,18 @@ namespace cbs
             nu_tilde_min = global_min[0];
             nu_t_min = global_min[1];
 
-            Real local_max[4] =
-                { nu_tilde_max, nu_t_max, mu_t_max, mu_eff_max };
-            Real global_max[4] = { 0.0, 0.0, 0.0, 0.0 };
+            Real local_max[5] =
+                { nu_tilde_max, nu_t_max, mu_t_max, mu_eff_max, chi_max };
+            Real global_max[5] = { 0.0, 0.0, 0.0, 0.0, 0.0 };
 
             MPI_Allreduce(
-                local_max, global_max, 4, MPI_DOUBLE, MPI_MAX, MPI_COMM_WORLD);
+                local_max, global_max, 5, MPI_DOUBLE, MPI_MAX, MPI_COMM_WORLD);
 
             nu_tilde_max = global_max[0];
             nu_t_max = global_max[1];
             mu_t_max = global_max[2];
             mu_eff_max = global_max[3];
+            chi_max = global_max[4];
         }
 #endif
 
@@ -546,6 +577,7 @@ namespace cbs
         d.nu_t_max = nu_t_max;
         d.mu_t_max = mu_t_max;
         d.mu_eff_max = mu_eff_max;
+        d.chi_max = chi_max;
         d.residual = turbulenceResidual(s);
 
         return d;

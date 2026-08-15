@@ -1261,7 +1261,8 @@ namespace cbs
                 continuity.max_abs,
                 metrics.maximum_velocity,
                 metrics.maximum_velocity_correction,
-                global_iteration_seconds);
+                global_iteration_seconds,
+                turbulence_diagnostics);
 
             if (DistributedPost::shouldWriteSolution(s_, iteration))
             {
