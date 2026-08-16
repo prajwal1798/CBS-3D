@@ -243,29 +243,39 @@ namespace cbs
         return impl_ != nullptr && impl_->ready;
     }
 
-    namespace
-    {
-        bool local_timestepping_active(const CBSStateSI& s)
-        {
-            return (s.cfg.ilots == 1 || s.cfg.ilots == 2)
-                && s.cfg.transient_on == 0
-                && s.cfg.solver_opt <= 1
-                && s.cfg.dtfixed == 0;
-        }
-    }
-
     //=========================================================================
-    // Assembles A_p = sum_e dt_e H_e into the persistent matrix.
+    // Assembles the CBS pressure operator in reference-timestep-normalised form:
     //
-    // The sparsity pattern is fixed by the mesh and never changes, so the same
-    // Mat object is reused and only its values are rewritten.  That is what
-    // makes an occasional refresh of the frozen timestep field affordable: the
-    // expensive part of a rebuild is the algebraic-multigrid setup, not this
-    // assembly.
+    //     A_hat = sum_e (dt_e / dt_ref) H_e
+    //
+    //     b_hat = b / dt_ref
+    //
+    // where dt_ref is the communicator-wide reference timestep stored in
+    // cfg.dtreal.  This is exactly the original equation
+    //
+    //     [sum_e dt_e H_e] p = b
+    //
+    // divided by one positive scalar.  The normalisation has two useful
+    // properties:
+    //
+    //   * for a global uniform timestep dt_e == dt_ref, A_hat is the
+    //     geometry-only operator H and therefore does not need rebuilding when
+    //     an adaptive global timestep changes;
+    //   * for local pseudo-timestepping the element ratios dt_e/dt_ref retain
+    //     the required CBS element weighting without globally scaling the
+    //     matrix by a very small timestep.
     //=========================================================================
     void PetscPersistentDistributedPressureSystem::assembleOperator(
         CBSStateSI& s)
     {
+        const Real reference_dt = s.cfg.dtreal;
+
+        if (!(reference_dt > 0.0) || !std::isfinite(reference_dt))
+        {
+            throw std::runtime_error(
+                "Invalid reference timestep during pressure operator assembly");
+        }
+
         check_petsc(
             MatZeroEntries(impl_->matrix),
             "MatZeroEntries(pressure operator)");
@@ -280,22 +290,20 @@ namespace cbs
                 continue;
             }
 
-            // The CBS pressure operator carries the element timestep:
-            //
-            //     A_p = sum_e dt_e H_e
-            //
-            // matching TimeStep::updateLhsDiagonal, which builds the serial
-            // operator as gstifE * dt.  Under a uniform timestep this is dt*H
-            // with the raw divergence on the right, the same linear system as a
-            // geometry-only matrix with the right-hand side divided by dt.
-            // Under local timestepping the two differ, and only this form leaves
-            // the corrected velocity solenoidal.
             const Real element_dt = s.delte(ie);
 
             if (!(element_dt > 0.0) || !std::isfinite(element_dt))
             {
                 throw std::runtime_error(
                     "Invalid element timestep during pressure operator assembly");
+            }
+
+            const Real element_weight = element_dt / reference_dt;
+
+            if (!(element_weight > 0.0) || !std::isfinite(element_weight))
+            {
+                throw std::runtime_error(
+                    "Invalid normalised timestep weight during pressure operator assembly");
             }
 
             PetscInt rows[4] = {};
@@ -325,7 +333,7 @@ namespace cbs
                 }
 
                 element_matrix[(a - 1) * 4 + (a - 1)] =
-                    static_cast<PetscScalar>(diagonal * element_dt);
+                    static_cast<PetscScalar>(diagonal * element_weight);
             }
 
             for (Int pair = 0; pair < s.cfg.gsdim; ++pair)
@@ -344,10 +352,10 @@ namespace cbs
                 const Int b = pair_b[pair] - 1;
 
                 element_matrix[a * 4 + b] =
-                    static_cast<PetscScalar>(coupling * element_dt);
+                    static_cast<PetscScalar>(coupling * element_weight);
 
                 element_matrix[b * 4 + a] =
-                    static_cast<PetscScalar>(coupling * element_dt);
+                    static_cast<PetscScalar>(coupling * element_weight);
             }
 
             check_petsc(
@@ -377,15 +385,16 @@ namespace cbs
 
 
     //=========================================================================
-    // Rewrites the pressure operator after the frozen timestep field changes.
+    // Rewrites the pressure operator after the frozen local-timestep field
+    // changes.  The matrix sparsity pattern is retained, but all quantities
+    // that depend on matrix values must be rebuilt consistently:
     //
-    // Invoked only when the stability monitor judges the frozen field unsafe,
-    // so the multigrid setup cost is amortised over the many iterations between
-    // refreshes rather than paid every step.
+    //     fixed_shift = A_raw p_D
+    //     prescribed rows/columns
+    //     KSP/preconditioner setup
     //
-    // KSPSetOperators is called again so PETSc discards the preconditioner built
-    // for the previous operator.  The sparsity pattern is unchanged, so no
-    // reallocation occurs.
+    // Omitting any of these leaves the next pressure solve using a mixture of
+    // the old and new operators.
     //=========================================================================
     void PetscPersistentDistributedPressureSystem::rebuildOperator(
         CBSStateSI& s)
@@ -399,11 +408,48 @@ namespace cbs
         assembleOperator(s);
 
         check_petsc(
+            MatMult(
+                impl_->matrix,
+                impl_->fixed_values,
+                impl_->fixed_shift),
+            "MatMult(rebuilt fixed pressure shift)");
+
+        check_petsc(
+            MatZeroRowsColumnsIS(
+                impl_->matrix,
+                impl_->fixed_rows,
+                1.0,
+                nullptr,
+                nullptr),
+            "MatZeroRowsColumnsIS(rebuild)");
+
+        check_petsc(
+            MatSetOption(
+                impl_->matrix,
+                MAT_SYMMETRIC,
+                PETSC_TRUE),
+            "MatSetOption(MAT_SYMMETRIC rebuild)");
+
+        check_petsc(
+            MatSetOption(
+                impl_->matrix,
+                MAT_SPD,
+                PETSC_TRUE),
+            "MatSetOption(MAT_SPD rebuild)");
+
+        check_petsc(
             KSPSetOperators(
                 impl_->ksp,
                 impl_->matrix,
                 impl_->matrix),
             "KSPSetOperators(rebuild)");
+
+        // KSPSetReusePreconditioner is false by default.  Calling KSPSetUp here
+        // makes the AMG rebuild explicit and keeps its cost inside the reported
+        // LTS refresh event rather than deferring it to the next KSPSolve.
+        check_petsc(
+            KSPSetUp(impl_->ksp),
+            "KSPSetUp(rebuilt pressure operator)");
     }
 
 
@@ -817,10 +863,6 @@ namespace cbs
                 MPI_COMM_WORLD),
             "MPI_Allreduce maximum pressure timestep");
 
-        // The operator carries the element timestep, so the linear residual is
-        // already in the units of the raw weak divergence and needs no dt
-        // rescaling.  dtreal is still required to agree across the communicator
-        // because it is the reported reference timestep.
         const Real timestep_scale =
             std::max(1.0, std::abs(local_dt));
 
@@ -828,7 +870,7 @@ namespace cbs
             1.0e-13 * timestep_scale)
         {
             throw std::runtime_error(
-                "Persistent pressure system requires one communicator-wide timestep");
+                "Persistent pressure system requires one communicator-wide reference timestep");
         }
 
         check_petsc(
@@ -878,9 +920,10 @@ namespace cbs
             }
             else
             {
-                // The matrix carries the element timestep, so the right-hand
-                // side is the raw weak divergence.
-                const Real scaled_rhs = s.rhs1(ip);
+                // A_hat = A/dt_ref, so the weak-divergence RHS must be divided
+                // by the same communicator-wide reference timestep.  This is a
+                // single scalar normalisation; no nodal deltp scaling is used.
+                const Real scaled_rhs = s.rhs1(ip) / local_dt;
 
                 check_petsc(
                     VecSetValue(
@@ -1147,6 +1190,12 @@ namespace cbs
 
     ConjugateGradient::Result
     PetscPersistentDistributedPressureSystem::solve(CBSStateSI&)
+    {
+        throw std::runtime_error(
+            "Persistent distributed pressure requires MPI and PETSc support");
+    }
+
+    void PetscPersistentDistributedPressureSystem::rebuildOperator(CBSStateSI&)
     {
         throw std::runtime_error(
             "Persistent distributed pressure requires MPI and PETSc support");
