@@ -1,0 +1,69 @@
+name: Apply pressure roundoff marker
+
+on:
+  push:
+    branches:
+      - integration/sa-mpi
+
+permissions:
+  contents: write
+
+jobs:
+  patch-source:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: integration/sa-mpi
+          fetch-depth: 0
+
+      - name: Add console marker
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('src/solver/SolverDistributedProductionLoop.cpp')
+          text = p.read_text()
+          old = '''                    << "  CG=" << pressure_result.iterations\n                    << "  CGrel=" << pressure_result.final_relative_l2\n                    << "  RelU=" << metrics.relative_u\n'''
+          new = '''                    << "  CG=" << pressure_result.iterations\n                    << "  CGrel=" << pressure_result.final_relative_l2\n                    << "  CGfloor=" << (pressure_result.roundoff_limited ? 1 : 0)\n                    << "  RelU=" << metrics.relative_u\n'''
+          if old not in text:
+              raise SystemExit('console CG block not found')
+          p.write_text(text.replace(old, new, 1))
+          PY
+
+      - name: Install toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y cmake g++ openmpi-bin libopenmpi-dev libpetsc-real-dev libhypre-dev pkg-config
+          if pkg-config --exists PETSc; then
+            PETSC_PREFIX="$(pkg-config --variable=prefix PETSc)"
+          else
+            PETSC_PREFIX="$(pkg-config --variable=prefix petsc)"
+          fi
+          echo "PETSC_DIR=$PETSC_PREFIX" >> "$GITHUB_ENV"
+
+      - name: Compile
+        shell: bash
+        run: |
+          set -euo pipefail
+          cmake -S . -B build-ci-pressure-floor \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCBS3D_ENABLE_MPI=ON \
+            -DCBS3D_ENABLE_PETSC=ON \
+            -DCBS3D_ENABLE_OPENMP=ON \
+            -DCBS3D_BUILD_TESTS=OFF \
+            -DCBS3D_BUILD_SOURCE_VALIDATION=OFF
+          cmake --build build-ci-pressure-floor -j 2
+
+      - name: Commit marker
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add src/solver/SolverDistributedProductionLoop.cpp
+          git commit -m 'Report roundoff-limited pressure acceptance'
+          git push origin HEAD:integration/sa-mpi
