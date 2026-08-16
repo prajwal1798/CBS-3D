@@ -1093,17 +1093,79 @@ namespace cbs
             result.final_max_abs =
                 vector_max_norm(impl_->residual);
 
-            // PETSc's reason must agree with the explicitly recomputed true
-            // residual.  This prevents a preconditioner-dependent convergence
-            // decision from being accepted as a pressure solve.
+            result.solver_reason =
+                static_cast<Int>(reason);
+
+            // Primary acceptance criterion: exactly the requested absolute or
+            // initial-residual-relative tolerance, evaluated on an explicit
+            // recomputation of r = b - A p.
             const Real true_residual_target =
                 std::max(
                     std::max(0.0, s.cfg.absToler),
                     std::max(0.0, s.cfg.relToler) * scaled_initial_l2);
 
+            result.acceptance_l2 = true_residual_target;
+
+            const bool strict_true_residual_ok =
+                scaled_final_l2 <= true_residual_target;
+
+            // At late steady convergence the nonzero initial guess can already
+            // make ||r0|| extremely small.  Requiring another factor of 1e-6
+            // may then demand an explicit b-Ap residual below the attainable
+            // floating-point matvec floor even though PETSc has legitimately
+            // reached CONVERGED_RTOL.  Do not convert that roundoff limit into
+            // a fatal pressure failure.
+            //
+            // A componentwise backward-error floor is estimated only when the
+            // strict check misses, so normal solves pay no extra reductions:
+            //
+            //   r_floor_inf = C eps ( ||A||_inf ||p||_inf + ||b||_inf ).
+            //
+            // C=256 safely covers sparse row accumulation and distributed
+            // reduction roundoff while remaining O(machine precision), not a
+            // user-level relaxation of the 1e-6 pressure tolerance.
+            bool roundoff_limited_ok = false;
+
+            if (reason > 0 && !strict_true_residual_ok)
+            {
+                PetscReal matrix_inf = 0.0;
+                PetscReal solution_inf = 0.0;
+                PetscReal rhs_inf = 0.0;
+
+                check_petsc(
+                    MatNorm(impl_->matrix, NORM_INFINITY, &matrix_inf),
+                    "MatNorm(NORM_INFINITY pressure)");
+
+                check_petsc(
+                    VecNorm(impl_->solution, NORM_INFINITY, &solution_inf),
+                    "VecNorm(NORM_INFINITY pressure solution)");
+
+                check_petsc(
+                    VecNorm(impl_->rhs, NORM_INFINITY, &rhs_inf),
+                    "VecNorm(NORM_INFINITY pressure rhs)");
+
+                const Real backward_scale =
+                    static_cast<Real>(matrix_inf) *
+                    static_cast<Real>(solution_inf) +
+                    static_cast<Real>(rhs_inf);
+
+                const Real roundoff_floor_inf =
+                    256.0 *
+                    std::numeric_limits<Real>::epsilon() *
+                    std::max(1.0, backward_scale);
+
+                result.roundoff_floor_inf = roundoff_floor_inf;
+
+                roundoff_limited_ok =
+                    result.final_max_abs <= roundoff_floor_inf;
+            }
+
+            result.roundoff_limited =
+                !strict_true_residual_ok && roundoff_limited_ok;
+
             result.converged =
                 reason > 0 &&
-                scaled_final_l2 <= true_residual_target;
+                (strict_true_residual_ok || roundoff_limited_ok);
         }
         else
         {

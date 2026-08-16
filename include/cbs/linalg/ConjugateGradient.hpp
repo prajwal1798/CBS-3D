@@ -50,6 +50,15 @@ namespace cbs
             // Maximum absolute residual over free pressure nodes.
             Real final_max_abs = 0.0;
 
+            // Linear-solver acceptance diagnostics.  PETSc's Krylov residual
+            // and an explicitly recomputed b-Ax can separate at the last few
+            // digits once the pressure correction reaches floating-point
+            // accuracy.  These fields make that distinction visible.
+            Real acceptance_l2 = 0.0;
+            Real roundoff_floor_inf = 0.0;
+            Int solver_reason = 0;
+            bool roundoff_limited = false;
+
             bool converged = false;
 
             // Timing information for one pressure solve.
