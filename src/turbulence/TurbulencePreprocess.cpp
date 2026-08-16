@@ -5,6 +5,7 @@
 #include "cbs/parallel/HaloExchange.hpp"
 #include "cbs/turbulence/WallDistance.hpp"
 
+#include <cctype>
 #include <cstdlib>
 #include <iostream>
 #include <stdexcept>
@@ -23,7 +24,14 @@ namespace cbs
                 return false;
             }
 
-            const std::string format(value);
+            std::string format(value);
+
+            for (char& character : format)
+            {
+                character = static_cast<char>(
+                    std::tolower(static_cast<unsigned char>(character)));
+            }
+
             return
                 format == "legacy_vtu" ||
                 format == "vtu" ||
