@@ -1,0 +1,123 @@
+name: Apply pressure roundoff-aware convergence guard
+
+on:
+  push:
+    branches:
+      - integration/sa-mpi
+
+permissions:
+  contents: write
+
+jobs:
+  patch-source:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out branch
+        uses: actions/checkout@v4
+        with:
+          ref: integration/sa-mpi
+          fetch-depth: 0
+
+      - name: Patch pressure convergence guard and diagnostics
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          # ------------------------------------------------------------------
+          # 1. Extend the common CG result with PETSc/acceptance diagnostics.
+          # ------------------------------------------------------------------
+          p = Path('include/cbs/linalg/ConjugateGradient.hpp')
+          text = p.read_text()
+          old = '''            // Maximum absolute residual over free pressure nodes.\n            Real final_max_abs = 0.0;\n\n            bool converged = false;\n'''
+          new = '''            // Maximum absolute residual over free pressure nodes.\n            Real final_max_abs = 0.0;\n\n            // Linear-solver acceptance diagnostics.  PETSc's Krylov residual\n            // and an explicitly recomputed b-Ax can separate at the last few\n            // digits once the pressure correction reaches floating-point\n            // accuracy.  These fields make that distinction visible.\n            Real acceptance_l2 = 0.0;\n            Real roundoff_floor_inf = 0.0;\n            Int solver_reason = 0;\n            bool roundoff_limited = false;\n\n            bool converged = false;\n'''
+          if old not in text:
+              raise SystemExit('ConjugateGradient.hpp diagnostic insertion point not found')
+          text = text.replace(old, new, 1)
+          p.write_text(text)
+
+          # ------------------------------------------------------------------
+          # 2. Make the explicit true-residual guard finite-precision aware.
+          # ------------------------------------------------------------------
+          p = Path('src/linalg/PetscPersistentDistributedPressureSystem.cpp')
+          text = p.read_text()
+          old = '''            result.final_max_abs =\n                vector_max_norm(impl_->residual);\n\n            // PETSc's reason must agree with the explicitly recomputed true\n            // residual.  This prevents a preconditioner-dependent convergence\n            // decision from being accepted as a pressure solve.\n            const Real true_residual_target =\n                std::max(\n                    std::max(0.0, s.cfg.absToler),\n                    std::max(0.0, s.cfg.relToler) * scaled_initial_l2);\n\n            result.converged =\n                reason > 0 &&\n                scaled_final_l2 <= true_residual_target;\n'''
+          new = '''            result.final_max_abs =\n                vector_max_norm(impl_->residual);\n\n            result.solver_reason =\n                static_cast<Int>(reason);\n\n            // Primary acceptance criterion: exactly the requested absolute or\n            // initial-residual-relative tolerance, evaluated on an explicit\n            // recomputation of r = b - A p.\n            const Real true_residual_target =\n                std::max(\n                    std::max(0.0, s.cfg.absToler),\n                    std::max(0.0, s.cfg.relToler) * scaled_initial_l2);\n\n            result.acceptance_l2 = true_residual_target;\n\n            const bool strict_true_residual_ok =\n                scaled_final_l2 <= true_residual_target;\n\n            // At late steady convergence the nonzero initial guess can already\n            // make ||r0|| extremely small.  Requiring another factor of 1e-6\n            // may then demand an explicit b-Ap residual below the attainable\n            // floating-point matvec floor even though PETSc has legitimately\n            // reached CONVERGED_RTOL.  Do not convert that roundoff limit into\n            // a fatal pressure failure.\n            //\n            // A componentwise backward-error floor is estimated only when the\n            // strict check misses, so normal solves pay no extra reductions:\n            //\n            //   r_floor_inf = C eps ( ||A||_inf ||p||_inf + ||b||_inf ).\n            //\n            // C=256 safely covers sparse row accumulation and distributed\n            // reduction roundoff while remaining O(machine precision), not a\n            // user-level relaxation of the 1e-6 pressure tolerance.\n            bool roundoff_limited_ok = false;\n\n            if (reason > 0 && !strict_true_residual_ok)\n            {\n                PetscReal matrix_inf = 0.0;\n                PetscReal solution_inf = 0.0;\n                PetscReal rhs_inf = 0.0;\n\n                check_petsc(\n                    MatNorm(impl_->matrix, NORM_INFINITY, &matrix_inf),\n                    "MatNorm(NORM_INFINITY pressure)");\n\n                check_petsc(\n                    VecNorm(impl_->solution, NORM_INFINITY, &solution_inf),\n                    "VecNorm(NORM_INFINITY pressure solution)");\n\n                check_petsc(\n                    VecNorm(impl_->rhs, NORM_INFINITY, &rhs_inf),\n                    "VecNorm(NORM_INFINITY pressure rhs)");\n\n                const Real backward_scale =\n                    static_cast<Real>(matrix_inf) *\n                    static_cast<Real>(solution_inf) +\n                    static_cast<Real>(rhs_inf);\n\n                const Real roundoff_floor_inf =\n                    256.0 *\n                    std::numeric_limits<Real>::epsilon() *\n                    std::max(1.0, backward_scale);\n\n                result.roundoff_floor_inf = roundoff_floor_inf;\n\n                roundoff_limited_ok =\n                    result.final_max_abs <= roundoff_floor_inf;\n            }\n\n            result.roundoff_limited =\n                !strict_true_residual_ok && roundoff_limited_ok;\n\n            result.converged =\n                reason > 0 &&\n                (strict_true_residual_ok || roundoff_limited_ok);\n'''
+          if old not in text:
+              raise SystemExit('pressure true-residual acceptance block not found')
+          text = text.replace(old, new, 1)
+          p.write_text(text)
+
+          # ------------------------------------------------------------------
+          # 3. Never abort with an information-free pressure error again.
+          # ------------------------------------------------------------------
+          p = Path('src/solver/SolverDistributedProductionLoop.cpp')
+          text = p.read_text()
+          old_include = '#include <streambuf>\n#include <string>\n'
+          new_include = '#include <streambuf>\n#include <sstream>\n#include <string>\n'
+          if old_include not in text:
+              raise SystemExit('SolverDistributedProductionLoop.cpp include insertion point not found')
+          text = text.replace(old_include, new_include, 1)
+
+          old = '''            if (!pressure_result.converged)\n            {\n                throw std::runtime_error(\n                    "Persistent distributed pressure solve failed to converge");\n            }\n'''
+          new = '''            if (!pressure_result.converged)\n            {\n                std::ostringstream message;\n                message\n                    << "Persistent distributed pressure solve failed to converge"\n                    << ": reason=" << pressure_result.solver_reason\n                    << ", iterations=" << pressure_result.iterations\n                    << ", r0_l2=" << pressure_result.initial_l2\n                    << ", rf_l2=" << pressure_result.final_l2\n                    << ", CGrel=" << pressure_result.final_relative_l2\n                    << ", target_l2=" << pressure_result.acceptance_l2\n                    << ", rf_inf=" << pressure_result.final_max_abs\n                    << ", roundoff_floor_inf="\n                    << pressure_result.roundoff_floor_inf\n                    << ", rtol=" << s_.cfg.relToler\n                    << ", atol=" << s_.cfg.absToler;\n\n                throw std::runtime_error(message.str());\n            }\n'''
+          if old not in text:
+              raise SystemExit('distributed pressure failure block not found')
+          text = text.replace(old, new, 1)
+          p.write_text(text)
+
+          print('Applied pressure roundoff-aware convergence guard and diagnostics.')
+          PY
+
+      - name: Install MPI, PETSc and HYPRE
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y \
+            cmake g++ openmpi-bin libopenmpi-dev \
+            libpetsc-real-dev libhypre-dev pkg-config
+
+      - name: Resolve PETSc prefix
+        shell: bash
+        run: |
+          set -euo pipefail
+          if pkg-config --exists PETSc; then
+            PETSC_PREFIX="$(pkg-config --variable=prefix PETSc)"
+          elif pkg-config --exists petsc; then
+            PETSC_PREFIX="$(pkg-config --variable=prefix petsc)"
+          else
+            echo "PETSc pkg-config metadata not found" >&2
+            exit 1
+          fi
+          test -f "$PETSC_PREFIX/include/petsc.h"
+          test -d "$PETSC_PREFIX/lib"
+          echo "PETSC_DIR=$PETSC_PREFIX" >> "$GITHUB_ENV"
+          echo "PETSc prefix: $PETSC_PREFIX"
+
+      - name: Compile distributed MPI/PETSc target
+        shell: bash
+        run: |
+          set -euo pipefail
+          cmake -S . -B build-ci-pressure-roundoff \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCBS3D_ENABLE_MPI=ON \
+            -DCBS3D_ENABLE_PETSC=ON \
+            -DCBS3D_ENABLE_OPENMP=ON \
+            -DCBS3D_BUILD_TESTS=OFF \
+            -DCBS3D_BUILD_SOURCE_VALIDATION=OFF
+          cmake --build build-ci-pressure-roundoff -j 2
+
+      - name: Commit source patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add \
+            include/cbs/linalg/ConjugateGradient.hpp \
+            src/linalg/PetscPersistentDistributedPressureSystem.cpp \
+            src/solver/SolverDistributedProductionLoop.cpp
+          git commit -m 'Make PETSc pressure acceptance roundoff aware'
+          git push origin HEAD:integration/sa-mpi
