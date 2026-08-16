@@ -10,7 +10,9 @@
 //   -> owner-only update/strong BC -> forward updated fields.
 //
 // The PETSc pressure topology, matrix, KSP and AMG hierarchy are built once and
-// reused until the distributed calculation terminates.
+// reused until the distributed calculation terminates.  Under local
+// pseudo-timestepping only a genuine safety-triggered change of the frozen
+// element timestep field causes the pressure values/preconditioner to rebuild.
 //=============================================================================
 
 #include "cbs/solver/Solver.hpp"
@@ -22,6 +24,7 @@
 #include "cbs/assembly/PressureAssembly.hpp"
 #include "cbs/assembly/VelocityCorrectionAssembly.hpp"
 #include "cbs/boundary/Boundary.hpp"
+#include "cbs/boundary/DistributedSymmetry.hpp"
 #include "cbs/io/DistributedPost.hpp"
 #include "cbs/linalg/PetscPersistentDistributedPressureSystem.hpp"
 #include "cbs/parallel/Coloring.hpp"
@@ -386,57 +389,28 @@ namespace cbs
                     "Distributed htype=2 requires a shared-node minimum-length "
                     "halo operation");
             }
-
-            for (const Int ip : s.owned_nodes)
-            {
-                if (s.node_symmetry(ip) != 0)
-                {
-                    throw std::runtime_error(
-                        "Distributed symmetry requires a persistent nodal "
-                        "symmetry-normal operator");
-                }
-            }
         }
 
         //=====================================================================
-        // Establishes the timestep field for one distributed iteration.
+        // Establishs the timestep field for one distributed iteration.
         //
-        // Two regimes are supported.
+        // Local pseudo-timestepping is allowed only for a steady semi-implicit
+        // run with ilots=1/2 and without a fixed dt request.  TimeStep first
+        // computes the currently stable candidate field, including the SA
+        // diffusion restriction.  A frozen field is then used by all CBS
+        // substeps and by the pressure operator.
         //
-        // Global uniform timestep.
-        //     Every element and node is advanced with the smallest stable
-        //     timestep anywhere in the mesh.  This is required whenever the
-        //     pseudo-time path is physically meaningful, that is for a
-        //     transient run, and it is what a fixed dtfix requests.
+        // lts_refresh_margin is a true safety reserve: on every refresh the
+        // frozen field is set to
         //
-        // Local timestep.
-        //     Each element is advanced at its own stable rate.  For a
-        //     steady-state calculation the path through pseudo-time carries no
-        //     meaning and only the fixed point is sought, so advancing each
-        //     element at its own rate is a legitimate relaxation and converges
-        //     enormously faster on a stretched mesh: on a wall-resolved
-        //     flat-plate grid the near-wall cells are hundreds of times smaller
-        //     than the freestream cells, so a global timestep throttles the
-        //     entire domain to the rate of its smallest element and the flow
-        //     needs millions of iterations merely to cross the domain once.
+        //     dt_frozen = margin * dt_stable,current,  0 < margin <= 1.
         //
-        // The distributed subtlety is that the nodal timestep deltp is shared
-        // across partition interfaces.  TimeStep::computeTimeStep forms it from
-        // locally visible elements only, so each rank's value at an interface
-        // node is a minimum over a subset and is therefore too large.  Left
-        // uncorrected the two ranks would advance the same node with different
-        // dt, and since deltp enters the Step 2 pressure operator and the Step 3
-        // correction, the assembled system would depend on the partitioning.
-        // The nodal field is therefore reduced by minimum onto the owners and
-        // broadcast back to the ghosts before use.
-        //
-        // Element timesteps need no exchange: an element belongs to exactly one
-        // rank.
+        // The operator is refreshed only when a future stability evaluation
+        // falls below the frozen value.  Hence margin=0.8 provides 20% headroom
+        // without the former logic error that caused a rebuild every iteration.
         //=====================================================================
         bool distributed_local_timestep_enabled(const CBSStateSI& s)
         {
-            // Mirror the serial ilots semantics exactly rather than inventing a
-            // second rule, so that a case behaves the same way in both paths.
             if (s.cfg.ilots != 1 && s.cfg.ilots != 2)
             {
                 return false;
@@ -456,17 +430,20 @@ namespace cbs
 
         Real compute_communicator_timestep(
             CBSStateSI& s,
-            const Int iteration)
+            const Int global_iteration)
         {
-            TimeStep::computeTimeStep(s, iteration);
+            TimeStep::computeTimeStep(s, global_iteration);
 
-            if (distributed_local_timestep_enabled(s))
+            const bool fixed_startup_window =
+                s.cfg.dtfix_end > 0 &&
+                global_iteration <= s.cfg.dtfix_end;
+
+            const bool local_regime =
+                distributed_local_timestep_enabled(s) &&
+                !fixed_startup_window;
+
+            if (local_regime)
             {
-                // computeTimeStep has just written the currently stable
-                // timestep of every element and node.  Treat that as the
-                // candidate field, reconcile the nodal part across partition
-                // interfaces, and then decide whether the frozen field that the
-                // pressure operator was built from is still safe.
                 HaloExchange::minGhostContributionsToOwners(
                     s.deltp,
                     s.partition_metadata,
@@ -487,28 +464,38 @@ namespace cbs
                     s.partition_metadata,
                     MPI_COMM_WORLD);
 
-                // Stability monitor.
-                //
-                // The frozen field is unsafe as soon as any element's frozen
-                // timestep exceeds a margin fraction of the timestep that
-                // element can currently sustain.  The margin is below one so
-                // that the refresh happens before the frozen value actually
-                // violates stability rather than after.  This is the mechanism
-                // that keeps the method safe while nu_tilde grows and the SA
-                // diffusion limit tightens, which is exactly the regime in which
-                // a blindly frozen field would eventually diverge.
+                const Real margin = s.cfg.lts_refresh_margin;
+
+                if (!(margin > 0.0) ||
+                    margin > 1.0 ||
+                    !std::isfinite(margin))
+                {
+                    throw std::runtime_error(
+                        "LTS refresh margin must satisfy 0 < margin <= 1");
+                }
+
                 Int refresh_needed = s.lts_frozen_valid ? 0 : 1;
 
                 if (s.lts_frozen_valid)
                 {
-                    const Real margin = s.cfg.lts_refresh_margin > 0.0
-                        ? s.cfg.lts_refresh_margin
-                        : 0.8;
-
                     for (Int ie = 1; ie <= s.cfg.nelem; ++ie)
                     {
-                        if (s.lts_delte_frozen(ie) >
-                            margin * s.delte(ie))
+                        const Real current_stable = s.delte(ie);
+                        const Real frozen = s.lts_delte_frozen(ie);
+
+                        if (!(current_stable > 0.0) ||
+                            !std::isfinite(current_stable) ||
+                            !(frozen > 0.0) ||
+                            !std::isfinite(frozen))
+                        {
+                            throw std::runtime_error(
+                                "Invalid candidate/frozen element timestep in LTS monitor");
+                        }
+
+                        // The frozen value already contains the requested safety
+                        // reserve.  Refresh exactly when that reserved value is
+                        // no longer within the current stability bound.
+                        if (frozen > current_stable)
                         {
                             refresh_needed = 1;
                             break;
@@ -516,9 +503,6 @@ namespace cbs
                     }
                 }
 
-                // Every rank must reach the same decision, or some would rebuild
-                // the pressure operator while others did not and the next
-                // collective solve would deadlock.
                 Int global_refresh = 0;
 
                 check_mpi(
@@ -535,22 +519,22 @@ namespace cbs
                 {
                     for (Int ie = 1; ie <= s.cfg.nelem; ++ie)
                     {
-                        s.lts_delte_frozen(ie) = s.delte(ie);
+                        s.lts_delte_frozen(ie) = margin * s.delte(ie);
                     }
 
                     for (Int ip = 1; ip <= s.cfg.npoin; ++ip)
                     {
-                        s.lts_deltp_frozen(ip) = s.deltp(ip);
-                        s.lts_deltp2_frozen(ip) = s.deltp2(ip);
+                        s.lts_deltp_frozen(ip) = margin * s.deltp(ip);
+                        s.lts_deltp2_frozen(ip) = margin * s.deltp2(ip);
                     }
 
                     s.lts_frozen_valid = true;
                     ++s.cfg.lts_refresh_count;
                 }
 
-                // Install the frozen field.  Everything downstream, including
-                // the momentum time diagonals and the pressure operator, must
-                // use the same timestep the operator was assembled with.
+                // Install one internally consistent frozen field.  Momentum,
+                // SA characteristic stabilisation, thermal time diagonals and
+                // the pressure operator all see the same element pseudo-dt.
                 for (Int ie = 1; ie <= s.cfg.nelem; ++ie)
                 {
                     s.delte(ie) = s.lts_delte_frozen(ie);
@@ -565,7 +549,6 @@ namespace cbs
 
                 Real local_minimum =
                     std::numeric_limits<Real>::max();
-
                 Real local_maximum = 0.0;
 
                 for (Int ie = 1; ie <= s.cfg.nelem; ++ie)
@@ -598,21 +581,27 @@ namespace cbs
 
                 const Real global_minimum = -global_extrema[0];
 
-                if (global_minimum <= 0.0 || !std::isfinite(global_minimum))
+                if (global_minimum <= 0.0 ||
+                    !std::isfinite(global_minimum) ||
+                    global_extrema[1] < global_minimum ||
+                    !std::isfinite(global_extrema[1]))
                 {
                     throw std::runtime_error(
-                        "Distributed production loop obtained invalid timestep");
+                        "Distributed production loop obtained invalid LTS extrema");
                 }
 
                 s.cfg.dtreal = global_minimum;
                 s.cfg.lts_dt_min = global_minimum;
                 s.cfg.lts_dt_max = global_extrema[1];
-
                 s.lts_operator_stale = global_refresh != 0;
 
                 return global_minimum;
             }
 
+            // Global uniform path.  The pressure matrix is assembled in the
+            // normalised form (dt_e/dt_ref)H.  Since dt_e == dt_ref here, its
+            // values remain the geometry-only operator even if this adaptive
+            // global dt changes between iterations; only the RHS scaling changes.
             Real local_minimum =
                 std::numeric_limits<Real>::max();
 
@@ -654,6 +643,7 @@ namespace cbs
             }
 
             s.cfg.dtreal = global_minimum;
+            s.lts_operator_stale = false;
             return global_minimum;
         }
 
@@ -1058,7 +1048,9 @@ namespace cbs
             return metrics;
         }
 
-        bool steady_state_reached(const CBSStateSI& s)
+        bool steady_state_reached(
+            const CBSStateSI& s,
+            const Real turbulence_residual)
         {
             const Real velocity_residual =
                 std::max({s.hb[0], s.hb[3], s.hb[6]});
@@ -1076,7 +1068,16 @@ namespace cbs
                 s.cfg.l2norm_pres_tolerance <= 0.0 ||
                 s.hb[9] < s.cfg.l2norm_pres_tolerance;
 
-            return velocity_ok && temperature_ok && pressure_ok;
+            const bool turbulence_ok =
+                s.cfg.sa_check < 1 ||
+                s.cfg.turbulence_on < 1 ||
+                turbulence_residual < s.cfg.l2norm_sa_tolerance;
+
+            return
+                velocity_ok &&
+                temperature_ok &&
+                pressure_ok &&
+                turbulence_ok;
         }
 
         bool transient_end_time_reached(const CBSStateSI& s)
@@ -1137,6 +1138,7 @@ namespace cbs
 
         ThermalBoundaryState thermal_boundary(s_.cfg.npoin);
         PetscPersistentDistributedPressureSystem pressure_system;
+        DistributedSymmetryProjector symmetry_projector;
 
         {
             const ScopedStdoutSilence setup_stdout(
@@ -1152,6 +1154,7 @@ namespace cbs
             reject_unsupported_options(s_);
 
             PressureAssembly::buildElementPressureTerms(s_);
+            symmetry_projector.initialise(s_);
 
             if (s_.cfg.temp_calc > 0)
             {
@@ -1159,6 +1162,7 @@ namespace cbs
             }
 
             Boundary::applyOwnedVelocityConstraints(s_);
+            symmetry_projector.applyOwned(s_);
             apply_owned_pressure_constraints(s_);
 
             if (s_.cfg.temp_calc > 0)
@@ -1186,9 +1190,6 @@ namespace cbs
 
             updateVelocityMagnitude();
 
-            // Wall distance, SA node classification and the initial eddy
-            // viscosity.  This must run before the first Step 1, because the
-            // momentum assembly reads mu_eff_e.
             if (s_.mpi_rank == 0)
             {
                 if (distributed_local_timestep_enabled(s_))
@@ -1196,30 +1197,41 @@ namespace cbs
                     std::cout
                         << "  Timestep regime : LOCAL (ilots="
                         << s_.cfg.ilots << ")\n"
-                        << "    Each element advances at its own stable rate."
-                           " Valid because this is a\n"
-                           "    steady-state run, where the path through"
-                           " pseudo-time carries no meaning\n"
-                           "    and only the fixed point is sought. Reported dt"
-                           " is the global minimum.\n";
+                        << "    Element-local pseudo-time is used only for"
+                           " steady relaxation.\n"
+                        << "    The frozen field carries an explicit safety"
+                           " reserve and is refreshed only\n"
+                        << "    when the current momentum/thermal/SA stability"
+                           " bound becomes tighter.\n";
                 }
                 else
                 {
                     std::cout
                         << "  Timestep regime : GLOBAL UNIFORM\n"
-                        << "    Every element advances at the smallest stable"
-                           " timestep in the mesh.\n"
-                           "    On a stretched wall-resolved mesh this throttles"
-                           " the whole domain to the\n"
-                           "    rate of its smallest cell. For a steady run set"
-                           " ilots=1 and dtfixed=0\n"
-                           "    to enable local timestepping.\n";
+                        << "    Every element advances with one communicator-wide"
+                           " timestep.\n";
                 }
             }
 
+            // SA preprocessing must precede the first timestep calculation: the
+            // stability bound uses nu_tilde_e and mu_eff_e.  Conversely the
+            // timestep must precede pressure-system initialisation because the
+            // local pressure operator uses dt_e/dt_ref weights.
             TurbulencePreprocess::prepareSpalartAllmaras(s_);
 
+            const Int first_global_iteration =
+                s_.cfg.iiter_total + 1;
+
+            compute_communicator_timestep(
+                s_,
+                first_global_iteration);
+
             pressure_system.initialise(s_);
+
+            // initialise() assembled the operator from the field established
+            // immediately above, so that initial refresh has already been
+            // consumed and must not trigger a redundant AMG rebuild at iter 1.
+            s_.lts_operator_stale = false;
         }
 
         double local_setup_seconds = MPI_Wtime() - setup_start;
@@ -1288,16 +1300,19 @@ namespace cbs
                     MPI_COMM_WORLD);
             }
 
+            const Int global_iteration =
+                s_.cfg.iiter_total + iteration;
+
             const Real global_dt =
-                compute_communicator_timestep(s_, iteration);
+                compute_communicator_timestep(
+                    s_,
+                    global_iteration);
 
             if (s_.cfg.transient_on > 0)
             {
                 s_.cfg.rtime += global_dt;
             }
 
-            // The pressure operator is assembled from the frozen element
-            // timesteps, so it must be rewritten whenever that field changes.
             if (s_.lts_operator_stale)
             {
                 pressure_system.rebuildOperator(s_);
@@ -1306,8 +1321,8 @@ namespace cbs
                 if (s_.mpi_rank == 0)
                 {
                     std::cout
-                        << "  [LTS] timestep field refreshed at iteration "
-                        << iteration
+                        << "  [LTS] timestep field refreshed at global iteration "
+                        << global_iteration
                         << " (refresh " << s_.cfg.lts_refresh_count
                         << "); pressure operator and preconditioner rebuilt\n";
                 }
@@ -1340,6 +1355,7 @@ namespace cbs
             }
 
             Boundary::applyOwnedVelocityConstraints(s_);
+            symmetry_projector.applyOwned(s_);
 
             HaloExchange::broadcastOwnedToGhosts(
                 s_.unkno,
@@ -1418,28 +1434,19 @@ namespace cbs
             }
 
             Boundary::applyOwnedVelocityConstraints(s_);
+            symmetry_projector.applyOwned(s_);
 
             HaloExchange::broadcastOwnedToGhosts(
                 s_.unkno,
                 s_.partition_metadata,
                 MPI_COMM_WORLD);
 
-            // Step SA: Spalart-Allmaras transport.
-            //
-            // It runs after Step 3 because the SA advection and vorticity
-            // production need the corrected velocity, and before Step 4 because
-            // the energy assembly reads k_eff_e.  Steps::stepSpalartAllmaras
-            // performs its own interface exchanges: the element-assembled
-            // accumulators are summed onto their owners before the nodal update
-            // and nu_tilde is broadcast back to the ghost layer afterwards.
             if (s_.cfg.turbulence_on > 0)
             {
                 s_.nu_tilde1 = s_.nu_tilde;
-
                 Steps::stepSpalartAllmaras(s_);
             }
 
-            // CBS Step 4: thermal assembly over fluid and solid elements.
             if (s_.cfg.temp_calc > 0)
             {
                 {
@@ -1479,8 +1486,6 @@ namespace cbs
                     s_,
                     local_maximum_velocity_correction);
 
-            // Collective, so it must be executed by every rank on every
-            // iteration rather than only on the ranks that print.
             const Convergence::TurbulenceDiagnostics turbulence_diagnostics =
                 Convergence::turbulenceDiagnostics(s_);
 
@@ -1535,7 +1540,9 @@ namespace cbs
             }
             else if (s_.cfg.transient_on < 1 &&
                      iteration >= s_.cfg.steady_min_iterations &&
-                     steady_state_reached(s_))
+                     steady_state_reached(
+                         s_,
+                         turbulence_diagnostics.residual))
             {
                 stop_reason = "steady-state convergence reached";
                 stop_now = true;
