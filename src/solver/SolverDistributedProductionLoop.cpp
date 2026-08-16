@@ -1580,6 +1580,7 @@ namespace cbs
                     << "  dt=" << global_dt
                     << "  CG=" << pressure_result.iterations
                     << "  CGrel=" << pressure_result.final_relative_l2
+                    << "  CGfloor=" << (pressure_result.roundoff_limited ? 1 : 0)
                     << "  RelU=" << metrics.relative_u
                     << "  RelV=" << metrics.relative_v
                     << "  RelW=" << metrics.relative_w
