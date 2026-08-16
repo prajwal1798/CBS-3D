@@ -19,6 +19,8 @@
 
 #include "cbs/timestep/TimeStep.hpp"
 
+#include "cbs/turbulence/SpalartAllmaras.hpp"
+
 #include <algorithm>
 #include <cmath>
 #include <limits>
@@ -264,6 +266,43 @@ namespace cbs
                     }
 
                     diff = std::max(diff, nu);
+
+                    // Spalart-Allmaras diffusion limit.
+                    //
+                    // The SA transport equation is advanced explicitly and its
+                    // diffusion coefficient is
+                    //
+                    //     D_SA = (nu + nu_tilde) / sigma
+                    //
+                    // which is not nu_eff.  Since nu_t = nu_tilde * fv1 with
+                    // fv1 <= 1, the transported variable exceeds the eddy
+                    // viscosity it produces, and sigma = 2/3 divides rather than
+                    // multiplies, so D_SA can exceed nu_eff by a factor of order
+                    // 1/sigma even where the model is behaving.  Sizing the
+                    // timestep on nu_eff alone therefore leaves the SA equation
+                    // unprotected, which matters because SA has already been
+                    // observed to destabilise on this solver while the momentum
+                    // field still looked healthy.
+                    if (s.cfg.turbulence_on > 0)
+                    {
+                        const turbulence::SpalartAllmarasConstants sa_constants;
+
+                        const Real nu_tilde_e = s.nu_tilde_e(ie);
+
+                        if (nu_tilde_e < 0.0 || !std::isfinite(nu_tilde_e))
+                        {
+                            throw std::runtime_error(
+                                "TimeStep - invalid nu_tilde_e at element "
+                                + std::to_string(ie));
+                        }
+
+                        const Real molecular_nu = s.mu_e(ie) / s.rho_e(ie);
+
+                        const Real sa_diffusivity =
+                            (molecular_nu + nu_tilde_e) / sa_constants.sigma;
+
+                        diff = std::max(diff, sa_diffusivity);
+                    }
                 }
             }
 

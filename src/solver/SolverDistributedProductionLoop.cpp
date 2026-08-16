@@ -462,8 +462,11 @@ namespace cbs
 
             if (distributed_local_timestep_enabled(s))
             {
-                // Reconcile the shared nodal timesteps, then publish the
-                // reconciled value to the ghost layer.
+                // computeTimeStep has just written the currently stable
+                // timestep of every element and node.  Treat that as the
+                // candidate field, reconcile the nodal part across partition
+                // interfaces, and then decide whether the frozen field that the
+                // pressure operator was built from is still safe.
                 HaloExchange::minGhostContributionsToOwners(
                     s.deltp,
                     s.partition_metadata,
@@ -483,6 +486,82 @@ namespace cbs
                     s.deltp2,
                     s.partition_metadata,
                     MPI_COMM_WORLD);
+
+                // Stability monitor.
+                //
+                // The frozen field is unsafe as soon as any element's frozen
+                // timestep exceeds a margin fraction of the timestep that
+                // element can currently sustain.  The margin is below one so
+                // that the refresh happens before the frozen value actually
+                // violates stability rather than after.  This is the mechanism
+                // that keeps the method safe while nu_tilde grows and the SA
+                // diffusion limit tightens, which is exactly the regime in which
+                // a blindly frozen field would eventually diverge.
+                Int refresh_needed = s.lts_frozen_valid ? 0 : 1;
+
+                if (s.lts_frozen_valid)
+                {
+                    const Real margin = s.cfg.lts_refresh_margin > 0.0
+                        ? s.cfg.lts_refresh_margin
+                        : 0.8;
+
+                    for (Int ie = 1; ie <= s.cfg.nelem; ++ie)
+                    {
+                        if (s.lts_delte_frozen(ie) >
+                            margin * s.delte(ie))
+                        {
+                            refresh_needed = 1;
+                            break;
+                        }
+                    }
+                }
+
+                // Every rank must reach the same decision, or some would rebuild
+                // the pressure operator while others did not and the next
+                // collective solve would deadlock.
+                Int global_refresh = 0;
+
+                check_mpi(
+                    MPI_Allreduce(
+                        &refresh_needed,
+                        &global_refresh,
+                        1,
+                        MPI_INT,
+                        MPI_MAX,
+                        MPI_COMM_WORLD),
+                    "MPI_Allreduce local timestep refresh decision");
+
+                if (global_refresh != 0)
+                {
+                    for (Int ie = 1; ie <= s.cfg.nelem; ++ie)
+                    {
+                        s.lts_delte_frozen(ie) = s.delte(ie);
+                    }
+
+                    for (Int ip = 1; ip <= s.cfg.npoin; ++ip)
+                    {
+                        s.lts_deltp_frozen(ip) = s.deltp(ip);
+                        s.lts_deltp2_frozen(ip) = s.deltp2(ip);
+                    }
+
+                    s.lts_frozen_valid = true;
+                    ++s.cfg.lts_refresh_count;
+                }
+
+                // Install the frozen field.  Everything downstream, including
+                // the momentum time diagonals and the pressure operator, must
+                // use the same timestep the operator was assembled with.
+                for (Int ie = 1; ie <= s.cfg.nelem; ++ie)
+                {
+                    s.delte(ie) = s.lts_delte_frozen(ie);
+                }
+
+                for (Int ip = 1; ip <= s.cfg.npoin; ++ip)
+                {
+                    s.deltp(ip) = s.lts_deltp_frozen(ip);
+                    s.deltp1(ip) = s.lts_deltp_frozen(ip);
+                    s.deltp2(ip) = s.lts_deltp2_frozen(ip);
+                }
 
                 Real local_minimum =
                     std::numeric_limits<Real>::max();
@@ -525,12 +604,11 @@ namespace cbs
                         "Distributed production loop obtained invalid timestep");
                 }
 
-                // dtreal is the reference timestep quoted in the monitor and the
-                // restart metadata.  With a local timestep there is no single
-                // physical dt, so the smallest is reported: it is the value that
-                // bounds stability and it matches what a global-timestep run of
-                // the same mesh would have used.
                 s.cfg.dtreal = global_minimum;
+                s.cfg.lts_dt_min = global_minimum;
+                s.cfg.lts_dt_max = global_extrema[1];
+
+                s.lts_operator_stale = global_refresh != 0;
 
                 return global_minimum;
             }
@@ -1218,6 +1296,23 @@ namespace cbs
                 s_.cfg.rtime += global_dt;
             }
 
+            // The pressure operator is assembled from the frozen element
+            // timesteps, so it must be rewritten whenever that field changes.
+            if (s_.lts_operator_stale)
+            {
+                pressure_system.rebuildOperator(s_);
+                s_.lts_operator_stale = false;
+
+                if (s_.mpi_rank == 0)
+                {
+                    std::cout
+                        << "  [LTS] timestep field refreshed at iteration "
+                        << iteration
+                        << " (refresh " << s_.cfg.lts_refresh_count
+                        << "); pressure operator and preconditioner rebuilt\n";
+                }
+            }
+
             build_distributed_time_diagonals(s_);
 
             // CBS Step 1: local owned-element momentum assembly, reverse-add,
@@ -1474,6 +1569,19 @@ namespace cbs
                         << "  RelT=" << metrics.relative_temperature
                         << "  Tmin=" << metrics.minimum_temperature
                         << "  Tmax=" << metrics.maximum_temperature;
+                }
+
+                if (distributed_local_timestep_enabled(s_))
+                {
+                    const Real ratio = s_.cfg.lts_dt_min > 0.0
+                        ? s_.cfg.lts_dt_max / s_.cfg.lts_dt_min
+                        : 0.0;
+
+                    std::cout
+                        << "  LTSdt=[" << s_.cfg.lts_dt_min
+                        << "," << s_.cfg.lts_dt_max << "]"
+                        << "  LTSratio=" << ratio
+                        << "  LTSrefresh=" << s_.cfg.lts_refresh_count;
                 }
 
                 if (s_.cfg.turbulence_on > 0)

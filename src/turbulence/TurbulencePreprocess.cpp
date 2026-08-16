@@ -69,7 +69,28 @@ namespace cbs
                 << stats.max_distance << "\n";
         }
 
-        TurbulenceBoundary::initialiseNuTilde(s);
+        // Restart safety.
+        //
+        // The native checkpoint stores and restores nu_tilde, but calling
+        // initialiseNuTilde here unconditionally overwrote it with the
+        // freestream value, so a restart silently discarded the turbulence
+        // field it had just loaded and began the SA solution again from
+        // scratch.  On restart the loaded field is kept and only the boundary
+        // values are reapplied.
+        //
+        // istart is set to 2 by RestartIO::initialise_restart_histories, so it
+        // is the authoritative indicator that a checkpoint was loaded.
+        const bool restarted = s.cfg.istart > 1;
+
+        if (restarted)
+        {
+            TurbulenceBoundary::applyWallValues(s);
+            TurbulenceBoundary::applyInletValues(s);
+        }
+        else
+        {
+            TurbulenceBoundary::initialiseNuTilde(s);
+        }
 
         // initialiseNuTilde re-runs the local classification, so the interface
         // reduction has to be repeated before the field is exchanged.
@@ -84,6 +105,19 @@ namespace cbs
                 MPI_COMM_WORLD);
         }
 #endif
+
+        // The previous-step field must match the restored field, otherwise the
+        // first SA residual after a restart is measured against the freestream
+        // value and reports a spurious jump.
+        s.nu_tilde1 = s.nu_tilde;
+
+        if (s.mpi_rank == 0)
+        {
+            std::cout
+                << (restarted
+                    ? "  Spalart-Allmaras: nu_tilde restored from checkpoint\n"
+                    : "  Spalart-Allmaras: nu_tilde initialised from freestream\n");
+        }
 
         // updateEddyViscosity reduces its own nodal averages across interfaces.
         SpalartAllmarasAssembly::updateEddyViscosity(s);

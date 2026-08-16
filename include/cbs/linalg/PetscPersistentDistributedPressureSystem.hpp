@@ -42,6 +42,11 @@ namespace cbs
         // hierarchy. This routine must be called collectively exactly once.
         void initialise(CBSStateSI& s);
 
+        // Rewrites the operator after the frozen local-timestep field is
+        // refreshed.  Reuses the existing Mat object and sparsity pattern and
+        // forces the preconditioner to be rebuilt.
+        void rebuildOperator(CBSStateSI& s);
+
         // Updates only the pressure RHS and initial guess, then solves using the
         // already-built matrix and preconditioner hierarchy.
         ConjugateGradient::Result solve(CBSStateSI& s);
@@ -52,6 +57,9 @@ namespace cbs
         [[nodiscard]] bool ready() const noexcept;
 
     private:
+        // Assembles A_p = sum_e dt_e H_e into the persistent matrix.
+        void assembleOperator(CBSStateSI& s);
+
         struct Impl;
         Impl* impl_ = nullptr;
     };

@@ -115,6 +115,24 @@ namespace cbs
 
         // Restart, wall and iteration bookkeeping.
         Int istart = 1;
+
+        // Extrema of the element timestep field under local timestepping,
+        // published by the distributed loop for the iteration monitor.  Not read
+        // from the parameter file.
+        // Safety margin for the frozen local-timestep field.
+        //
+        // A refresh is triggered when the frozen timestep of any element exceeds
+        // this fraction of that element's currently stable timestep.  Below one
+        // the field is refreshed before it actually becomes unstable, which is
+        // what makes the scheme safe as nu_tilde grows and the SA diffusion
+        // limit tightens.
+        Real lts_refresh_margin = 0.8;
+
+        // Number of refreshes performed, reported by the monitor.
+        Int lts_refresh_count = 0;
+
+        Real lts_dt_min = 0.0;
+        Real lts_dt_max = 0.0;
         Int iitime_start = 1;
         Int npoin_wall = 0;
         Int itrail = 0;

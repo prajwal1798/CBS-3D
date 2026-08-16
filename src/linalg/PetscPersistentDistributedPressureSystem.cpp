@@ -243,6 +243,170 @@ namespace cbs
         return impl_ != nullptr && impl_->ready;
     }
 
+    namespace
+    {
+        bool local_timestepping_active(const CBSStateSI& s)
+        {
+            return (s.cfg.ilots == 1 || s.cfg.ilots == 2)
+                && s.cfg.transient_on == 0
+                && s.cfg.solver_opt <= 1
+                && s.cfg.dtfixed == 0;
+        }
+    }
+
+    //=========================================================================
+    // Assembles A_p = sum_e dt_e H_e into the persistent matrix.
+    //
+    // The sparsity pattern is fixed by the mesh and never changes, so the same
+    // Mat object is reused and only its values are rewritten.  That is what
+    // makes an occasional refresh of the frozen timestep field affordable: the
+    // expensive part of a rebuild is the algebraic-multigrid setup, not this
+    // assembly.
+    //=========================================================================
+    void PetscPersistentDistributedPressureSystem::assembleOperator(
+        CBSStateSI& s)
+    {
+        check_petsc(
+            MatZeroEntries(impl_->matrix),
+            "MatZeroEntries(pressure operator)");
+
+        constexpr Int pair_a[6] = {1, 1, 1, 2, 2, 3};
+        constexpr Int pair_b[6] = {2, 3, 4, 3, 4, 4};
+
+        for (Int ie = 1; ie <= s.cfg.nelem; ++ie)
+        {
+            if (s.mat_elem(ie) != 0)
+            {
+                continue;
+            }
+
+            // The CBS pressure operator carries the element timestep:
+            //
+            //     A_p = sum_e dt_e H_e
+            //
+            // matching TimeStep::updateLhsDiagonal, which builds the serial
+            // operator as gstifE * dt.  Under a uniform timestep this is dt*H
+            // with the raw divergence on the right, the same linear system as a
+            // geometry-only matrix with the right-hand side divided by dt.
+            // Under local timestepping the two differ, and only this form leaves
+            // the corrected velocity solenoidal.
+            const Real element_dt = s.delte(ie);
+
+            if (!(element_dt > 0.0) || !std::isfinite(element_dt))
+            {
+                throw std::runtime_error(
+                    "Invalid element timestep during pressure operator assembly");
+            }
+
+            PetscInt rows[4] = {};
+            PetscScalar element_matrix[16] = {};
+
+            for (Int a = 1; a <= s.cfg.nep; ++a)
+            {
+                const Int ip = s.intma(a, ie);
+                const Int dof = impl_->pressure_dof(ip);
+
+                if (dof < 0)
+                {
+                    throw std::runtime_error(
+                        "Fluid element contains an inactive pressure node");
+                }
+
+                rows[a - 1] = static_cast<PetscInt>(dof);
+
+                const Real diagonal =
+                    s.pdiagE(element_node_index(s, ie, a));
+
+                if (diagonal <= 0.0 ||
+                    !std::isfinite(diagonal))
+                {
+                    throw std::runtime_error(
+                        "Invalid geometry-only pressure diagonal");
+                }
+
+                element_matrix[(a - 1) * 4 + (a - 1)] =
+                    static_cast<PetscScalar>(diagonal * element_dt);
+            }
+
+            for (Int pair = 0; pair < s.cfg.gsdim; ++pair)
+            {
+                const Real coupling =
+                    s.gstifE(
+                        offdiag_index(s, ie, pair + 1));
+
+                if (!std::isfinite(coupling))
+                {
+                    throw std::runtime_error(
+                        "Invalid geometry-only pressure coupling");
+                }
+
+                const Int a = pair_a[pair] - 1;
+                const Int b = pair_b[pair] - 1;
+
+                element_matrix[a * 4 + b] =
+                    static_cast<PetscScalar>(coupling * element_dt);
+
+                element_matrix[b * 4 + a] =
+                    static_cast<PetscScalar>(coupling * element_dt);
+            }
+
+            check_petsc(
+                MatSetValues(
+                    impl_->matrix,
+                    4,
+                    rows,
+                    4,
+                    rows,
+                    element_matrix,
+                    ADD_VALUES),
+                "MatSetValues(element pressure matrix)");
+        }
+
+        check_petsc(
+            MatAssemblyBegin(
+                impl_->matrix,
+                MAT_FINAL_ASSEMBLY),
+            "MatAssemblyBegin");
+
+        check_petsc(
+            MatAssemblyEnd(
+                impl_->matrix,
+                MAT_FINAL_ASSEMBLY),
+            "MatAssemblyEnd");
+    }
+
+
+    //=========================================================================
+    // Rewrites the pressure operator after the frozen timestep field changes.
+    //
+    // Invoked only when the stability monitor judges the frozen field unsafe,
+    // so the multigrid setup cost is amortised over the many iterations between
+    // refreshes rather than paid every step.
+    //
+    // KSPSetOperators is called again so PETSc discards the preconditioner built
+    // for the previous operator.  The sparsity pattern is unchanged, so no
+    // reallocation occurs.
+    //=========================================================================
+    void PetscPersistentDistributedPressureSystem::rebuildOperator(
+        CBSStateSI& s)
+    {
+        if (impl_ == nullptr || !impl_->ready)
+        {
+            throw std::runtime_error(
+                "Persistent distributed pressure system is not initialised");
+        }
+
+        assembleOperator(s);
+
+        check_petsc(
+            KSPSetOperators(
+                impl_->ksp,
+                impl_->matrix,
+                impl_->matrix),
+            "KSPSetOperators(rebuild)");
+    }
+
+
     void PetscPersistentDistributedPressureSystem::initialise(CBSStateSI& s)
     {
         if (impl_ == nullptr)
@@ -409,91 +573,7 @@ namespace cbs
                 PETSC_TRUE),
             "MatSetOption(ignore zero entries)");
 
-        constexpr Int pair_a[6] = {1, 1, 1, 2, 2, 3};
-        constexpr Int pair_b[6] = {2, 3, 4, 3, 4, 4};
-
-        for (Int ie = 1; ie <= s.cfg.nelem; ++ie)
-        {
-            if (s.mat_elem(ie) != 0)
-            {
-                continue;
-            }
-
-            PetscInt rows[4] = {};
-            PetscScalar element_matrix[16] = {};
-
-            for (Int a = 1; a <= s.cfg.nep; ++a)
-            {
-                const Int ip = s.intma(a, ie);
-                const Int dof = impl_->pressure_dof(ip);
-
-                if (dof < 0)
-                {
-                    throw std::runtime_error(
-                        "Fluid element contains an inactive pressure node");
-                }
-
-                rows[a - 1] = static_cast<PetscInt>(dof);
-
-                const Real diagonal =
-                    s.pdiagE(element_node_index(s, ie, a));
-
-                if (diagonal <= 0.0 ||
-                    !std::isfinite(diagonal))
-                {
-                    throw std::runtime_error(
-                        "Invalid geometry-only pressure diagonal");
-                }
-
-                element_matrix[(a - 1) * 4 + (a - 1)] =
-                    static_cast<PetscScalar>(diagonal);
-            }
-
-            for (Int pair = 0; pair < s.cfg.gsdim; ++pair)
-            {
-                const Real coupling =
-                    s.gstifE(
-                        offdiag_index(s, ie, pair + 1));
-
-                if (!std::isfinite(coupling))
-                {
-                    throw std::runtime_error(
-                        "Invalid geometry-only pressure coupling");
-                }
-
-                const Int a = pair_a[pair] - 1;
-                const Int b = pair_b[pair] - 1;
-
-                element_matrix[a * 4 + b] =
-                    static_cast<PetscScalar>(coupling);
-
-                element_matrix[b * 4 + a] =
-                    static_cast<PetscScalar>(coupling);
-            }
-
-            check_petsc(
-                MatSetValues(
-                    impl_->matrix,
-                    4,
-                    rows,
-                    4,
-                    rows,
-                    element_matrix,
-                    ADD_VALUES),
-                "MatSetValues(element pressure matrix)");
-        }
-
-        check_petsc(
-            MatAssemblyBegin(
-                impl_->matrix,
-                MAT_FINAL_ASSEMBLY),
-            "MatAssemblyBegin");
-
-        check_petsc(
-            MatAssemblyEnd(
-                impl_->matrix,
-                MAT_FINAL_ASSEMBLY),
-            "MatAssemblyEnd");
+        assembleOperator(s);
 
         check_petsc(
             MatCreateVecs(
@@ -737,11 +817,10 @@ namespace cbs
                 MPI_COMM_WORLD),
             "MPI_Allreduce maximum pressure timestep");
 
-        // local_dt remains the communicator-wide reference timestep.  Under
-        // local timestepping it is the global minimum, so using it to scale the
-        // solver tolerance and the reported residual norms is conservative:
-        // the tolerance becomes stricter than any individual node requires
-        // rather than looser.
+        // The operator carries the element timestep, so the linear residual is
+        // already in the units of the raw weak divergence and needs no dt
+        // rescaling.  dtreal is still required to agree across the communicator
+        // because it is the reported reference timestep.
         const Real timestep_scale =
             std::max(1.0, std::abs(local_dt));
 
@@ -799,30 +878,9 @@ namespace cbs
             }
             else
             {
-                // The Step 2 pressure equation is scaled by the timestep of
-                // the node being assembled, not by a single scalar.
-                //
-                // Under a global timestep compute_communicator_timestep sets
-                // deltp(ip) equal to dtreal at every node, so this is exactly
-                // the previous expression and the assembled system is
-                // bit-identical.  Under local timestepping each node carries its
-                // own dt, and using one scalar would scale the divergence of the
-                // intermediate velocity inconsistently from node to node.
-                //
-                // The matrix itself is geometry-only and therefore independent
-                // of the timestep, which is what allows it to remain persistent
-                // in both regimes.
-                const Real node_dt = s.deltp(ip);
-
-                if (!(node_dt > 0.0) || !std::isfinite(node_dt))
-                {
-                    throw std::runtime_error(
-                        "Persistent pressure solve encountered an invalid nodal "
-                        "timestep at an owned node");
-                }
-
-                const Real scaled_rhs =
-                    s.rhs1(ip) / node_dt;
+                // The matrix carries the element timestep, so the right-hand
+                // side is the raw weak divergence.
+                const Real scaled_rhs = s.rhs1(ip);
 
                 check_petsc(
                     VecSetValue(
@@ -895,7 +953,7 @@ namespace cbs
             KSPSetTolerances(
                 impl_->ksp,
                 static_cast<PetscReal>(s.cfg.relToler),
-                static_cast<PetscReal>(s.cfg.absToler / local_dt),
+                static_cast<PetscReal>(s.cfg.absToler),
                 PETSC_DEFAULT,
                 static_cast<PetscInt>(s.cfg.cg_max_iter)),
             "KSPSetTolerances");
@@ -912,7 +970,7 @@ namespace cbs
             vector_l2_norm(impl_->residual);
 
         result.initial_l2 =
-            local_dt * scaled_initial_l2;
+            scaled_initial_l2;
 
         result.final_l2 = result.initial_l2;
         result.final_relative_l2 =
@@ -921,7 +979,7 @@ namespace cbs
                 : 0.0;
 
         result.final_max_abs =
-            local_dt * vector_max_norm(impl_->residual);
+            vector_max_norm(impl_->residual);
 
         if (scaled_initial_l2 > 1.0e-300)
         {
@@ -961,13 +1019,13 @@ namespace cbs
                 static_cast<Int>(iterations);
 
             result.final_l2 =
-                local_dt * scaled_final_l2;
+                scaled_final_l2;
 
             result.final_relative_l2 =
                 scaled_final_l2 / scaled_initial_l2;
 
             result.final_max_abs =
-                local_dt * vector_max_norm(impl_->residual);
+                vector_max_norm(impl_->residual);
 
             result.converged = reason > 0;
         }
