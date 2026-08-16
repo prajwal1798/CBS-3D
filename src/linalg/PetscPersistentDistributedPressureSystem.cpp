@@ -808,6 +808,16 @@ namespace cbs
             KSPSetFromOptions(impl_->ksp),
             "KSPSetFromOptions");
 
+        // Convergence must be measured in the physical (unpreconditioned)
+        // pressure residual.  With AMG the preconditioned norm can become tiny
+        // even while ||b-Ap||/||r0|| is still O(1e-1), which previously let
+        // late steady iterations terminate after only a few CG steps.
+        check_petsc(
+            KSPSetNormType(
+                impl_->ksp,
+                KSP_NORM_UNPRECONDITIONED),
+            "KSPSetNormType(KSP_NORM_UNPRECONDITIONED)");
+
         check_petsc(
             KSPSetUp(impl_->ksp),
             "KSPSetUp(persistent pressure)");
@@ -1070,7 +1080,17 @@ namespace cbs
             result.final_max_abs =
                 vector_max_norm(impl_->residual);
 
-            result.converged = reason > 0;
+            // PETSc's reason must agree with the explicitly recomputed true
+            // residual.  This prevents a preconditioner-dependent convergence
+            // decision from being accepted as a pressure solve.
+            const Real true_residual_target =
+                std::max(
+                    std::max(0.0, s.cfg.absToler),
+                    std::max(0.0, s.cfg.relToler) * scaled_initial_l2);
+
+            result.converged =
+                reason > 0 &&
+                scaled_final_l2 <= true_residual_target;
         }
         else
         {
