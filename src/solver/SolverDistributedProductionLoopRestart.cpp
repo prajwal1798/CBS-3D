@@ -7,9 +7,11 @@
 // translation unit compiles that implementation once with controlled
 // substitutions for restart preprocessing and globally numbered output.
 //
-// The production loop itself now passes the true global iteration into the
-// timestep layer.  RestartTimeStep therefore forwards that value unchanged;
-// adding iiter_total here as well would double-offset continuation timesteps.
+// The production MPI path always uses PetscPersistentDistributedPressureSystem;
+// the legacy solver_opt field therefore does not select the distributed pressure
+// implementation.  For steady ilots=1/2 LTS we normalise solver_opt to the
+// semi-implicit value expected by TimeStep so a rank-local .par file containing
+// a historical PETSc selector cannot silently disable distributed LTS.
 //=============================================================================
 
 #include "cbs/io/DistributedPost.hpp"
@@ -61,6 +63,15 @@ namespace cbs
             }
 
             return static_cast<Int>(iterations);
+        }
+
+
+        bool distributed_lts_requested(const CBSStateSI& s)
+        {
+            return
+                (s.cfg.ilots == 1 || s.cfg.ilots == 2) &&
+                s.cfg.transient_on == 0 &&
+                s.cfg.dtfixed == 0;
         }
 
 
@@ -272,12 +283,7 @@ namespace cbs
                 << requested_segment_iterations << "\n";
         }
 
-        if (!restart.loaded)
-        {
-            return;
-        }
-
-        if (s_.mpi_rank == 0)
+        if (restart.loaded && s_.mpi_rank == 0)
         {
             std::cout
                 << "Restart loaded\n"
@@ -295,7 +301,7 @@ namespace cbs
                 << "\n";
         }
 
-        if (restart.imported_from_legacy_vtu)
+        if (restart.loaded && restart.imported_from_legacy_vtu)
         {
             // Immediately convert the velocity/pressure/temperature VTU state
             // to the native format.  The legacy file has no trustworthy SA
@@ -308,6 +314,26 @@ namespace cbs
 
             RestartDistributedPost::markCheckpoint(
                 restart.completed_iteration);
+        }
+
+        // The production distributed path is hard-wired to the persistent
+        // PETSc pressure system.  Historical .par files can still carry
+        // solver_opt=2/3, and TimeStep interprets those values as requiring a
+        // global timestep.  That interpretation is correct for the legacy
+        // serial pressure paths but would silently defeat LTS here.  Normalise
+        // the unused selector only when the user has explicitly requested the
+        // steady local-time regime.
+        if (distributed_lts_requested(s_) && s_.cfg.solver_opt != 1)
+        {
+            if (s_.mpi_rank == 0)
+            {
+                std::cout
+                    << "Distributed LTS: normalising legacy solver_opt="
+                    << s_.cfg.solver_opt
+                    << " to 1; MPI production pressure is persistent PETSc\n";
+            }
+
+            s_.cfg.solver_opt = 1;
         }
     }
 
