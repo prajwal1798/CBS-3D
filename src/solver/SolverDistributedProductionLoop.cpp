@@ -40,6 +40,7 @@
 #include <limits>
 #include <stdexcept>
 #include <streambuf>
+#include <sstream>
 #include <string>
 
 #ifdef CBS3D_USE_MPI
@@ -1385,8 +1386,22 @@ namespace cbs
 
             if (!pressure_result.converged)
             {
-                throw std::runtime_error(
-                    "Persistent distributed pressure solve failed to converge");
+                std::ostringstream message;
+                message
+                    << "Persistent distributed pressure solve failed to converge"
+                    << ": reason=" << pressure_result.solver_reason
+                    << ", iterations=" << pressure_result.iterations
+                    << ", r0_l2=" << pressure_result.initial_l2
+                    << ", rf_l2=" << pressure_result.final_l2
+                    << ", CGrel=" << pressure_result.final_relative_l2
+                    << ", target_l2=" << pressure_result.acceptance_l2
+                    << ", rf_inf=" << pressure_result.final_max_abs
+                    << ", roundoff_floor_inf="
+                    << pressure_result.roundoff_floor_inf
+                    << ", rtol=" << s_.cfg.relToler
+                    << ", atol=" << s_.cfg.absToler;
+
+                throw std::runtime_error(message.str());
             }
 
             HaloExchange::broadcastOwnedToGhosts(
