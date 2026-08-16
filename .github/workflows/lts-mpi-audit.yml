@@ -1,0 +1,63 @@
+name: LTS MPI/PETSc audit
+
+on:
+  push:
+    branches:
+      - integration/sa-mpi
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  mpi-petsc-build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out branch
+        uses: actions/checkout@v4
+
+      - name: Install MPI and PETSc
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            cmake \
+            g++ \
+            openmpi-bin \
+            libopenmpi-dev \
+            libpetsc-real-dev \
+            pkg-config
+
+      - name: Resolve PETSc prefix
+        shell: bash
+        run: |
+          set -euo pipefail
+          if pkg-config --exists PETSc; then
+            PETSC_PREFIX="$(pkg-config --variable=prefix PETSc)"
+          elif pkg-config --exists petsc; then
+            PETSC_PREFIX="$(pkg-config --variable=prefix petsc)"
+          else
+            echo "PETSc pkg-config metadata not found" >&2
+            exit 1
+          fi
+          test -f "$PETSC_PREFIX/include/petsc.h"
+          test -d "$PETSC_PREFIX/lib"
+          echo "PETSC_DIR=$PETSC_PREFIX" >> "$GITHUB_ENV"
+          echo "PETSc prefix: $PETSC_PREFIX"
+
+      - name: Configure distributed solver
+        run: |
+          cmake -S . -B build-mpi-petsc \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCBS3D_ENABLE_MPI=ON \
+            -DCBS3D_ENABLE_PETSC=ON \
+            -DCBS3D_ENABLE_OPENMP=ON \
+            -DCBS3D_BUILD_TESTS=OFF \
+            -DCBS3D_BUILD_SOURCE_VALIDATION=OFF
+
+      - name: Build distributed solver
+        run: cmake --build build-mpi-petsc --parallel 2
+
+      - name: Verify executable
+        run: test -x build-mpi-petsc/cbs3dpp_si
