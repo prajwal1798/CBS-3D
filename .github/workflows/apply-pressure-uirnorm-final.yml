@@ -42,14 +42,36 @@ jobs:
               print('Applied pressure UIRNorm patch.')
           PY
 
-      - name: Compile distributed MPI/PETSc target
+      - name: Install MPI and PETSc
         shell: bash
         run: |
           set -euo pipefail
           sudo apt-get update
           sudo apt-get install -y \
             cmake g++ openmpi-bin libopenmpi-dev \
-            libpetsc-real-dev libhypre-dev
+            libpetsc-real-dev libhypre-dev pkg-config
+
+      - name: Resolve PETSc prefix
+        shell: bash
+        run: |
+          set -euo pipefail
+          if pkg-config --exists PETSc; then
+            PETSC_PREFIX="$(pkg-config --variable=prefix PETSc)"
+          elif pkg-config --exists petsc; then
+            PETSC_PREFIX="$(pkg-config --variable=prefix petsc)"
+          else
+            echo "PETSc pkg-config metadata not found" >&2
+            exit 1
+          fi
+          test -f "$PETSC_PREFIX/include/petsc.h"
+          test -d "$PETSC_PREFIX/lib"
+          echo "PETSC_DIR=$PETSC_PREFIX" >> "$GITHUB_ENV"
+          echo "PETSc prefix: $PETSC_PREFIX"
+
+      - name: Compile distributed MPI/PETSc target
+        shell: bash
+        run: |
+          set -euo pipefail
           cmake -S . -B build-ci-pressure-uir \
             -DCMAKE_BUILD_TYPE=Release \
             -DCBS3D_ENABLE_MPI=ON \
