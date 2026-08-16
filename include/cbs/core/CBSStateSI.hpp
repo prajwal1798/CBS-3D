@@ -291,6 +291,23 @@ namespace cbs
         // on how the mesh was cut.
         Array1D<Real> sa_nodal_weight;
 
+        // Frozen local pseudo-timestep field.
+        //
+        // Under local timestepping the element timestep enters the pressure
+        // operator, so recomputing it every iteration would mean reassembling
+        // the matrix and rebuilding the multigrid preconditioner every
+        // iteration.  The field is therefore frozen: computed once, used until
+        // the stability monitor finds it unsafe, then refreshed.
+        Array1D<Real> lts_delte_frozen;
+        Array1D<Real> lts_deltp_frozen;
+        Array1D<Real> lts_deltp2_frozen;
+        bool lts_frozen_valid = false;
+
+        // Set when the frozen field was refreshed this iteration, so the
+        // production loop knows the pressure operator must be reassembled
+        // before the next solve.
+        bool lts_operator_stale = false;
+
         // Nodal turbulence classification flags.
         Array1D<Int> sa_active_node;
         Array1D<Int> sa_wall_node;
@@ -688,6 +705,9 @@ namespace cbs
             sa_residual.resize(cfg.npoin);
             sa_destruction_lhs.resize(cfg.npoin);
             sa_nodal_weight.resize(cfg.npoin);
+            lts_delte_frozen.resize(cfg.nelem);
+            lts_deltp_frozen.resize(cfg.npoin);
+            lts_deltp2_frozen.resize(cfg.npoin);
 
             sa_active_node.resize(cfg.npoin);
             sa_wall_node.resize(cfg.npoin);
@@ -743,6 +763,9 @@ namespace cbs
             sa_residual.fill(0.0);
             sa_destruction_lhs.fill(0.0);
             sa_nodal_weight.fill(0.0);
+            lts_delte_frozen.fill(0.0);
+            lts_deltp_frozen.fill(0.0);
+            lts_deltp2_frozen.fill(0.0);
 
             sa_active_node.fill(0);
             sa_wall_node.fill(0);
