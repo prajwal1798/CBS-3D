@@ -251,7 +251,8 @@ namespace cbs
 
                         nu = s.mu_eff_e(ie) / s.rho_e(ie);
 
-                        if (s.cfg.turbulent_thermal_diffusivity_on > 0)
+                        if (s.cfg.temp_calc > 0 &&
+                            s.cfg.turbulent_thermal_diffusivity_on > 0)
                         {
                             if (s.k_eff_e(ie) <= 0.0 || !std::isfinite(s.k_eff_e(ie)))
                             {
@@ -265,7 +266,18 @@ namespace cbs
                         }
                     }
 
-                    diff = std::max(diff, nu);
+                    // Thermal diffusion constrains the pseudo-time only
+                    // when the energy equation is actually being advanced.
+                    // For an isothermal fluid calculation, the active
+                    // restrictions are momentum and, when enabled, SA.
+                    if (s.cfg.temp_calc > 0)
+                    {
+                        diff = std::max(diff, nu);
+                    }
+                    else
+                    {
+                        diff = nu;
+                    }
 
                     // Spalart-Allmaras diffusion limit.
                     //
