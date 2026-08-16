@@ -818,6 +818,19 @@ namespace cbs
                 KSP_NORM_UNPRECONDITIONED),
             "KSPSetNormType(KSP_NORM_UNPRECONDITIONED)");
 
+        // The pressure solve reuses the previous pressure field as a nonzero
+        // initial guess.  Make PETSc's relative tolerance refer to the same
+        // initial true residual used by the CBS3D CGrel diagnostic:
+        //
+        //     ||b - A p_k|| / ||b - A p_0|| <= rtol.
+        //
+        // Without UIRNorm PETSc's default relative reference can be based on
+        // ||b|| instead, so a solve may stop while the independently recomputed
+        // CGrel remains far above the requested tolerance.
+        check_petsc(
+            KSPConvergedDefaultSetUIRNorm(impl_->ksp),
+            "KSPConvergedDefaultSetUIRNorm");
+
         check_petsc(
             KSPSetUp(impl_->ksp),
             "KSPSetUp(persistent pressure)");
