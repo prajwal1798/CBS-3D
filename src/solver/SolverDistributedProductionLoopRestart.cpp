@@ -4,15 +4,12 @@
 // Restart-aware wrapper around the validated distributed production loop.
 //
 // The numerical loop remains in SolverDistributedProductionLoop.cpp.  This
-// translation unit compiles that implementation once with three controlled
-// substitutions:
+// translation unit compiles that implementation once with controlled
+// substitutions for restart preprocessing and globally numbered output.
 //
-//   1. preprocessing loads a native or legacy-VTU restart after the mesh and
-//      partition metadata are reconstructed;
-//   2. output iteration numbers are offset by the completed restart iteration;
-//   3. timestep logic receives the global continuation iteration.
-//
-// This keeps the validated CBS assembly sequence unchanged.
+// The production loop itself now passes the true global iteration into the
+// timestep layer.  RestartTimeStep therefore forwards that value unchanged;
+// adding iiter_total here as well would double-offset continuation timesteps.
 //=============================================================================
 
 #include "cbs/io/DistributedPost.hpp"
@@ -72,11 +69,12 @@ namespace cbs
         public:
             static void computeTimeStep(
                 CBSStateSI& s,
-                const Int local_iteration)
+                const Int global_iteration)
             {
-                const Int global_iteration =
-                    s.cfg.iiter_total + local_iteration;
-
+                // SolverDistributedProductionLoop.cpp has already converted the
+                // segment-local counter to iiter_total + local_iteration.  Keep
+                // exactly that value so dtfix_end and other iteration-dependent
+                // controls remain continuous across native restarts.
                 TimeStep::computeTimeStep(s, global_iteration);
             }
         };
@@ -299,9 +297,10 @@ namespace cbs
 
         if (restart.imported_from_legacy_vtu)
         {
-            // Immediately convert the existing 100,000-iteration VTU state to
-            // the native format.  Subsequent jobs must restart from this native
-            // checkpoint rather than reparsing ParaView files.
+            // Immediately convert the velocity/pressure/temperature VTU state
+            // to the native format.  The legacy file has no trustworthy SA
+            // history; TurbulencePreprocess will reinitialise nu_tilde from the
+            // configured freestream value before the first continuation step.
             RestartIO::writeCheckpoint(
                 s_,
                 case_name_,
