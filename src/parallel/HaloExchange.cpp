@@ -1,5 +1,7 @@
 #include "cbs/parallel/HaloExchange.hpp"
 
+#include <algorithm>
+
 #ifdef CBS3D_USE_MPI
 
 #include <stdexcept>
@@ -311,6 +313,42 @@ namespace cbs
                 for (Size i = 0; i < nodes.size(); ++i)
                 {
                     values(nodes[i]) += buffer[i];
+                }
+            },
+            communicator);
+    }
+
+    //=========================================================================
+    // Minimum reduction of a nodal quantity onto the owning rank.
+    //
+    // Mirrors sumGhostContributionsToOwners exactly, with the accumulation
+    // replaced by std::min, and uses its own message tag so the two cannot be
+    // confused if both are in flight.
+    //=========================================================================
+    void HaloExchange::minGhostContributionsToOwners(
+        Array1D<Real>& values,
+        const PartitionMetadata& metadata,
+        MPI_Comm communicator)
+    {
+        exchange(
+            metadata,
+            1,
+            816,
+            true,
+            [&values](const std::vector<Int>& nodes, std::vector<Real>& buffer)
+            {
+                buffer.resize(nodes.size());
+                for (Size i = 0; i < nodes.size(); ++i)
+                {
+                    buffer[i] = values(nodes[i]);
+                }
+            },
+            [&values](const std::vector<Int>& nodes, const std::vector<Real>& buffer)
+            {
+                for (Size i = 0; i < nodes.size(); ++i)
+                {
+                    values(nodes[i]) =
+                        std::min(values(nodes[i]), buffer[i]);
                 }
             },
             communicator);

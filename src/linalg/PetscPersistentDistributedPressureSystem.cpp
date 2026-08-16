@@ -737,6 +737,11 @@ namespace cbs
                 MPI_COMM_WORLD),
             "MPI_Allreduce maximum pressure timestep");
 
+        // local_dt remains the communicator-wide reference timestep.  Under
+        // local timestepping it is the global minimum, so using it to scale the
+        // solver tolerance and the reported residual norms is conservative:
+        // the tolerance becomes stricter than any individual node requires
+        // rather than looser.
         const Real timestep_scale =
             std::max(1.0, std::abs(local_dt));
 
@@ -794,8 +799,30 @@ namespace cbs
             }
             else
             {
+                // The Step 2 pressure equation is scaled by the timestep of
+                // the node being assembled, not by a single scalar.
+                //
+                // Under a global timestep compute_communicator_timestep sets
+                // deltp(ip) equal to dtreal at every node, so this is exactly
+                // the previous expression and the assembled system is
+                // bit-identical.  Under local timestepping each node carries its
+                // own dt, and using one scalar would scale the divergence of the
+                // intermediate velocity inconsistently from node to node.
+                //
+                // The matrix itself is geometry-only and therefore independent
+                // of the timestep, which is what allows it to remain persistent
+                // in both regimes.
+                const Real node_dt = s.deltp(ip);
+
+                if (!(node_dt > 0.0) || !std::isfinite(node_dt))
+                {
+                    throw std::runtime_error(
+                        "Persistent pressure solve encountered an invalid nodal "
+                        "timestep at an owned node");
+                }
+
                 const Real scaled_rhs =
-                    s.rhs1(ip) / local_dt;
+                    s.rhs1(ip) / node_dt;
 
                 check_petsc(
                     VecSetValue(

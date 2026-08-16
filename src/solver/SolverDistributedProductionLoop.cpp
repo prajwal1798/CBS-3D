@@ -398,11 +398,142 @@ namespace cbs
             }
         }
 
+        //=====================================================================
+        // Establishes the timestep field for one distributed iteration.
+        //
+        // Two regimes are supported.
+        //
+        // Global uniform timestep.
+        //     Every element and node is advanced with the smallest stable
+        //     timestep anywhere in the mesh.  This is required whenever the
+        //     pseudo-time path is physically meaningful, that is for a
+        //     transient run, and it is what a fixed dtfix requests.
+        //
+        // Local timestep.
+        //     Each element is advanced at its own stable rate.  For a
+        //     steady-state calculation the path through pseudo-time carries no
+        //     meaning and only the fixed point is sought, so advancing each
+        //     element at its own rate is a legitimate relaxation and converges
+        //     enormously faster on a stretched mesh: on a wall-resolved
+        //     flat-plate grid the near-wall cells are hundreds of times smaller
+        //     than the freestream cells, so a global timestep throttles the
+        //     entire domain to the rate of its smallest element and the flow
+        //     needs millions of iterations merely to cross the domain once.
+        //
+        // The distributed subtlety is that the nodal timestep deltp is shared
+        // across partition interfaces.  TimeStep::computeTimeStep forms it from
+        // locally visible elements only, so each rank's value at an interface
+        // node is a minimum over a subset and is therefore too large.  Left
+        // uncorrected the two ranks would advance the same node with different
+        // dt, and since deltp enters the Step 2 pressure operator and the Step 3
+        // correction, the assembled system would depend on the partitioning.
+        // The nodal field is therefore reduced by minimum onto the owners and
+        // broadcast back to the ghosts before use.
+        //
+        // Element timesteps need no exchange: an element belongs to exactly one
+        // rank.
+        //=====================================================================
+        bool distributed_local_timestep_enabled(const CBSStateSI& s)
+        {
+            // Mirror the serial ilots semantics exactly rather than inventing a
+            // second rule, so that a case behaves the same way in both paths.
+            if (s.cfg.ilots != 1 && s.cfg.ilots != 2)
+            {
+                return false;
+            }
+
+            if (s.cfg.transient_on > 0 ||
+                s.cfg.solver_opt > 1 ||
+                s.cfg.dtfixed > 0 ||
+                s.cfg.dtfixed == -1 ||
+                s.cfg.ilots <= -1)
+            {
+                return false;
+            }
+
+            return true;
+        }
+
         Real compute_communicator_timestep(
             CBSStateSI& s,
             const Int iteration)
         {
             TimeStep::computeTimeStep(s, iteration);
+
+            if (distributed_local_timestep_enabled(s))
+            {
+                // Reconcile the shared nodal timesteps, then publish the
+                // reconciled value to the ghost layer.
+                HaloExchange::minGhostContributionsToOwners(
+                    s.deltp,
+                    s.partition_metadata,
+                    MPI_COMM_WORLD);
+
+                HaloExchange::broadcastOwnedToGhosts(
+                    s.deltp,
+                    s.partition_metadata,
+                    MPI_COMM_WORLD);
+
+                HaloExchange::minGhostContributionsToOwners(
+                    s.deltp2,
+                    s.partition_metadata,
+                    MPI_COMM_WORLD);
+
+                HaloExchange::broadcastOwnedToGhosts(
+                    s.deltp2,
+                    s.partition_metadata,
+                    MPI_COMM_WORLD);
+
+                Real local_minimum =
+                    std::numeric_limits<Real>::max();
+
+                Real local_maximum = 0.0;
+
+                for (Int ie = 1; ie <= s.cfg.nelem; ++ie)
+                {
+                    const Real dt = s.delte(ie);
+
+                    if (dt <= 0.0 || !std::isfinite(dt))
+                    {
+                        throw std::runtime_error(
+                            "Distributed production loop obtained an invalid "
+                            "local element timestep");
+                    }
+
+                    local_minimum = std::min(local_minimum, dt);
+                    local_maximum = std::max(local_maximum, dt);
+                }
+
+                Real extrema[2] = { -local_minimum, local_maximum };
+                Real global_extrema[2] = { 0.0, 0.0 };
+
+                check_mpi(
+                    MPI_Allreduce(
+                        extrema,
+                        global_extrema,
+                        2,
+                        MPI_DOUBLE,
+                        MPI_MAX,
+                        MPI_COMM_WORLD),
+                    "MPI_Allreduce local timestep extrema");
+
+                const Real global_minimum = -global_extrema[0];
+
+                if (global_minimum <= 0.0 || !std::isfinite(global_minimum))
+                {
+                    throw std::runtime_error(
+                        "Distributed production loop obtained invalid timestep");
+                }
+
+                // dtreal is the reference timestep quoted in the monitor and the
+                // restart metadata.  With a local timestep there is no single
+                // physical dt, so the smallest is reported: it is the value that
+                // bounds stability and it matches what a global-timestep run of
+                // the same mesh would have used.
+                s.cfg.dtreal = global_minimum;
+
+                return global_minimum;
+            }
 
             Real local_minimum =
                 std::numeric_limits<Real>::max();
@@ -980,6 +1111,34 @@ namespace cbs
             // Wall distance, SA node classification and the initial eddy
             // viscosity.  This must run before the first Step 1, because the
             // momentum assembly reads mu_eff_e.
+            if (s_.mpi_rank == 0)
+            {
+                if (distributed_local_timestep_enabled(s_))
+                {
+                    std::cout
+                        << "  Timestep regime : LOCAL (ilots="
+                        << s_.cfg.ilots << ")\n"
+                        << "    Each element advances at its own stable rate."
+                           " Valid because this is a\n"
+                           "    steady-state run, where the path through"
+                           " pseudo-time carries no meaning\n"
+                           "    and only the fixed point is sought. Reported dt"
+                           " is the global minimum.\n";
+                }
+                else
+                {
+                    std::cout
+                        << "  Timestep regime : GLOBAL UNIFORM\n"
+                        << "    Every element advances at the smallest stable"
+                           " timestep in the mesh.\n"
+                           "    On a stretched wall-resolved mesh this throttles"
+                           " the whole domain to the\n"
+                           "    rate of its smallest cell. For a steady run set"
+                           " ilots=1 and dtfixed=0\n"
+                           "    to enable local timestepping.\n";
+                }
+            }
+
             TurbulencePreprocess::prepareSpalartAllmaras(s_);
 
             pressure_system.initialise(s_);
