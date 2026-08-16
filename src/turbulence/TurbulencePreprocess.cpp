@@ -5,31 +5,34 @@
 #include "cbs/parallel/HaloExchange.hpp"
 #include "cbs/turbulence/WallDistance.hpp"
 
+#include <cstdlib>
 #include <iostream>
 #include <stdexcept>
+#include <string>
 
 namespace cbs
 {
+    namespace
+    {
+        bool legacy_vtu_restart_requested()
+        {
+            const char* value = std::getenv("CBS3D_RESTART_FORMAT");
+
+            if (value == nullptr || value[0] == '\0')
+            {
+                return false;
+            }
+
+            const std::string format(value);
+            return
+                format == "legacy_vtu" ||
+                format == "vtu" ||
+                format == "legacy";
+        }
+    }
+
     //=========================================================================
     // Prepares the Spalart-Allmaras turbulence model before time advancement.
-    //
-    // This routine performs only preprocessing and initialisation.  It does not
-    // assemble the SA transport equation and it does not modify the CBS Step 1,
-    // Step 2, Step 3 or Step 4 algorithms.
-    //
-    // Operations performed when turbulence_on is enabled:
-    //
-    //     1. classify SA-active, SA-wall and SA-inlet nodes;
-    //     2. reduce that classification over partition interfaces;
-    //     3. compute wall_distance(node) with the BVH nearest-wall search;
-    //     4. initialise the transported SA working variable nu_tilde;
-    //     5. compute the first eddy-viscosity and effective-property fields.
-    //
-    // The wall-distance search is MPI aware.  It gathers the complete physical
-    // wall surface before searching, because under domain decomposition the
-    // nearest wall triangle to a local node is frequently owned by another rank
-    // and a rank lying in the freestream owns no wall faces at all.  See
-    // WallDistance::collectGlobalWallTriangles.
     //=========================================================================
     void TurbulencePreprocess::prepareSpalartAllmaras(CBSStateSI& s)
     {
@@ -69,31 +72,35 @@ namespace cbs
                 << stats.max_distance << "\n";
         }
 
-        // Restart safety.
+        // Native restart safety.
         //
-        // The native checkpoint stores and restores nu_tilde, but calling
-        // initialiseNuTilde here unconditionally overwrote it with the
-        // freestream value, so a restart silently discarded the turbulence
-        // field it had just loaded and began the SA solution again from
-        // scratch.  On restart the loaded field is kept and only the boundary
-        // values are reapplied.
-        //
-        // istart is set to 2 by RestartIO::initialise_restart_histories, so it
-        // is the authoritative indicator that a checkpoint was loaded.
-        const bool restarted = s.cfg.istart > 1;
+        // Native .cbsrst checkpoints contain nu_tilde and therefore preserve it.
+        // The legacy VTU importer deliberately does not contain an SA history;
+        // RestartIO sets nu_tilde to zero on that path, so treating every
+        // istart>1 state as a native restart would silently start SA from an
+        // invalid zero field.  Distinguish the explicitly selected legacy
+        // importer and initialise SA from the configured freestream value there.
+        const bool loaded_restart_state = s.cfg.istart > 1;
+        const bool legacy_vtu_restart =
+            loaded_restart_state && legacy_vtu_restart_requested();
+        const bool native_restart =
+            loaded_restart_state && !legacy_vtu_restart;
 
-        if (restarted)
+        if (native_restart)
         {
+            // Keep the checkpoint field and re-enforce only strong SA BCs.
             TurbulenceBoundary::applyWallValues(s);
             TurbulenceBoundary::applyInletValues(s);
         }
         else
         {
+            // Fresh calculation or velocity/pressure-only legacy VTU import.
             TurbulenceBoundary::initialiseNuTilde(s);
         }
 
-        // initialiseNuTilde re-runs the local classification, so the interface
-        // reduction has to be repeated before the field is exchanged.
+        // initialiseNuTilde re-runs local classification; repeating the
+        // reduction is harmless for the native path and required for the fresh
+        // / legacy path before the owner field is exchanged.
         TurbulenceBoundary::synchroniseClassification(s);
 
 #ifdef CBS3D_USE_MPI
@@ -106,20 +113,31 @@ namespace cbs
         }
 #endif
 
-        // The previous-step field must match the restored field, otherwise the
-        // first SA residual after a restart is measured against the freestream
-        // value and reports a spurious jump.
+        // The first continuation residual must be measured against the restored
+        // state, not against the original freestream initialisation.
         s.nu_tilde1 = s.nu_tilde;
 
         if (s.mpi_rank == 0)
         {
-            std::cout
-                << (restarted
-                    ? "  Spalart-Allmaras: nu_tilde restored from checkpoint\n"
-                    : "  Spalart-Allmaras: nu_tilde initialised from freestream\n");
+            if (native_restart)
+            {
+                std::cout
+                    << "  Spalart-Allmaras: nu_tilde restored from native checkpoint\n";
+            }
+            else if (legacy_vtu_restart)
+            {
+                std::cout
+                    << "  Spalart-Allmaras: legacy VTU imported; nu_tilde reinitialised from freestream\n";
+            }
+            else
+            {
+                std::cout
+                    << "  Spalart-Allmaras: nu_tilde initialised from freestream\n";
+            }
         }
 
-        // updateEddyViscosity reduces its own nodal averages across interfaces.
+        // Rebuild all derived turbulent/effective material properties from the
+        // authoritative nu_tilde field before the first momentum timestep.
         SpalartAllmarasAssembly::updateEddyViscosity(s);
     }
 }
