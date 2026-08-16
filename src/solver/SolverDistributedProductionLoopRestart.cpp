@@ -335,6 +335,20 @@ namespace cbs
 
             s_.cfg.solver_opt = 1;
         }
+
+        // A native checkpoint stores the physical/solution state, not the
+        // transient LTS preconditioner.  Always construct a fresh frozen field
+        // from the restored velocity and SA properties.  This also makes a
+        // Solver instance safe if preprocessing is invoked again for another
+        // continuation segment.
+        s_.lts_frozen_valid = false;
+        s_.lts_operator_stale = false;
+        s_.cfg.lts_refresh_count = 0;
+        s_.cfg.lts_dt_min = 0.0;
+        s_.cfg.lts_dt_max = 0.0;
+        s_.lts_delte_frozen.fill(0.0);
+        s_.lts_deltp_frozen.fill(0.0);
+        s_.lts_deltp2_frozen.fill(0.0);
     }
 
 
