@@ -4,6 +4,7 @@
 #include "cbs/boundary/TurbulenceBoundary.hpp"
 #include "cbs/parallel/HaloExchange.hpp"
 #include "cbs/turbulence/TurbulenceWallTopology.hpp"
+#include "cbs/turbulence/WallDistance.hpp"
 
 #include <cctype>
 #include <cstdlib>
@@ -37,6 +38,19 @@ namespace cbs
                 format == "vtu" ||
                 format == "legacy";
         }
+
+        bool contains_solid_elements(const CBSStateSI& s)
+        {
+            for (Int ie = 1; ie <= s.cfg.nelem; ++ie)
+            {
+                if (s.mat_elem(ie) != 0)
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
     }
 
     //=========================================================================
@@ -61,7 +75,20 @@ namespace cbs
         TurbulenceBoundary::synchroniseClassification(s);
 
         turbulence::WallDistanceStats stats;
-        turbulence::TurbulenceWallTopology::computeWallDistance(s, stats);
+
+        // Preserve the already validated and highly optimised pure-fluid
+        // wall-distance path (BVH pruning + Morton ordering). The corrected
+        // material-topology reconstruction is required only when solid
+        // tetrahedra exist, i.e. when a conformal CHT interface can be internal
+        // and a thermal BC such as 532 can belong to the solid exterior.
+        if (contains_solid_elements(s))
+        {
+            turbulence::TurbulenceWallTopology::computeWallDistance(s, stats);
+        }
+        else
+        {
+            turbulence::WallDistance::compute(s, stats);
+        }
 
         if (s.mpi_rank == 0)
         {
