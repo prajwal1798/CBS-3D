@@ -10,3 +10,14 @@ Makefile text eol=lf
 *.sh text eol=lf
 *.py text eol=lf
 *.md text eol=lf
+
+# Binary assets must never pass through line-ending conversion.  Older Git
+# versions on Sunbird otherwise misclassify some generated PNG files as text
+# under the global `text=auto eol=lf` rule and immediately dirty the worktree
+# after checkout.
+*.png -text
+*.jpg -text
+*.jpeg -text
+*.gif -text
+*.pdf -text
+*.pyc -text
