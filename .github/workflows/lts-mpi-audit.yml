@@ -12,7 +12,7 @@ permissions:
 
 jobs:
   topology-serial-verification:
-    name: Serial topology and wall-law verification
+    name: Serial topology and wall-coupling verification
     runs-on: ubuntu-latest
 
     steps:
@@ -58,6 +58,25 @@ jobs:
           ./WallTreatmentReynoldsSweep
           ./WallTreatmentNASAReference
 
+      - name: Compile production wall-coupling regression
+        run: |
+          g++ -std=c++20 -O1 -g \
+            -Wall -Wextra -Werror -pedantic \
+            -fsanitize=address,undefined \
+            -fno-omit-frame-pointer \
+            -Iinclude \
+            tests/WallModelCouplingVerification.cpp \
+            src/turbulence/WallModelCoupling.cpp \
+            src/turbulence/WallTreatment.cpp \
+            -o WallModelCouplingVerification
+
+      - name: Run production wall-coupling regression
+        env:
+          ASAN_OPTIONS: detect_leaks=1:halt_on_error=1
+          UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+          CBS3D_SA_WALL_TREATMENT: "1"
+        run: ./WallModelCouplingVerification
+
       - name: Configure existing serial regression suite
         run: |
           cmake -S . -B build-serial \
@@ -74,7 +93,7 @@ jobs:
       - name: Run existing CTest suite
         run: ctest --test-dir build-serial --output-on-failure
 
-      - name: Publish serial topology status
+      - name: Publish serial topology/wall status
         if: always()
         continue-on-error: true
         env:
@@ -90,7 +109,7 @@ jobs:
             -H "Accept: application/vnd.github+json" \
             -H "X-GitHub-Api-Version: 2022-11-28" \
             "https://api.github.com/repos/$GITHUB_REPOSITORY/statuses/$GITHUB_SHA" \
-            -d "{\"state\":\"$state\",\"context\":\"topology-wall/serial\",\"description\":\"CHT topology + wall-law + serial regressions\",\"target_url\":\"$target_url\"}"
+            -d "{\"state\":\"$state\",\"context\":\"topology-wall/serial\",\"description\":\"Topology + wall law/coupling + serial regressions\",\"target_url\":\"$target_url\"}"
 
   mpi-petsc-build:
     name: MPI/PETSc build and cross-rank topology verification
