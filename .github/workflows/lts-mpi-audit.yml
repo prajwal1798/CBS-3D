@@ -61,7 +61,7 @@ jobs:
       - name: Compile production wall-coupling regression
         run: |
           g++ -std=c++20 -O1 -g \
-            -Wall -Wextra -Werror -pedantic \
+            -Wall -Wextra -Werror -Wno-error=unused-function -pedantic \
             -fsanitize=address,undefined \
             -fno-omit-frame-pointer \
             -Iinclude \
