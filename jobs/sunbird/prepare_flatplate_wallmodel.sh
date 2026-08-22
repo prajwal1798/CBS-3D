@@ -19,7 +19,7 @@ printf '===== CANONICAL REPOSITORY =====\n'
 cd "$CODE"
 pwd
 git status --short --branch
-git branch --show-current
+git rev-parse --abbrev-ref HEAD
 git rev-parse HEAD
 git remote -v
 
@@ -30,7 +30,7 @@ fi
 
 printf '\n===== SYNCHRONISE integration/sa-mpi =====\n'
 git fetch origin integration/sa-mpi
-git switch integration/sa-mpi
+git checkout integration/sa-mpi
 git pull --ff-only origin integration/sa-mpi
 
 printf '\n===== UPDATED HEAD =====\n'
