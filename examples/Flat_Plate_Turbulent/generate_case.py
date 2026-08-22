@@ -7,8 +7,8 @@ Cartesian brick lattice split with a globally consistent six-tetrahedron
 Freudenthal decomposition.  The first wall-normal interval is derived from a
 requested target y+ using Cf = 0.0592 Re_x^(-1/5) at x_ref=1.
 
-The script writes solver-native .plt, .bco and .par files.  No Gmsh conversion
-or external Python package is required.
+The script writes solver-native .plt, .bco, .par, .material and .matprop files.
+No Gmsh conversion or external Python package is required.
 """
 
 from __future__ import annotations
@@ -17,7 +17,7 @@ import argparse
 import json
 import math
 from pathlib import Path
-from typing import Dict, Iterable, List, Sequence, Tuple
+from typing import Dict, List, Sequence, Tuple
 
 Point = Tuple[float, float, float]
 Tet = Tuple[int, int, int, int]
@@ -68,9 +68,6 @@ def streamwise_coordinates(xmin: float, xmax: float, nup: int, nplate: int) -> L
         raise ValueError("insufficient streamwise intervals")
 
     upstream = [xmin + (0.0 - xmin) * i / nup for i in range(nup + 1)]
-
-    # Power clustering puts the first plate interval close to the TMR leading-
-    # edge spacing without introducing a discontinuous geometric jump.
     exponent = 1.5
     plate = [xmax * (i / nplate) ** exponent for i in range(1, nplate + 1)]
     return upstream + plate
@@ -107,9 +104,6 @@ def make_mesh(xs: Sequence[float], ys: Sequence[float], zs: Sequence[float]) -> 
                 v011 = node_id(i, j + 1, k + 1, nx, ny)
                 v111 = node_id(i + 1, j + 1, k + 1, nx, ny)
 
-                # Freudenthal split along v000-v111.  For monotonically
-                # increasing x/y/z coordinates every tetrahedron has positive
-                # signed Jacobian determinant.
                 tets.extend(
                     [
                         (v000, v100, v110, v111),
@@ -137,7 +131,6 @@ def signed_det(points: Sequence[Point], tet: Tet) -> float:
 
 
 def boundary_faces(points: Sequence[Point], tets: Sequence[Tet]) -> List[Tuple[Face, int, int]]:
-    # value = [oriented face, parent id, multiplicity]
     inventory: Dict[Tuple[int, int, int], List[object]] = {}
     local_faces = ((1, 2, 3), (0, 3, 2), (0, 1, 3), (0, 2, 1))
 
@@ -169,17 +162,17 @@ def boundary_faces(points: Sequence[Point], tets: Sequence[Tet]) -> List[Tuple[F
         cx = sum(p[0] for p in xyz) / 3.0
 
         if all(abs(p[0] - xmin) <= tol for p in xyz):
-            bc = 510  # prescribed freestream velocity inlet
+            bc = 511
         elif all(abs(p[0] - xmax) <= tol for p in xyz):
-            bc = 520  # pressure outlet
+            bc = 520
         elif all(abs(p[1] - ymax) <= tol for p in xyz):
-            bc = 510  # freestream top boundary
+            bc = 506
         elif all(abs(p[1] - ymin) <= tol for p in xyz):
-            bc = 506 if cx < -tol else 530  # upstream slip / solid plate
+            bc = 506 if cx < -tol else 530
         elif all(abs(p[2] - zmin) <= tol for p in xyz) or all(
             abs(p[2] - zmax) <= tol for p in xyz
         ):
-            bc = 506  # thin-span symmetry
+            bc = 506
         else:
             raise RuntimeError(f"unclassified boundary face {f}")
 
@@ -200,53 +193,66 @@ def write_plt(path: Path, points: Sequence[Point], tets: Sequence[Tet], faces: S
 
 
 def write_bco(path: Path) -> None:
-    mappings = (506, 510, 520, 530)
+    mappings = (506, 511, 520, 530)
     with path.open("w", encoding="utf-8") as out:
         out.write(f"{len(mappings)} 0\n")
         for bc in mappings:
             out.write(f"{bc} {bc}\n")
 
 
+def write_material(path: Path, tets: Sequence[Tet]) -> None:
+    with path.open("w", encoding="utf-8") as out:
+        out.write(f"{len(tets)}\n")
+        for ie, tet in enumerate(tets, start=1):
+            out.write(f"{ie} {tet[0]} {tet[1]} {tet[2]} {tet[3]} 0\n")
+
+
+def write_matprop(path: Path, viscosity: float) -> None:
+    with path.open("w", encoding="utf-8") as out:
+        out.write("1\n")
+        out.write(f"0 fluid fluid 1.0 1.0 1.0 {viscosity:.17e} 0.0\n")
+
+
 def write_par(path: Path, iterations: int, re_ref: float, span: float) -> None:
     blocks = [
-        ("SOLVER_OPT", "1"),
-        ("RESTART_OPT", "0"),
-        ("TEMP_CALC", "0"),
-        ("FREESTREAM_UVWP_T", "1.0 0.0 0.0 0.0 0.0"),
-        ("NTIME TRANSIENT_ON DTFIXED DTFIX IWRITE", f"{iterations} 0 0 1.0e-4 100"),
-        ("CSAFM THETA", "0.5 1.0"),
+        ("solver_opt", "1"),
+        ("restart_opt", "0"),
+        ("temp_calc", "0"),
+        ("freestream U V W P T", "1.0 0.0 0.0 0.0 0.0"),
+        ("ntime transient_on dtfixed dtfix iwrite", f"{iterations} 0 0 1.0e-4 100"),
+        ("csafm theta", "0.5 1.0"),
         (
-            "CBS_SCHEME ILOTS HTYPE STEP2_CHECK REM_DELTP BETA_OPT DTFIX_END CSAFM2 EPSILON1 DELTR",
+            "CBS3D timestep controls:",
             "1 0 1 0 0 0 0 0.5 1.0e-12 1.0",
         ),
-        ("RE PR RA RI", f"{re_ref:.17e} 0.71 0.0 0.0"),
-        ("CONVECTION_TYPE", "0"),
-        ("PNODE", "1"),
-        ("WRITE_OUTPUT WRITE_TIME_OUTPUT TIME_OUTPUT_INTERVAL END_RTIME", "0 0 1.0 1.0"),
-        ("REL_TOL ABS_TOL", "1.0e-8 1.0e-12"),
-        ("VEL_CHECK VEL_TOL TEMP_CHECK TEMP_TOL SA_CHECK SA_TOL", "1 1.0e-7 0 1.0e-7 1 1.0e-7"),
-        ("PARAVIEW TECPLOT NUSSELT_CALC NUSSELT_FLAG", "1 0 0 530"),
-        ("RUNTIME_MOD", "1"),
-        ("ALPHA_SF K_RATIO SOURCE_SOLID HEAT_FLUX", "1.0 1.0 0.0 0.0"),
-        ("DIMENSIONAL MATERIAL_PROPERTIES MASS_FLOW_INLET", "0 0 0"),
-        ("P_REF MODEL_DEPTH MASS_FLOW INLET_RHO INLET_T OUTLET_P", f"0.0 {span:.17e} 0.0 1.0 0.0 0.0"),
-        ("INLET_U INLET_V INLET_W", "1.0 0.0 0.0"),
-        ("NUSSELT_TINF NUSSELT_TREF NUSSELT_DIAMETER", "0.0 0.0 1.0"),
-        ("CG_PRECONDITIONER CG_CONV_TEST CG_MAX_ITER PRESSURE_TOL", "1 1 5000 1.0e-10"),
+        ("re pr ra ri", f"{re_ref:.17e} 0.71 0.0 0.0"),
+        ("convection_type", "0"),
+        ("pnode", "1"),
+        ("write_output write_time_output time_output_interval end_rtime", "0 0 1.0 1.0"),
+        ("relToler absToler", "1.0e-8 1.0e-12"),
+        ("velocity/temperature steady controls", "1 1.0e-7 0 1.0e-7 1 1.0e-7"),
+        ("paraview tecplot nusselt_calc nusselt_flag", "1 0 0 530"),
+        ("runtime_mod", "1"),
+        ("alpha/source/flux controls:", "1.0 1.0 0.0 0.0"),
+        ("dimensional/material/mass-flow controls:", "1 1 0"),
+        ("reference/inlet/outlet controls:", f"0.0 {span:.17e} 0.0 1.0 0.0 0.0"),
+        ("prescribed inlet velocity:", "1.0 0.0 0.0"),
+        ("Nusselt reference controls:", "0.0 0.0 1.0"),
+        ("pressure CG controls:", "1 1 5000 1.0e-10"),
         (
-            "RESIDUAL_LOG RESIDUAL_EVERY CONSOLE_EVERY LIVE VTU VTU_ITER VTU_TIME BC_DEBUG STEADY_MIN",
+            "CBS3D output/monitor controls:",
             "1 10 100 0 1 500 0.0 1 20",
         ),
-        ("ART_DIFF", "0"),
-        ("TURBULENCE_ON MODEL TURBULENT_THERMAL", "1 0 0"),
-        ("SA_INLET_RATIO SA_PRANDTL_T", "3.0 0.9"),
-        ("SA_MIN_WALL_DISTANCE SA_MIN_STILDE SA_NU_TILDE_FLOOR", "1.0e-14 1.0e-14 0.0"),
-        ("SA_STILDE_LIMITER SA_IMPLICIT_DESTRUCTION SA_CEILING_RATIO", "1 1 1.0e6"),
+        ("artificial diffusion control:", "0"),
+        ("Spalart-Allmaras controls:", "1 0 0"),
+        ("Spalart-Allmaras inlet/thermal controls:", "3.0 0.9"),
+        ("Spalart-Allmaras numerical floors:", "1.0e-14 1.0e-14 0.0"),
+        ("Spalart-Allmaras switches:", "1 1 1.0e6"),
     ]
 
     with path.open("w", encoding="utf-8") as out:
         for label, data in blocks:
-            out.write(f"# {label}\n")
+            out.write(f"{label}\n")
             out.write(f"{data}\n")
 
 
@@ -302,6 +308,8 @@ def main() -> None:
     write_plt(prefix.with_suffix(".plt"), points, tets, faces)
     write_bco(prefix.with_suffix(".bco"))
     write_par(prefix.with_suffix(".par"), args.iterations, args.re_x1, args.span)
+    write_material(prefix.with_suffix(".material"), tets)
+    write_matprop(prefix.with_suffix(".matprop"), nu)
 
     metadata = {
         "reference": "NASA TMR-style zero-pressure-gradient flat plate",
