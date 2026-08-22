@@ -10,7 +10,49 @@ permissions:
   contents: read
 
 jobs:
+  topology-serial-verification:
+    name: Serial CHT wall-topology verification
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out branch
+        uses: actions/checkout@v4
+
+      - name: Compile topology regression with sanitizers
+        run: |
+          g++ -std=c++20 -O1 -g \
+            -Wall -Wextra -Werror -pedantic \
+            -fsanitize=address,undefined \
+            -fno-omit-frame-pointer \
+            -Iinclude \
+            tests/TurbulenceWallTopologyVerification.cpp \
+            src/turbulence/WallDistance.cpp \
+            -o turbulence_wall_topology_verification
+
+      - name: Run topology regression
+        env:
+          ASAN_OPTIONS: detect_leaks=1:halt_on_error=1
+          UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+        run: ./turbulence_wall_topology_verification
+
+      - name: Configure existing serial regression suite
+        run: |
+          cmake -S . -B build-serial \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCBS3D_ENABLE_OPENMP=ON \
+            -DCBS3D_ENABLE_MPI=OFF \
+            -DCBS3D_ENABLE_PETSC=OFF \
+            -DCBS3D_BUILD_TESTS=ON \
+            -DCBS3D_BUILD_SOURCE_VALIDATION=ON
+
+      - name: Build existing serial solver and tests
+        run: cmake --build build-serial --parallel 2
+
+      - name: Run existing CTest suite
+        run: ctest --test-dir build-serial --output-on-failure
+
   mpi-petsc-build:
+    name: MPI/PETSc build and cross-rank topology verification
     runs-on: ubuntu-24.04
     timeout-minutes: 30
 
@@ -61,3 +103,16 @@ jobs:
 
       - name: Verify executable
         run: test -x build-mpi-petsc/cbs3dpp_si
+
+      - name: Compile two-rank topology regression
+        run: |
+          mpic++ -std=c++20 -O2 \
+            -Wall -Wextra -Werror -pedantic \
+            -DCBS3D_USE_MPI=1 \
+            -Iinclude \
+            tests/TurbulenceWallTopologyMPIVerification.cpp \
+            src/turbulence/WallDistance.cpp \
+            -o turbulence_wall_topology_mpi_verification
+
+      - name: Run two-rank topology regression
+        run: mpirun -np 2 ./turbulence_wall_topology_mpi_verification
