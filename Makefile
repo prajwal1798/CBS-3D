@@ -137,7 +137,7 @@ SRC := \
     src/boundary/Boundary.cpp \
     src/timestep/TimeStep.cpp \
     src/solver/Convergence.cpp \
-    src/solver/Steps.cpp \
+    src/solver/StepsWallModel.cpp \
     src/solver/Solver.cpp \
     src/linalg/BandedMatrix.cpp \
     src/linalg/BandedGaussianSolver.cpp \
@@ -152,6 +152,8 @@ SRC := \
     src/turbulence/SpalartAllmaras.cpp \
     src/turbulence/WallDistance.cpp \
     src/turbulence/TurbulencePreprocess.cpp \
+    src/turbulence/WallTreatment.cpp \
+    src/turbulence/WallModelCoupling.cpp \
     src/utils/SolverProfiler.cpp \
     src/parallel/PartitionMetadata.cpp \
     src/parallel/HaloExchange.cpp
