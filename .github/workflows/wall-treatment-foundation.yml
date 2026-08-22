@@ -63,29 +63,27 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v4
 
-      - name: Compile wall-treatment verification
+      - name: Compile and run wall-treatment verification
         shell: cmd
-        run: >-
-          cl /nologo /std:c++20 /W4 /WX /EHsc /Iinclude
-          tests\WallTreatmentVerification.cpp
-          src\turbulence\WallTreatment.cpp
-          /Fe:wall_treatment_verification.exe
+        run: |
+          for /f "usebackq tokens=*" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do set "VSINSTALL=%%i"
+          if not defined VSINSTALL exit /b 1
+          call "%VSINSTALL%\Common7\Tools\VsDevCmd.bat" -arch=x64 -host_arch=x64
+          if errorlevel 1 exit /b %errorlevel%
+          cl /nologo /std:c++20 /W4 /WX /EHsc /Iinclude tests\WallTreatmentVerification.cpp src\turbulence\WallTreatment.cpp /Fe:wall_treatment_verification.exe
+          if errorlevel 1 exit /b %errorlevel%
+          wall_treatment_verification.exe
 
-      - name: Run wall-treatment verification
+      - name: Compile and run wide Re_y robustness sweep
         shell: cmd
-        run: wall_treatment_verification.exe
-
-      - name: Compile wide Re_y robustness sweep
-        shell: cmd
-        run: >-
-          cl /nologo /std:c++20 /W4 /WX /EHsc /Iinclude
-          tests\WallTreatmentReynoldsSweep.cpp
-          src\turbulence\WallTreatment.cpp
-          /Fe:wall_treatment_reynolds_sweep.exe
-
-      - name: Run wide Re_y robustness sweep
-        shell: cmd
-        run: wall_treatment_reynolds_sweep.exe
+        run: |
+          for /f "usebackq tokens=*" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do set "VSINSTALL=%%i"
+          if not defined VSINSTALL exit /b 1
+          call "%VSINSTALL%\Common7\Tools\VsDevCmd.bat" -arch=x64 -host_arch=x64
+          if errorlevel 1 exit /b %errorlevel%
+          cl /nologo /std:c++20 /W4 /WX /EHsc /Iinclude tests\WallTreatmentReynoldsSweep.cpp src\turbulence\WallTreatment.cpp /Fe:wall_treatment_reynolds_sweep.exe
+          if errorlevel 1 exit /b %errorlevel%
+          wall_treatment_reynolds_sweep.exe
 
   serial-regression-build:
     name: Existing serial solver regression build
