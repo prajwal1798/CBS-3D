@@ -38,6 +38,23 @@ jobs:
           UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
         run: ./wall_treatment_verification
 
+      - name: Compile wide Re_y robustness sweep
+        run: |
+          g++ -std=c++20 -O1 -g \
+            -Wall -Wextra -Werror -pedantic \
+            -fsanitize=address,undefined \
+            -fno-omit-frame-pointer \
+            -Iinclude \
+            tests/WallTreatmentReynoldsSweep.cpp \
+            src/turbulence/WallTreatment.cpp \
+            -o wall_treatment_reynolds_sweep
+
+      - name: Run wide Re_y robustness sweep
+        env:
+          ASAN_OPTIONS: detect_leaks=1:halt_on_error=1
+          UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+        run: ./wall_treatment_reynolds_sweep
+
   windows-algebra:
     name: Windows MSVC algebra
     runs-on: windows-latest
@@ -57,6 +74,18 @@ jobs:
       - name: Run wall-treatment verification
         shell: cmd
         run: wall_treatment_verification.exe
+
+      - name: Compile wide Re_y robustness sweep
+        shell: cmd
+        run: >-
+          cl /nologo /std:c++20 /W4 /WX /EHsc /Iinclude
+          tests\WallTreatmentReynoldsSweep.cpp
+          src\turbulence\WallTreatment.cpp
+          /Fe:wall_treatment_reynolds_sweep.exe
+
+      - name: Run wide Re_y robustness sweep
+        shell: cmd
+        run: wall_treatment_reynolds_sweep.exe
 
   serial-regression-build:
     name: Existing serial solver regression build
