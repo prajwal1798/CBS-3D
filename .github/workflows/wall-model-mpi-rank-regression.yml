@@ -1,0 +1,62 @@
+name: Wall-model MPI rank-local regression
+
+on:
+  push:
+    branches:
+      - integration/sa-mpi
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  statuses: write
+
+jobs:
+  mpi-wall-rank-local:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+
+    steps:
+      - name: Check out branch
+        uses: actions/checkout@v4
+
+      - name: Install OpenMPI
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y g++ openmpi-bin libopenmpi-dev
+
+      - name: Compile two-rank wall-model regression
+        run: |
+          mpic++ -std=c++20 -O2 \
+            -Wall -Wextra -Werror -Wno-error=unused-function -pedantic \
+            -DOMPI_SKIP_MPICXX=1 \
+            -DMPICH_SKIP_MPICXX=1 \
+            -DCBS3D_USE_MPI=1 \
+            -Iinclude \
+            tests/WallModelCouplingMPIRankLocalVerification.cpp \
+            src/turbulence/WallModelCoupling.cpp \
+            src/turbulence/WallTreatment.cpp \
+            src/parallel/HaloExchange.cpp \
+            -o wall_model_mpi_rank_local_verification
+
+      - name: Run two-rank wall-model regression
+        env:
+          CBS3D_SA_WALL_TREATMENT: "1"
+        run: mpirun -np 2 ./wall_model_mpi_rank_local_verification
+
+      - name: Publish MPI wall-model status
+        if: always()
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          state=success
+          if [ "$JOB_STATUS" != "success" ]; then state=failure; fi
+          target_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          curl --fail-with-body --silent --show-error \
+            -X POST \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/$GITHUB_REPOSITORY/statuses/$GITHUB_SHA" \
+            -d "{\"state\":\"$state\",\"context\":\"wall-model/mpi-rank-local\",\"description\":\"MPI wall model allows interior ranks without wall faces\",\"target_url\":\"$target_url\"}"
