@@ -73,6 +73,17 @@ namespace
 
         return false;
     }
+
+    bool nearly_equal(
+        const Real a,
+        const Real b,
+        const Real relative_tolerance,
+        const Real absolute_tolerance = 0.0)
+    {
+        return std::fabs(a - b) <=
+            absolute_tolerance +
+            relative_tolerance * std::max(std::fabs(a), std::fabs(b));
+    }
 }
 
 int main()
@@ -81,7 +92,7 @@ int main()
     {
         CBSStateSI s;
 
-        s.cfg.npoin = 5;
+        s.cfg.npoin = 6;
         s.cfg.nelem = 2;
         s.cfg.nboun = 2;
         s.cfg.ndim = 3;
@@ -93,13 +104,13 @@ int main()
 
         s.intma.resize(4, 2);
         s.iside.resize(6, 2);
-        s.coord.resize(3, 5);
+        s.coord.resize(3, 6);
         s.mat_elem.resize(2);
-        s.node_material_mask.resize(5);
-        s.sa_active_node.resize(5);
-        s.sa_wall_node.resize(5);
-        s.sa_inlet_node.resize(5);
-        s.wall_distance.resize(5);
+        s.node_material_mask.resize(6);
+        s.sa_active_node.resize(6);
+        s.sa_wall_node.resize(6);
+        s.sa_inlet_node.resize(6);
+        s.wall_distance.resize(6);
 
         set_standard_tet_face_map(s);
 
@@ -119,16 +130,21 @@ int main()
         s.mat_elem(1) = 0;
         s.mat_elem(2) = 1;
 
-        const std::array<std::array<Real, 3>, 5> coordinates =
+        // Node 6 is an interior fluid query point used only to verify the
+        // corrected nearest-wall distance. It is not part of the synthetic
+        // topology because the two tetrahedra above already define the exact
+        // wall surface under test.
+        const std::array<std::array<Real, 3>, 6> coordinates =
         {{
             {{0.0, 0.0, 0.0}},
             {{1.0, 0.0, 0.0}},
             {{0.0, 1.0, 0.0}},
             {{0.0, 0.0, 1.0}},
-            {{1.0, 1.0, 1.0}}
+            {{1.0, 1.0, 1.0}},
+            {{0.2, 0.2, 0.2}}
         }};
 
-        for (Int ip = 1; ip <= 5; ++ip)
+        for (Int ip = 1; ip <= 6; ++ip)
         {
             for (Int dim = 1; dim <= 3; ++dim)
             {
@@ -144,11 +160,12 @@ int main()
         s.node_material_mask(3) = s.node_material_mask(2);
         s.node_material_mask(4) = s.node_material_mask(2);
         s.node_material_mask(5) = CBSStateSI::node_touches_solid;
+        s.node_material_mask(6) = CBSStateSI::node_touches_fluid;
 
-        // Active SA nodes are the fluid tetrahedron nodes only.
-        for (Int ip = 1; ip <= 5; ++ip)
+        // Fluid tetrahedron nodes plus the interior query point are SA active.
+        for (Int ip = 1; ip <= 6; ++ip)
         {
-            s.sa_active_node(ip) = ip <= 4 ? 1 : 0;
+            s.sa_active_node(ip) = (ip <= 4 || ip == 6) ? 1 : 0;
             s.sa_wall_node(ip) = 0;
             s.sa_inlet_node(ip) = 0;
         }
@@ -174,13 +191,14 @@ int main()
         TurbulenceWallTopology::reconcileWallNodeClassification(s);
 
         // Node 1 is on the explicit fluid wall. Nodes 2,3,4 are reconstructed
-        // material-interface wall nodes. Node 5 is solid-only and must remain
-        // outside the SA wall classification.
+        // material-interface wall nodes. Node 5 is solid-only and node 6 is an
+        // interior fluid point; neither may be classified as an SA wall.
         if (s.sa_wall_node(1) != 1 ||
             s.sa_wall_node(2) != 1 ||
             s.sa_wall_node(3) != 1 ||
             s.sa_wall_node(4) != 1 ||
-            s.sa_wall_node(5) != 0)
+            s.sa_wall_node(5) != 0 ||
+            s.sa_wall_node(6) != 0)
         {
             std::printf("FAIL: serial wall-node classification\n");
             return 1;
@@ -212,9 +230,6 @@ int main()
             }
         }
 
-        // Both accepted walls consist entirely of SA-active fluid/interface
-        // nodes, therefore this synthetic configuration has no active off-wall
-        // node and all active stored distances must be exactly zero.
         cbs::turbulence::WallDistanceStats stats;
         TurbulenceWallTopology::computeWallDistance(s, stats);
 
@@ -231,6 +246,18 @@ int main()
                 std::printf("FAIL: wall node received non-zero wall distance\n");
                 return 1;
             }
+        }
+
+        // The nearest accepted wall to (0.2,0.2,0.2) is the explicit fluid
+        // triangle in plane x=0, so the exact Euclidean distance is 0.2. The
+        // reconstructed fluid-solid interface lies on x+y+z=1 and is farther
+        // away: 0.4/sqrt(3) approximately 0.23094.
+        if (!nearly_equal(s.wall_distance(6), 0.2, 2.0e-13, 1.0e-14))
+        {
+            std::printf(
+                "FAIL: interior nearest-wall distance=% .17e expected=2.0e-1\n",
+                s.wall_distance(6));
+            return 1;
         }
 
         std::printf("PASS: serial CHT turbulence-wall topology\n");
