@@ -90,6 +90,28 @@ jobs:
       - name: Build existing serial solver and tests
         run: cmake --build build-serial --parallel 2
 
+      - name: Generate miniature flat-plate wall-model case
+        run: |
+          python3 examples/Flat_Plate_Turbulent/generate_case.py \
+            --output-prefix /tmp/cbs_flat_plate_smoke \
+            --target-yplus 1 \
+            --nx-upstream 2 \
+            --nx-plate 4 \
+            --ny 6 \
+            --nz 1 \
+            --iterations 3
+          test -s /tmp/cbs_flat_plate_smoke.plt
+          test -s /tmp/cbs_flat_plate_smoke.bco
+          test -s /tmp/cbs_flat_plate_smoke.par
+
+      - name: Run end-to-end flat-plate wall-model smoke case
+        env:
+          CBS3D_SA_WALL_TREATMENT: "1"
+          OMP_NUM_THREADS: "1"
+        run: |
+          ./build-serial/cbs3dpp_si /tmp/cbs_flat_plate_smoke | tee /tmp/flat_plate_smoke.log
+          grep -q "SA production wall treatment: ON" /tmp/flat_plate_smoke.log
+
       - name: Run existing CTest suite
         run: ctest --test-dir build-serial --output-on-failure
 
@@ -109,7 +131,7 @@ jobs:
             -H "Accept: application/vnd.github+json" \
             -H "X-GitHub-Api-Version: 2022-11-28" \
             "https://api.github.com/repos/$GITHUB_REPOSITORY/statuses/$GITHUB_SHA" \
-            -d "{\"state\":\"$state\",\"context\":\"topology-wall/serial\",\"description\":\"Topology + wall law/coupling + serial regressions\",\"target_url\":\"$target_url\"}"
+            -d "{\"state\":\"$state\",\"context\":\"topology-wall/serial\",\"description\":\"Topology + wall coupling + flat-plate smoke + serial regressions\",\"target_url\":\"$target_url\"}"
 
   mpi-petsc-build:
     name: MPI/PETSc build and cross-rank topology verification
