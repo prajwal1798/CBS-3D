@@ -44,7 +44,10 @@ set(CBS3D_CORE_SOURCES
     src/timestep/TimeStep.cpp
 
     src/solver/Convergence.cpp
-    src/solver/Steps.cpp
+    # StepsWallModel.cpp compiles the validated Steps.cpp implementation through
+    # narrow wrappers.  With CBS3D_SA_WALL_TREATMENT unset, those wrappers are
+    # exact no-ops and retain the established wall-resolved behaviour.
+    src/solver/StepsWallModel.cpp
     src/solver/Solver.cpp
     src/solver/SolverDistributedStep2.cpp
     src/solver/SolverDistributedStep3.cpp
@@ -70,6 +73,8 @@ set(CBS3D_CORE_SOURCES
     src/turbulence/SpalartAllmaras.cpp
     src/turbulence/WallDistance.cpp
     src/turbulence/TurbulencePreprocess.cpp
+    src/turbulence/WallTreatment.cpp
+    src/turbulence/WallModelCoupling.cpp
 
     src/boundary/TurbulenceBoundary.cpp
 
@@ -286,17 +291,6 @@ message(STATUS "  Source validation   : ${CBS3D_BUILD_SOURCE_VALIDATION}")
 
 #==============================================================================
 # Wall-distance verification test
-#
-# Checks the Spalart-Allmaras BVH nearest-wall search against an exhaustive
-# point-to-triangle search on a graded flat-plate node distribution, and reports
-# the timing of both.  The BVH is a pruning structure rather than an
-# approximation, so the two results must agree to round-off; any larger
-# difference is a defect and the test fails.
-#
-# Build and run:
-#     cmake -B build -DCBS3D_ENABLE_OPENMP=ON
-#     cmake --build build --target wall_distance_verification
-#     ./build/wall_distance_verification 140 80 40
 #==============================================================================
 if (CBS3D_BUILD_TESTS)
     add_executable(wall_distance_verification
