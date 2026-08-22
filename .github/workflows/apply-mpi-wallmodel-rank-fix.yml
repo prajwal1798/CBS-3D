@@ -1,0 +1,135 @@
+name: Apply MPI wall-model rank-local fix
+
+on:
+  push:
+    branches:
+      - integration/sa-mpi
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.event.head_commit.message == 'Stage MPI wall-model rank-local fix'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out integration branch
+        uses: actions/checkout@v4
+        with:
+          ref: integration/sa-mpi
+          fetch-depth: 0
+
+      - name: Apply audited rank-local wall-model correction
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          source = Path('src/turbulence/WallModelCoupling.cpp')
+          text = source.read_text(encoding='utf-8')
+
+          old_faces = '''                if (cache.faces.empty())
+                {
+                    throw std::runtime_error(
+                        "WallModelCoupling - wall treatment requested but no fluid BC 530/532 faces were found");
+                }
+
+                cache.global_faces = audit_global_face_uniqueness(s, cache.faces);
+'''
+
+          new_faces = '''                // A distributed rank is not required to touch the physical wall.
+                // Audit the communicator-wide surface first and reject only when
+                // the GLOBAL mesh contains no model wall at all.
+                cache.global_faces = audit_global_face_uniqueness(s, cache.faces);
+
+                if (cache.global_faces <= 0)
+                {
+                    throw std::runtime_error(
+                        "WallModelCoupling - wall treatment requested but no fluid BC 530/532 faces were found globally");
+                }
+'''
+
+          old_nodes = '''                if (cache.wall_nodes.empty())
+                {
+                    throw std::runtime_error(
+                        "WallModelCoupling - no model-wall nodes survived projector construction");
+                }
+
+                cache.ready = true;
+'''
+
+          new_nodes = '''                // Interior MPI ranks may legitimately own no wall nodes.  The
+                // invariant is communicator-wide: at least one wall-node
+                // projector must exist somewhere when global wall faces exist.
+                long long global_wall_node_occurrences =
+                    static_cast<long long>(cache.wall_nodes.size());
+
+          #ifdef CBS3D_USE_MPI
+                if (s.mpi_enabled && s.mpi_size > 1)
+                {
+                    const long long local_wall_node_occurrences =
+                        global_wall_node_occurrences;
+                    check_mpi(
+                        MPI_Allreduce(
+                            &local_wall_node_occurrences,
+                            &global_wall_node_occurrences,
+                            1,
+                            MPI_LONG_LONG,
+                            MPI_SUM,
+                            MPI_COMM_WORLD),
+                        "MPI_Allreduce wall-node projector audit");
+                }
+          #endif
+
+                if (global_wall_node_occurrences <= 0)
+                {
+                    throw std::runtime_error(
+                        "WallModelCoupling - no model-wall nodes survived global projector construction");
+                }
+
+                cache.ready = true;
+'''
+
+          if text.count(old_faces) != 1:
+              raise SystemExit('Expected exactly one local wall-face rejection block')
+          if text.count(old_nodes) != 1:
+              raise SystemExit('Expected exactly one local wall-node rejection block')
+
+          text = text.replace(old_faces, new_faces)
+          text = text.replace(old_nodes, new_nodes)
+          source.write_text(text, encoding='utf-8')
+
+          slurm = Path('jobs/sunbird/flatplate_wallmodel_p40_startup.slurm')
+          job = slurm.read_text(encoding='utf-8')
+
+          old_git = '''printf 'git HEAD        = %s\\n' "$(git -C "$CODE" rev-parse HEAD)"
+'''
+
+          new_git = '''GIT_HEAD_FILE="$CODE/.git/refs/heads/integration/sa-mpi"
+          if [[ -r "$GIT_HEAD_FILE" ]]; then
+              GIT_HEAD=$(cat "$GIT_HEAD_FILE")
+          else
+              GIT_HEAD="unavailable-on-compute-node"
+          fi
+          printf 'git HEAD        = %s\\n' "$GIT_HEAD"
+'''
+
+          if job.count(old_git) != 1:
+              raise SystemExit('Expected exactly one compute-node git provenance call')
+
+          job = job.replace(old_git, new_git)
+          slurm.write_text(job, encoding='utf-8')
+          PY
+
+      - name: Confirm intended diff only
+        run: |
+          git diff --check
+          git diff -- src/turbulence/WallModelCoupling.cpp jobs/sunbird/flatplate_wallmodel_p40_startup.slurm
+
+      - name: Commit correction to integration branch
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add src/turbulence/WallModelCoupling.cpp jobs/sunbird/flatplate_wallmodel_p40_startup.slurm
+          git commit -m 'Fix MPI wall model on ranks without local wall faces'
+          git push origin HEAD:integration/sa-mpi
