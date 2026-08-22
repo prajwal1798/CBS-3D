@@ -1,0 +1,187 @@
+name: SA wall-treatment foundation
+
+on:
+  push:
+    branches:
+      - feature/sa-wall-treatment-foundation
+  pull_request:
+    branches:
+      - integration/sa-mpi
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  linux-algebra:
+    name: Linux algebra + sanitizers
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Compile wall-treatment verification
+        run: |
+          g++ -std=c++20 -O1 -g \
+            -Wall -Wextra -Werror -pedantic \
+            -fsanitize=address,undefined \
+            -fno-omit-frame-pointer \
+            -Iinclude \
+            tests/WallTreatmentVerification.cpp \
+            src/turbulence/WallTreatment.cpp \
+            -o wall_treatment_verification
+
+      - name: Run wall-treatment verification
+        env:
+          ASAN_OPTIONS: detect_leaks=1:halt_on_error=1
+          UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+        run: ./wall_treatment_verification
+
+      - name: Compile wide Re_y robustness sweep
+        run: |
+          g++ -std=c++20 -O1 -g \
+            -Wall -Wextra -Werror -pedantic \
+            -fsanitize=address,undefined \
+            -fno-omit-frame-pointer \
+            -Iinclude \
+            tests/WallTreatmentReynoldsSweep.cpp \
+            src/turbulence/WallTreatment.cpp \
+            -o wall_treatment_reynolds_sweep
+
+      - name: Run wide Re_y robustness sweep
+        env:
+          ASAN_OPTIONS: detect_leaks=1:halt_on_error=1
+          UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+        run: ./wall_treatment_reynolds_sweep
+
+      - name: Compile NASA quartic-reference check
+        run: |
+          g++ -std=c++20 -O1 -g \
+            -Wall -Wextra -Werror -pedantic \
+            -fsanitize=address,undefined \
+            -fno-omit-frame-pointer \
+            -Iinclude \
+            tests/WallTreatmentNASAReference.cpp \
+            src/turbulence/WallTreatment.cpp \
+            -o wall_treatment_nasa_reference
+
+      - name: Run NASA quartic-reference check
+        env:
+          ASAN_OPTIONS: detect_leaks=1:halt_on_error=1
+          UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+        run: ./wall_treatment_nasa_reference
+
+  windows-algebra:
+    name: Windows MSVC algebra
+    runs-on: windows-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Compile and run wall-treatment verification
+        shell: cmd
+        run: |
+          for /f "usebackq tokens=*" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do set "VSINSTALL=%%i"
+          if not defined VSINSTALL exit /b 1
+          call "%VSINSTALL%\Common7\Tools\VsDevCmd.bat" -arch=x64 -host_arch=x64
+          if errorlevel 1 exit /b %errorlevel%
+          cl /nologo /std:c++20 /W4 /WX /EHsc /Iinclude tests\WallTreatmentVerification.cpp src\turbulence\WallTreatment.cpp /Fe:wall_treatment_verification.exe
+          if errorlevel 1 exit /b %errorlevel%
+          wall_treatment_verification.exe
+
+      - name: Compile and run wide Re_y robustness sweep
+        shell: cmd
+        run: |
+          for /f "usebackq tokens=*" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do set "VSINSTALL=%%i"
+          if not defined VSINSTALL exit /b 1
+          call "%VSINSTALL%\Common7\Tools\VsDevCmd.bat" -arch=x64 -host_arch=x64
+          if errorlevel 1 exit /b %errorlevel%
+          cl /nologo /std:c++20 /W4 /WX /EHsc /Iinclude tests\WallTreatmentReynoldsSweep.cpp src\turbulence\WallTreatment.cpp /Fe:wall_treatment_reynolds_sweep.exe
+          if errorlevel 1 exit /b %errorlevel%
+          wall_treatment_reynolds_sweep.exe
+
+      - name: Compile and run NASA quartic-reference check
+        shell: cmd
+        run: |
+          for /f "usebackq tokens=*" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do set "VSINSTALL=%%i"
+          if not defined VSINSTALL exit /b 1
+          call "%VSINSTALL%\Common7\Tools\VsDevCmd.bat" -arch=x64 -host_arch=x64
+          if errorlevel 1 exit /b %errorlevel%
+          cl /nologo /std:c++20 /W4 /WX /EHsc /Iinclude tests\WallTreatmentNASAReference.cpp src\turbulence\WallTreatment.cpp /Fe:wall_treatment_nasa_reference.exe
+          if errorlevel 1 exit /b %errorlevel%
+          wall_treatment_nasa_reference.exe
+
+  serial-regression-build:
+    name: Existing serial solver regression build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Configure
+        run: |
+          cmake -S . -B build-serial \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCBS3D_ENABLE_OPENMP=ON \
+            -DCBS3D_ENABLE_MPI=OFF \
+            -DCBS3D_ENABLE_PETSC=OFF \
+            -DCBS3D_BUILD_SOURCE_VALIDATION=ON \
+            -DCBS3D_BUILD_TESTS=ON
+
+      - name: Build existing solver and tests
+        run: cmake --build build-serial --parallel 2
+
+      - name: Run existing CTest suite
+        run: ctest --test-dir build-serial --output-on-failure
+
+  mpi-petsc-regression-build:
+    name: Existing MPI/PETSc solver regression build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install MPI and PETSc
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            cmake \
+            g++ \
+            openmpi-bin \
+            libopenmpi-dev \
+            libpetsc-real-dev \
+            pkg-config
+
+      - name: Resolve PETSc prefix
+        shell: bash
+        run: |
+          set -euo pipefail
+          if pkg-config --exists PETSc; then
+            PETSC_PREFIX="$(pkg-config --variable=prefix PETSc)"
+          elif pkg-config --exists petsc; then
+            PETSC_PREFIX="$(pkg-config --variable=prefix petsc)"
+          else
+            echo "PETSc pkg-config metadata not found" >&2
+            exit 1
+          fi
+          test -f "$PETSC_PREFIX/include/petsc.h"
+          test -d "$PETSC_PREFIX/lib"
+          echo "PETSC_DIR=$PETSC_PREFIX" >> "$GITHUB_ENV"
+
+      - name: Configure distributed solver
+        run: |
+          cmake -S . -B build-mpi-petsc \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCBS3D_ENABLE_MPI=ON \
+            -DCBS3D_ENABLE_PETSC=ON \
+            -DCBS3D_ENABLE_OPENMP=ON \
+            -DCBS3D_BUILD_TESTS=OFF \
+            -DCBS3D_BUILD_SOURCE_VALIDATION=OFF
+
+      - name: Build distributed solver
+        run: cmake --build build-mpi-petsc --parallel 2
