@@ -61,13 +61,14 @@ jobs:
         run: |
           state=success
           if [ "$JOB_STATUS" != "success" ]; then state=failure; fi
+          target_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
           curl --fail-with-body --silent --show-error \
             -X POST \
             -H "Authorization: Bearer $GH_TOKEN" \
             -H "Accept: application/vnd.github+json" \
             -H "X-GitHub-Api-Version: 2022-11-28" \
             "https://api.github.com/repos/$GITHUB_REPOSITORY/statuses/$GITHUB_SHA" \
-            -d "{\"state\":\"$state\",\"context\":\"topology/serial\",\"description\":\"Serial CHT topology + regression suite\"}"
+            -d "{\"state\":\"$state\",\"context\":\"topology/serial\",\"description\":\"Serial CHT topology + regression suite\",\"target_url\":\"$target_url\"}"
 
   mpi-petsc-build:
     name: MPI/PETSc build and cross-rank topology verification
@@ -144,10 +145,11 @@ jobs:
         run: |
           state=success
           if [ "$JOB_STATUS" != "success" ]; then state=failure; fi
+          target_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
           curl --fail-with-body --silent --show-error \
             -X POST \
             -H "Authorization: Bearer $GH_TOKEN" \
             -H "Accept: application/vnd.github+json" \
             -H "X-GitHub-Api-Version: 2022-11-28" \
             "https://api.github.com/repos/$GITHUB_REPOSITORY/statuses/$GITHUB_SHA" \
-            -d "{\"state\":\"$state\",\"context\":\"topology/mpi-petsc\",\"description\":\"MPI/PETSc build + cross-rank topology\"}"
+            -d "{\"state\":\"$state\",\"context\":\"topology/mpi-petsc\",\"description\":\"MPI/PETSc build + cross-rank topology\",\"target_url\":\"$target_url\"}"
