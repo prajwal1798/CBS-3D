@@ -127,6 +127,8 @@ jobs:
         run: |
           mpic++ -std=c++20 -O2 \
             -Wall -Wextra -Werror -pedantic \
+            -DOMPI_SKIP_MPICXX=1 \
+            -DMPICH_SKIP_MPICXX=1 \
             -DCBS3D_USE_MPI=1 \
             -Iinclude \
             tests/TurbulenceWallTopologyMPIVerification.cpp \
