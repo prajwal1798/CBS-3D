@@ -12,6 +12,10 @@
 #include <stdexcept>
 #include <string>
 
+#ifdef CBS3D_USE_MPI
+#include <mpi.h>
+#endif
+
 namespace cbs
 {
     namespace
@@ -41,15 +45,41 @@ namespace cbs
 
         bool contains_solid_elements(const CBSStateSI& s)
         {
+            int local_has_solid = 0;
+
             for (Int ie = 1; ie <= s.cfg.nelem; ++ie)
             {
                 if (s.mat_elem(ie) != 0)
                 {
-                    return true;
+                    local_has_solid = 1;
+                    break;
                 }
             }
 
-            return false;
+#ifdef CBS3D_USE_MPI
+            if (s.mpi_enabled && s.mpi_size > 1)
+            {
+                int global_has_solid = 0;
+
+                const int error_code = MPI_Allreduce(
+                    &local_has_solid,
+                    &global_has_solid,
+                    1,
+                    MPI_INT,
+                    MPI_MAX,
+                    MPI_COMM_WORLD);
+
+                if (error_code != MPI_SUCCESS)
+                {
+                    throw std::runtime_error(
+                        "TurbulencePreprocess - MPI_Allreduce failed while detecting global CHT materials");
+                }
+
+                return global_has_solid != 0;
+            }
+#endif
+
+            return local_has_solid != 0;
         }
     }
 
@@ -79,8 +109,10 @@ namespace cbs
         // Preserve the already validated and highly optimised pure-fluid
         // wall-distance path (BVH pruning + Morton ordering). The corrected
         // material-topology reconstruction is required only when solid
-        // tetrahedra exist, i.e. when a conformal CHT interface can be internal
-        // and a thermal BC such as 532 can belong to the solid exterior.
+        // tetrahedra exist anywhere in the global MPI problem, i.e. when a
+        // conformal CHT interface can be internal and a thermal BC such as 532
+        // can belong to the solid exterior. The communicator-wide material
+        // test guarantees that every rank takes the same preprocessing path.
         if (contains_solid_elements(s))
         {
             turbulence::TurbulenceWallTopology::computeWallDistance(s, stats);
