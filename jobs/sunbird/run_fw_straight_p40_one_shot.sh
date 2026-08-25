@@ -6,14 +6,16 @@ ROOT=/scratch/s.2337862/CBS3D/cases/fw_straight
 CODE=/scratch/s.2337862/CBS3D/code
 GEO="$ROOT/mesh/FW_SquareChannel_CHT.geo"
 REPO_GEO="$CODE/cases/fw_straight/mesh/FW_SquareChannel_CHT.geo"
+PAR="$ROOT/fw_straight.par"
+MATPROP="$ROOT/fw_straight.matprop"
 DRIVER="$CODE/jobs/sunbird/prepare_fw_straight_p40.sh"
 
 [[ -s "$REPO_GEO" ]] || { echo "FATAL: repository geometry missing: $REPO_GEO" >&2; exit 1; }
+[[ -s "$PAR" ]] || { echo "FATAL: missing authoritative parameter file: $PAR" >&2; exit 1; }
+[[ -s "$MATPROP" ]] || { echo "FATAL: missing authoritative material-property file: $MATPROP" >&2; exit 1; }
 [[ -s "$DRIVER" ]] || { echo "FATAL: missing $DRIVER" >&2; exit 1; }
 
-# The previous launcher incorrectly assumed the case-local .geo already existed.
-# The repo now owns the accepted geometry. Provision that exact copy into the
-# Sunbird case directory every time, while retaining any previous local file.
+# Provision the repository-owned accepted geometry into the case directory.
 mkdir -p "$ROOT/mesh" "$ROOT/input_backup"
 if [[ -s "$GEO" ]] && ! cmp -s "$REPO_GEO" "$GEO"; then
     STAMP=$(date +%Y%m%d_%H%M%S)
@@ -78,6 +80,68 @@ for name, value in checks:
     print("  %-12s = %.12g" % (name, value))
 print("  fluid core h = 0.0006 m")
 print("  physical IDs = volume 10/20; BC 511/520/530/532")
+PY
+
+# MeshIO reads the dimensional block positionally: dimensional flags, reference/
+# inlet/outlet, prescribed velocity, then Nusselt references. Historical .par
+# files used several different human-readable labels for that fourth pair.
+# Canonicalize that LABEL only, using the exact positional grammar implemented in
+# MeshIO.cpp. Numerical values are left untouched here; the main driver patches
+# the hydraulic diameter after this label has been normalized.
+python3 - "$PAR" <<'PY'
+from pathlib import Path
+import sys
+
+p = Path(sys.argv[1])
+lines = p.read_text(encoding="utf-8").splitlines()
+
+def skip(line):
+    s = line.strip()
+    return (not s) or s.startswith("#") or s.startswith("!")
+
+def next_data(idx):
+    for j in range(idx + 1, len(lines)):
+        if not skip(lines[j]):
+            return j
+    raise SystemExit("FATAL: unexpected EOF while locating dimensional .par block")
+
+flow_hits = []
+for i, line in enumerate(lines):
+    s = line.strip().lower()
+    if skip(line):
+        continue
+    if "p_ref" in s and ("mdot" in s or "inlet_mass_flow_rate" in s) and ("t_in" in s or "inlet_temperature" in s):
+        flow_hits.append(i)
+
+if len(flow_hits) != 1:
+    raise SystemExit("FATAL: expected one reference/inlet/outlet .par label; found %d" % len(flow_hits))
+
+flow_label = flow_hits[0]
+flow_data = next_data(flow_label)
+inlet_label = next_data(flow_data)
+inlet_data = next_data(inlet_label)
+nusselt_label = next_data(inlet_data)
+nusselt_data = next_data(nusselt_label)
+
+for desc, idx, n in (
+    ("reference/inlet/outlet", flow_data, 6),
+    ("prescribed inlet velocity", inlet_data, 3),
+    ("Nusselt references", nusselt_data, 3),
+):
+    fields = lines[idx].split()
+    if len(fields) < n:
+        raise SystemExit("FATAL: malformed %s data row: %r" % (desc, lines[idx]))
+    try:
+        [float(x) for x in fields[:n]]
+    except Exception:
+        raise SystemExit("FATAL: non-numeric %s data row: %r" % (desc, lines[idx]))
+
+lines[nusselt_label] = "Nusselt reference: nusselt_Tinf nusselt_Tref hydraulic_diameter"
+p.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+print("PARAMETER GRAMMAR AUDIT: PASS")
+print("  positional Nusselt block located and canonicalized")
+print("  data row preserved:", lines[nusselt_data])
 PY
 
 exec bash "$DRIVER"
