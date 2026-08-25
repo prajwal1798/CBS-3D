@@ -1,4 +1,6 @@
 #include "cbs/turbulence/CHTWallModelCoupling.hpp"
+#include "cbs/turbulence/ThermalWallTreatment.hpp"
+#include "cbs/turbulence/WallTreatment.hpp"
 
 #include <algorithm>
 #include <array>
@@ -61,7 +63,7 @@ namespace
 
         set_face_map(s);
 
-        // Fluid tet above z=0; solid tet below z=0.  They share nodes 1,2,3.
+        // Fluid tet above z=0; solid tet below z=0. They share nodes 1,2,3.
         s.intma.resize(4, 2);
         s.intma(1, 1) = 1; s.intma(2, 1) = 2;
         s.intma(3, 1) = 3; s.intma(4, 1) = 4;
