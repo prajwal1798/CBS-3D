@@ -5,10 +5,23 @@ set -euo pipefail
 ROOT=/scratch/s.2337862/CBS3D/cases/fw_straight
 CODE=/scratch/s.2337862/CBS3D/code
 GEO="$ROOT/mesh/FW_SquareChannel_CHT.geo"
+REPO_GEO="$CODE/cases/fw_straight/mesh/FW_SquareChannel_CHT.geo"
 DRIVER="$CODE/jobs/sunbird/prepare_fw_straight_p40.sh"
 
-[[ -s "$GEO" ]] || { echo "FATAL: missing $GEO" >&2; exit 1; }
+[[ -s "$REPO_GEO" ]] || { echo "FATAL: repository geometry missing: $REPO_GEO" >&2; exit 1; }
 [[ -s "$DRIVER" ]] || { echo "FATAL: missing $DRIVER" >&2; exit 1; }
+
+# The previous launcher incorrectly assumed the case-local .geo already existed.
+# The repo now owns the accepted geometry. Provision that exact copy into the
+# Sunbird case directory every time, while retaining any previous local file.
+mkdir -p "$ROOT/mesh" "$ROOT/input_backup"
+if [[ -s "$GEO" ]] && ! cmp -s "$REPO_GEO" "$GEO"; then
+    STAMP=$(date +%Y%m%d_%H%M%S)
+    cp -p "$GEO" "$ROOT/input_backup/FW_SquareChannel_CHT.geo.$STAMP.bak"
+fi
+cp -f "$REPO_GEO" "$GEO"
+
+echo "Provisioned canonical geometry: $GEO"
 
 # Filename is not enough. Several historical first-wall .geo files exist.
 # Refuse anything other than the accepted 200 mm, 21x21 outer, 15x10 inner,
