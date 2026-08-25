@@ -75,6 +75,7 @@ set(CBS3D_CORE_SOURCES
     src/turbulence/TurbulencePreprocess.cpp
     src/turbulence/WallTreatment.cpp
     src/turbulence/WallModelCoupling.cpp
+    src/turbulence/CHTWallModelCoupling.cpp
 
     src/boundary/TurbulenceBoundary.cpp
 
