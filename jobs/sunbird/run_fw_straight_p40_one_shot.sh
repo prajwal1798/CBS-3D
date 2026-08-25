@@ -6,16 +6,18 @@ ROOT=/scratch/s.2337862/CBS3D/cases/fw_straight
 CODE=/scratch/s.2337862/CBS3D/code
 GEO="$ROOT/mesh/FW_SquareChannel_CHT.geo"
 REPO_GEO="$CODE/cases/fw_straight/mesh/FW_SquareChannel_CHT.geo"
+GEO_GMSH44="$CODE/cases/fw_straight/mesh/FW_SquareChannel_CHT_gmsh44.geo"
 DRIVER="$CODE/jobs/sunbird/prepare_fw_straight_p40.sh"
 PAR="$ROOT/fw_straight.par"
 
 [[ -s "$REPO_GEO" ]] || { echo "FATAL: repository geometry missing: $REPO_GEO" >&2; exit 1; }
+[[ -s "$GEO_GMSH44" ]] || { echo "FATAL: OCC-free Gmsh-4.4 geometry missing: $GEO_GMSH44" >&2; exit 1; }
 [[ -s "$DRIVER" ]] || { echo "FATAL: missing $DRIVER" >&2; exit 1; }
 [[ -s "$PAR" ]] || { echo "FATAL: missing $PAR" >&2; exit 1; }
 
 # The repo owns the accepted geometry. Provision that exact copy into the
 # Sunbird case directory every time, while retaining any previous local file.
-mkdir -p "$ROOT/mesh" "$ROOT/input_backup"
+mkdir -p "$ROOT/mesh" "$ROOT/input_backup" "$ROOT/run"
 if [[ -s "$GEO" ]] && ! cmp -s "$REPO_GEO" "$GEO"; then
     STAMP=$(date +%Y%m%d_%H%M%S)
     cp -p "$GEO" "$ROOT/input_backup/FW_SquareChannel_CHT.geo.$STAMP.bak"
@@ -81,10 +83,8 @@ print("  fluid core h = 0.0006 m")
 print("  physical IDs = volume 10/20; BC 511/520/530/532")
 PY
 
-# MeshIO reads the dimensional extension positionally.  Locate the Nusselt
+# MeshIO reads the dimensional extension positionally. Locate the Nusselt
 # label from that exact grammar instead of guessing its decorative wording.
-# Canonicalizing the label makes the downstream physics patch deterministic
-# while leaving the three existing numerical values untouched here.
 python3 - "$PAR" <<'PY'
 from pathlib import Path
 import sys
@@ -141,15 +141,56 @@ print("  positional Nusselt block located and canonicalized")
 print("  data row preserved:", lines[nusselt_data])
 PY
 
-# prepare_fw_straight_p40.sh writes a Slurm script through one deliberately
-# expanded outer here-document.  Its nested quoted Python here-document contains
-# the literal MSH2 section markers "$Nodes" and "$Elements".  Supplying these
-# two shell variables as their own literal spellings prevents `set -u` from
-# treating those MSH2 tokens as undefined variables while the outer document is
-# generated.  The generated Slurm file therefore contains the intended literal
-# strings, which are protected by the nested quoted Python here-document when
-# the job later executes.
+# Sunbird's gmsh/4.4.0 executable reports that it was built WITHOUT
+# OpenCASCADE. The accepted workstation geometry uses OCC Box/BooleanDifference,
+# so merely renaming modern mesh-field options is insufficient. Build a runtime
+# copy of the otherwise-tested preparation driver and replace only its geometry
+# compatibility block with the explicitly constructed OCC-free equivalent.
+# The OCC-free file uses the same physical topology and the same HXT TET4 sizing
+# fields; source-mesh audits below remain the final authority.
+RUNTIME_DRIVER="$ROOT/run/prepare_fw_straight_p40_runtime.sh"
+python3 - "$DRIVER" "$RUNTIME_DRIVER" "$GEO_GMSH44" <<'PY'
+from pathlib import Path
+import sys
+
+source = Path(sys.argv[1])
+target = Path(sys.argv[2])
+compat = Path(sys.argv[3]).resolve()
+
+s = source.read_text(encoding="utf-8")
+start_token = 'cp "\\$GEO" "\\$COMPAT_GEO"\npython3 - "\\$COMPAT_GEO" <<\'PY44\'\n'
+start = s.find(start_token)
+if start < 0:
+    raise SystemExit("FATAL: could not locate legacy OCC compatibility block in preparation driver")
+
+end_token = '\nPY44\n\nmodule purge'
+end = s.find(end_token, start)
+if end < 0:
+    raise SystemExit("FATAL: could not locate end of legacy OCC compatibility block")
+
+replacement = 'cp "%s" "\\$COMPAT_GEO"\n' % str(compat)
+s = s[:start] + replacement + s[end + len('\nPY44'):]
+
+target.write_text(s, encoding="utf-8")
+target.chmod(0o755)
+
+check = target.read_text(encoding="utf-8")
+if 'Geometry.OCCBoundsUseStl' in check:
+    raise SystemExit("FATAL: runtime preparation driver still contains OCC geometry conversion")
+if str(compat) not in check:
+    raise SystemExit("FATAL: runtime preparation driver did not receive OCC-free geometry")
+
+print("SUNBIRD GMSH COMPATIBILITY AUDIT: PASS")
+print("  site gmsh        : 4.4.0 without OpenCASCADE")
+print("  geometry source  :", compat)
+print("  topology         : explicit shared surfaces, no OCC Boolean")
+print("  volume mesher    : HXT Algorithm3D=10")
+PY
+
+# The generated Slurm script contains literal MSH2 section markers in a nested
+# quoted Python here-document. Supply those spellings during outer expansion so
+# `set -u` cannot interpret them as undefined shell variables.
 export Nodes='$Nodes'
 export Elements='$Elements'
 
-exec bash "$DRIVER"
+exec bash "$RUNTIME_DRIVER"
