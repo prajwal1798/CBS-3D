@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
   statuses: write
 
 jobs:
@@ -134,7 +134,7 @@ jobs:
             -d "{\"state\":\"$state\",\"context\":\"topology-wall/serial\",\"description\":\"Topology + wall coupling + flat-plate smoke + serial regressions\",\"target_url\":\"$target_url\"}"
 
   mpi-petsc-build:
-    name: MPI/PETSc build and cross-rank topology verification
+    name: MPI/PETSc build and cross-rank topology/wall verification
     runs-on: ubuntu-24.04
     timeout-minutes: 30
 
@@ -201,7 +201,26 @@ jobs:
       - name: Run two-rank topology regression
         run: mpirun -np 2 ./turbulence_wall_topology_mpi_verification
 
-      - name: Publish MPI topology status
+      - name: Compile two-rank wall-model rank-local regression
+        run: |
+          mpic++ -std=c++20 -O2 \
+            -Wall -Wextra -Werror -Wno-error=unused-function -pedantic \
+            -DOMPI_SKIP_MPICXX=1 \
+            -DMPICH_SKIP_MPICXX=1 \
+            -DCBS3D_USE_MPI=1 \
+            -Iinclude \
+            tests/WallModelCouplingMPIRankLocalVerification.cpp \
+            src/turbulence/WallModelCoupling.cpp \
+            src/turbulence/WallTreatment.cpp \
+            src/parallel/HaloExchange.cpp \
+            -o wall_model_mpi_rank_local_verification
+
+      - name: Run two-rank wall-model rank-local regression
+        env:
+          CBS3D_SA_WALL_TREATMENT: "1"
+        run: mpirun -np 2 ./wall_model_mpi_rank_local_verification
+
+      - name: Publish MPI topology/wall status
         if: always()
         continue-on-error: true
         env:
@@ -217,147 +236,4 @@ jobs:
             -H "Accept: application/vnd.github+json" \
             -H "X-GitHub-Api-Version: 2022-11-28" \
             "https://api.github.com/repos/$GITHUB_REPOSITORY/statuses/$GITHUB_SHA" \
-            -d "{\"state\":\"$state\",\"context\":\"topology/mpi-petsc\",\"description\":\"MPI/PETSc build + cross-rank topology\",\"target_url\":\"$target_url\"}"
-
-  apply-wallmodel-mpi-rank-fix:
-    name: Apply and verify MPI wall-model rank-local fix
-    if: github.event.head_commit.message == 'Stage MPI wall-model fix through established audit'
-    runs-on: ubuntu-24.04
-    timeout-minutes: 15
-
-    steps:
-      - name: Check out integration branch
-        uses: actions/checkout@v4
-        with:
-          ref: integration/sa-mpi
-          fetch-depth: 0
-
-      - name: Install OpenMPI
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y g++ openmpi-bin libopenmpi-dev
-
-      - name: Patch local-only wall guards and Sunbird provenance
-        run: |
-          python3 - <<'PY'
-          from pathlib import Path
-
-          source = Path('src/turbulence/WallModelCoupling.cpp')
-          text = source.read_text(encoding='utf-8')
-
-          old_faces = '''                if (cache.faces.empty())
-                {
-                    throw std::runtime_error(
-                        "WallModelCoupling - wall treatment requested but no fluid BC 530/532 faces were found");
-                }
-
-                cache.global_faces = audit_global_face_uniqueness(s, cache.faces);
-'''
-          new_faces = '''                // A distributed rank is not required to touch the physical wall.
-                // Audit the communicator-wide surface first and reject only when
-                // the GLOBAL mesh contains no model wall at all.
-                cache.global_faces = audit_global_face_uniqueness(s, cache.faces);
-
-                if (cache.global_faces <= 0)
-                {
-                    throw std::runtime_error(
-                        "WallModelCoupling - wall treatment requested but no fluid BC 530/532 faces were found globally");
-                }
-'''
-
-          old_nodes = '''                if (cache.wall_nodes.empty())
-                {
-                    throw std::runtime_error(
-                        "WallModelCoupling - no model-wall nodes survived projector construction");
-                }
-
-                cache.ready = true;
-'''
-          new_nodes = '''                // Interior MPI ranks may legitimately own no wall nodes.  The
-                // invariant is communicator-wide: at least one wall-node
-                // projector must exist somewhere when global wall faces exist.
-                long long global_wall_node_occurrences =
-                    static_cast<long long>(cache.wall_nodes.size());
-
-          #ifdef CBS3D_USE_MPI
-                if (s.mpi_enabled && s.mpi_size > 1)
-                {
-                    const long long local_wall_node_occurrences =
-                        global_wall_node_occurrences;
-                    check_mpi(
-                        MPI_Allreduce(
-                            &local_wall_node_occurrences,
-                            &global_wall_node_occurrences,
-                            1,
-                            MPI_LONG_LONG,
-                            MPI_SUM,
-                            MPI_COMM_WORLD),
-                        "MPI_Allreduce wall-node projector audit");
-                }
-          #endif
-
-                if (global_wall_node_occurrences <= 0)
-                {
-                    throw std::runtime_error(
-                        "WallModelCoupling - no model-wall nodes survived global projector construction");
-                }
-
-                cache.ready = true;
-'''
-
-          if text.count(old_faces) != 1:
-              raise SystemExit('Expected exactly one local wall-face rejection block')
-          if text.count(old_nodes) != 1:
-              raise SystemExit('Expected exactly one local wall-node rejection block')
-          source.write_text(
-              text.replace(old_faces, new_faces).replace(old_nodes, new_nodes),
-              encoding='utf-8')
-
-          slurm = Path('jobs/sunbird/flatplate_wallmodel_p40_startup.slurm')
-          job = slurm.read_text(encoding='utf-8')
-          old_git = '''printf 'git HEAD        = %s\\n' "$(git -C "$CODE" rev-parse HEAD)"
-'''
-          new_git = '''GIT_HEAD_FILE="$CODE/.git/refs/heads/integration/sa-mpi"
-          if [[ -r "$GIT_HEAD_FILE" ]]; then
-              GIT_HEAD=$(cat "$GIT_HEAD_FILE")
-          else
-              GIT_HEAD="unavailable-on-compute-node"
-          fi
-          printf 'git HEAD        = %s\\n' "$GIT_HEAD"
-'''
-          if job.count(old_git) != 1:
-              raise SystemExit('Expected exactly one compute-node git provenance call')
-          slurm.write_text(job.replace(old_git, new_git), encoding='utf-8')
-          PY
-
-      - name: Compile exact two-rank regression against patched source
-        run: |
-          mpic++ -std=c++20 -O2 \
-            -Wall -Wextra -Werror -Wno-error=unused-function -pedantic \
-            -DOMPI_SKIP_MPICXX=1 \
-            -DMPICH_SKIP_MPICXX=1 \
-            -DCBS3D_USE_MPI=1 \
-            -Iinclude \
-            tests/WallModelCouplingMPIRankLocalVerification.cpp \
-            src/turbulence/WallModelCoupling.cpp \
-            src/turbulence/WallTreatment.cpp \
-            src/parallel/HaloExchange.cpp \
-            -o wall_model_mpi_rank_local_verification
-
-      - name: Run exact two-rank regression
-        env:
-          CBS3D_SA_WALL_TREATMENT: "1"
-        run: mpirun -np 2 ./wall_model_mpi_rank_local_verification
-
-      - name: Audit patch
-        run: |
-          git diff --check
-          git diff -- src/turbulence/WallModelCoupling.cpp jobs/sunbird/flatplate_wallmodel_p40_startup.slurm
-
-      - name: Commit verified fix to integration branch
-        run: |
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add src/turbulence/WallModelCoupling.cpp jobs/sunbird/flatplate_wallmodel_p40_startup.slurm
-          git commit -m 'Fix MPI wall model on ranks without local wall faces'
-          git push origin HEAD:integration/sa-mpi
+            -d "{\"state\":\"$state\",\"context\":\"topology/mpi-petsc\",\"description\":\"MPI/PETSc build + topology + wall rank-local\",\"target_url\":\"$target_url\"}"
