@@ -1,31 +1,59 @@
 //=============================================================================
 // CBS3D++_SI
 //
-// Restart-aware distributed production wrapper with optional temperature AFC
-// and opt-in SA wall treatment.
+// Restart-aware distributed production wrapper with optional temperature AFC,
+// pure-fluid Spalding treatment and conformal CHT Spalding/Kader treatment.
 //
-// The validated production loop is compiled unchanged.  Narrow wrapper classes
-// intercept only the established extension points:
+// The validated production loop remains unchanged.  Narrow wrappers intercept
+// only the established extension points:
 //
-//   Step 1 momentum RHS  -> replace natural wall flux by Spalding traction
-//   strong wall velocity -> restore tangent-space velocity and keep u.n = 0
-//   Step 4 energy RHS    -> optional AFC limiter
+//   SA preprocessing       -> prepare CHT thermal stability conductivity
+//   Step 1 momentum RHS    -> add the selected wall-model momentum coupling
+//   strong wall velocity   -> restore tangent-space velocity, keep u.n = 0
+//   Step 4 energy RHS      -> CHT Kader normal-diffusion replacement, then AFC
 //=============================================================================
 
 #include "cbs/assembly/EnergyAssembly.hpp"
 #include "cbs/assembly/MomentumAssembly.hpp"
 #include "cbs/assembly/TemperatureAFC.hpp"
 #include "cbs/boundary/Boundary.hpp"
+#include "cbs/turbulence/CHTWallModelCoupling.hpp"
+#include "cbs/turbulence/TurbulencePreprocess.hpp"
 #include "cbs/turbulence/WallModelCoupling.hpp"
 
 namespace cbs
 {
+    class RestartCHTTurbulencePreprocess
+    {
+    public:
+        static void prepareSpalartAllmaras(CBSStateSI& s)
+        {
+            TurbulencePreprocess::prepareSpalartAllmaras(s);
+
+            // This is the critical first-step stability hook.  SA preprocessing
+            // has just rebuilt nu_t_e/k_eff_e, so wall-adjacent conductivity can
+            // now be raised to a conservative Kader normal-diffusion bound before
+            // TimeStep::computeTimeStep is called for the first time.
+            turbulence::CHTWallModelCoupling::prepareThermalStabilityConductivity(s);
+        }
+    };
+
     class RestartAfcEnergyAssembly
     {
     public:
         static void assembleStep4Rhs(CBSStateSI& s)
         {
+            // SA has updated nu_t_e immediately before Step 4. Rebuild the exact
+            // ordinary bulk turbulent conductivity and install the wall-normal
+            // stability bound for both this residual and the next timestep.
+            turbulence::CHTWallModelCoupling::prepareThermalStabilityConductivity(s);
+
             EnergyAssembly::assembleStep4Rhs(s);
+
+            // EnergyAssembly saw the conservative isotropic upper bound. Replace
+            // it by the intended tensor: ordinary SA k in tangent directions and
+            // Kader k_n in each incident CHT wall-normal direction.
+            (void)turbulence::CHTWallModelCoupling::correctThermalWallDiffusion(s);
 
             if (TemperatureAFC::enabled())
             {
@@ -45,7 +73,12 @@ namespace cbs
         static void assembleStep1Rhs(CBSStateSI& s)
         {
             MomentumAssembly::assembleStep1Rhs(s);
+
+            // The two modes are intentionally independent.  The CHT module
+            // rejects simultaneous activation so an accidental double wall load
+            // cannot pass silently.
             (void)turbulence::WallModelCoupling::replaceMomentumWallFlux(s);
+            (void)turbulence::CHTWallModelCoupling::addMomentumWallFlux(s);
         }
 
         static void applyRealTimeMomentumTerm(CBSStateSI& s)
@@ -59,18 +92,24 @@ namespace cbs
     public:
         static void applyOwnedVelocityConstraints(CBSStateSI& s)
         {
-            const auto captured =
+            const auto captured_pure =
                 turbulence::WallModelCoupling::captureVelocity(s, false);
+            const auto captured_cht =
+                turbulence::CHTWallModelCoupling::captureVelocity(s, false);
 
             Boundary::applyOwnedVelocityConstraints(s);
 
             turbulence::WallModelCoupling::restoreTangentialAndEnforceImpermeability(
                 s,
-                captured);
+                captured_pure);
+            turbulence::CHTWallModelCoupling::restoreTangentialAndEnforceImpermeability(
+                s,
+                captured_cht);
         }
     };
 }
 
+#define TurbulencePreprocess RestartCHTTurbulencePreprocess
 #define EnergyAssembly RestartAfcEnergyAssembly
 #define MomentumAssembly RestartWallModelMomentumAssembly
 #define Boundary RestartWallModelBoundary
@@ -78,3 +117,4 @@ namespace cbs
 #undef Boundary
 #undef MomentumAssembly
 #undef EnergyAssembly
+#undef TurbulencePreprocess
