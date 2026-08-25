@@ -1,4 +1,4 @@
-name: Exact MPI wall rank guard repair
+name: Repair MPI wall rank guards once
 
 on:
   push:
@@ -10,102 +10,128 @@ permissions:
 
 jobs:
   repair:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+
     steps:
-      - uses: actions/checkout@v4
+      - name: Check out integration branch
+        uses: actions/checkout@v4
         with:
           ref: integration/sa-mpi
           fetch-depth: 0
 
-      - name: Replace only the two invalid rank-local guards
+      - name: Install OpenMPI
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y g++ openmpi-bin libopenmpi-dev
+
+      - name: Replace invalid rank-local guards
+        shell: bash
         run: |
           set -euo pipefail
           python3 - <<'PY'
           from pathlib import Path
 
-          path = Path('src/turbulence/WallModelCoupling.cpp')
-          text = path.read_text(encoding='utf-8')
+          path = Path("src/turbulence/WallModelCoupling.cpp")
+          text = path.read_text(encoding="utf-8")
 
-          old_faces = '''                if (cache.faces.empty())
-                {
-                    throw std::runtime_error(
-                        "WallModelCoupling - wall treatment requested but no fluid BC 530/532 faces were found");
-                }
+          old_faces = (
+              "                if (cache.faces.empty())\n"
+              "                {\n"
+              "                    throw std::runtime_error(\n"
+              "                        \"WallModelCoupling - wall treatment requested but no fluid BC 530/532 faces were found\");\n"
+              "                }\n\n"
+              "                cache.global_faces = audit_global_face_uniqueness(s, cache.faces);\n"
+          )
+          new_faces = (
+              "                // A distributed rank is not required to touch the physical wall.\n"
+              "                // All ranks must participate in the communicator-wide face audit;\n"
+              "                // reject the case only when the GLOBAL wall inventory is empty.\n"
+              "                cache.global_faces = audit_global_face_uniqueness(s, cache.faces);\n\n"
+              "                if (cache.global_faces <= 0)\n"
+              "                {\n"
+              "                    throw std::runtime_error(\n"
+              "                        \"WallModelCoupling - wall treatment requested but no fluid BC 530/532 faces were found globally\");\n"
+              "                }\n"
+          )
 
-                cache.global_faces = audit_global_face_uniqueness(s, cache.faces);
-'''
-          new_faces = '''                // A distributed rank is not required to touch the physical wall.
-                // All ranks must participate in the communicator-wide face audit;
-                // reject the case only when the GLOBAL wall inventory is empty.
-                cache.global_faces = audit_global_face_uniqueness(s, cache.faces);
-
-                if (cache.global_faces <= 0)
-                {
-                    throw std::runtime_error(
-                        "WallModelCoupling - wall treatment requested but no fluid BC 530/532 faces were found globally");
-                }
-'''
-
-          old_nodes = '''                if (cache.wall_nodes.empty())
-                {
-                    throw std::runtime_error(
-                        "WallModelCoupling - no model-wall nodes survived projector construction");
-                }
-
-                cache.ready = true;
-'''
-          new_nodes = '''                // Interior MPI ranks may legitimately have no local wall projector.
-                // The required invariant is communicator-wide: at least one
-                // wall-node projector exists somewhere when global wall faces exist.
-                const long long local_wall_node_occurrences =
-                    static_cast<long long>(cache.wall_nodes.size());
-                long long global_wall_node_occurrences =
-                    local_wall_node_occurrences;
-
-#ifdef CBS3D_USE_MPI
-                if (s.mpi_enabled && s.mpi_size > 1)
-                {
-                    check_mpi(
-                        MPI_Allreduce(
-                            &local_wall_node_occurrences,
-                            &global_wall_node_occurrences,
-                            1,
-                            MPI_LONG_LONG,
-                            MPI_SUM,
-                            MPI_COMM_WORLD),
-                        "MPI_Allreduce wall-node projector audit");
-                }
-#endif
-
-                if (global_wall_node_occurrences <= 0)
-                {
-                    throw std::runtime_error(
-                        "WallModelCoupling - no model-wall nodes survived global projector construction");
-                }
-
-                cache.ready = true;
-'''
+          old_nodes = (
+              "                if (cache.wall_nodes.empty())\n"
+              "                {\n"
+              "                    throw std::runtime_error(\n"
+              "                        \"WallModelCoupling - no model-wall nodes survived projector construction\");\n"
+              "                }\n\n"
+              "                cache.ready = true;\n"
+          )
+          new_nodes = (
+              "                // Interior MPI ranks may legitimately have no local wall projector.\n"
+              "                // The required invariant is communicator-wide: at least one\n"
+              "                // wall-node projector exists somewhere when global wall faces exist.\n"
+              "                const long long local_wall_node_occurrences =\n"
+              "                    static_cast<long long>(cache.wall_nodes.size());\n"
+              "                long long global_wall_node_occurrences =\n"
+              "                    local_wall_node_occurrences;\n\n"
+              "#ifdef CBS3D_USE_MPI\n"
+              "                if (s.mpi_enabled && s.mpi_size > 1)\n"
+              "                {\n"
+              "                    check_mpi(\n"
+              "                        MPI_Allreduce(\n"
+              "                            &local_wall_node_occurrences,\n"
+              "                            &global_wall_node_occurrences,\n"
+              "                            1,\n"
+              "                            MPI_LONG_LONG,\n"
+              "                            MPI_SUM,\n"
+              "                            MPI_COMM_WORLD),\n"
+              "                        \"MPI_Allreduce wall-node projector audit\");\n"
+              "                }\n"
+              "#endif\n\n"
+              "                if (global_wall_node_occurrences <= 0)\n"
+              "                {\n"
+              "                    throw std::runtime_error(\n"
+              "                        \"WallModelCoupling - no model-wall nodes survived global projector construction\");\n"
+              "                }\n\n"
+              "                cache.ready = true;\n"
+          )
 
           if text.count(old_faces) != 1:
-              raise SystemExit('expected exactly one old local wall-face guard')
+              raise SystemExit("expected exactly one old local wall-face guard")
           if text.count(old_nodes) != 1:
-              raise SystemExit('expected exactly one old local wall-node guard')
+              raise SystemExit("expected exactly one old local wall-node guard")
 
-          text = text.replace(old_faces, new_faces)
-          text = text.replace(old_nodes, new_nodes)
-          path.write_text(text, encoding='utf-8')
+          path.write_text(
+              text.replace(old_faces, new_faces).replace(old_nodes, new_nodes),
+              encoding="utf-8",
+          )
           PY
-
           git diff --check
-          grep -n 'cache.faces.empty\|cache.global_faces <= 0\|cache.wall_nodes.empty\|global_wall_node_occurrences' src/turbulence/WallModelCoupling.cpp
 
-      - name: Commit repair and remove this one-shot workflow
+      - name: Compile two-rank regression
+        run: |
+          mpic++ -std=c++20 -O2 \
+            -Wall -Wextra -Werror -Wno-error=unused-function -pedantic \
+            -DOMPI_SKIP_MPICXX=1 \
+            -DMPICH_SKIP_MPICXX=1 \
+            -DCBS3D_USE_MPI=1 \
+            -Iinclude \
+            tests/WallModelCouplingMPIRankLocalVerification.cpp \
+            src/turbulence/WallModelCoupling.cpp \
+            src/turbulence/WallTreatment.cpp \
+            src/parallel/HaloExchange.cpp \
+            -o wall_model_mpi_rank_local_verification
+
+      - name: Run two-rank regression
+        env:
+          CBS3D_SA_WALL_TREATMENT: "1"
+        run: mpirun -np 2 ./wall_model_mpi_rank_local_verification
+
+      - name: Commit verified repair and remove one-shot workflow
+        shell: bash
         run: |
           set -euo pipefail
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git rm .github/workflows/fix-wall-rank-guards-once.yml
           git add src/turbulence/WallModelCoupling.cpp
           git diff --cached --check
-          git commit -m 'Fix MPI wall model on ranks without local wall faces'
+          git commit -m "Fix MPI wall model on ranks without local wall faces"
           git push origin HEAD:integration/sa-mpi
