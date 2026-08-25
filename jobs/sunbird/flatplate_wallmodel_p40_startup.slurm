@@ -149,7 +149,13 @@ printf 'partition       = %s\n' "$STAGED"
 printf 'run directory   = %s\n' "$RUN_DIR"
 printf 'wall treatment  = %s\n' "$CBS3D_SA_WALL_TREATMENT"
 printf 'kappa / B       = %s / %s\n' "$CBS3D_WALL_KAPPA" "$CBS3D_WALL_B"
-printf 'git HEAD        = %s\n' "$(git -C "$CODE" rev-parse HEAD)"
+GIT_HEAD_FILE="$CODE/.git/refs/heads/integration/sa-mpi"
+if [[ -r "$GIT_HEAD_FILE" ]]; then
+    GIT_HEAD=$(cat "$GIT_HEAD_FILE")
+else
+    GIT_HEAD="unavailable-on-compute-node"
+fi
+printf 'git HEAD        = %s\n' "$GIT_HEAD"
 printf '============================================================\n'
 
 cd "$RUN_DIR"
