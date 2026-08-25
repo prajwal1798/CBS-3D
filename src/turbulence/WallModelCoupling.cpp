@@ -565,13 +565,16 @@ namespace cbs
                     cache.faces.push_back(face);
                 }
 
-                if (cache.faces.empty())
+                // A distributed rank is not required to touch the physical wall.
+                // All ranks must participate in the communicator-wide face audit;
+                // reject the case only when the GLOBAL wall inventory is empty.
+                cache.global_faces = audit_global_face_uniqueness(s, cache.faces);
+
+                if (cache.global_faces <= 0)
                 {
                     throw std::runtime_error(
-                        "WallModelCoupling - wall treatment requested but no fluid BC 530/532 faces were found");
+                        "WallModelCoupling - wall treatment requested but no fluid BC 530/532 faces were found globally");
                 }
-
-                cache.global_faces = audit_global_face_uniqueness(s, cache.faces);
 
 #ifdef CBS3D_USE_MPI
                 if (s.mpi_enabled && s.mpi_size > 1)
@@ -611,10 +614,33 @@ namespace cbs
                     }
                 }
 
-                if (cache.wall_nodes.empty())
+                // Interior MPI ranks may legitimately have no local wall projector.
+                // The required invariant is communicator-wide: at least one
+                // wall-node projector exists somewhere when global wall faces exist.
+                const long long local_wall_node_occurrences =
+                    static_cast<long long>(cache.wall_nodes.size());
+                long long global_wall_node_occurrences =
+                    local_wall_node_occurrences;
+
+#ifdef CBS3D_USE_MPI
+                if (s.mpi_enabled && s.mpi_size > 1)
+                {
+                    check_mpi(
+                        MPI_Allreduce(
+                            &local_wall_node_occurrences,
+                            &global_wall_node_occurrences,
+                            1,
+                            MPI_LONG_LONG,
+                            MPI_SUM,
+                            MPI_COMM_WORLD),
+                        "MPI_Allreduce wall-node projector audit");
+                }
+#endif
+
+                if (global_wall_node_occurrences <= 0)
                 {
                     throw std::runtime_error(
-                        "WallModelCoupling - no model-wall nodes survived projector construction");
+                        "WallModelCoupling - no model-wall nodes survived global projector construction");
                 }
 
                 cache.ready = true;
