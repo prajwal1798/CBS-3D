@@ -16,3 +16,6 @@ input/blanket/partitions/40/
 
 # Generated solver output
 output/
+
+# Retired/generated visual layout; never track this again.
+tools/CHT_UTube_layout.png
