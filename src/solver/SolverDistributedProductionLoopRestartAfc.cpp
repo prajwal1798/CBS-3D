@@ -10,7 +10,13 @@
 //   SA preprocessing       -> prepare CHT thermal stability conductivity
 //   Step 1 momentum RHS    -> add the selected wall-model momentum coupling
 //   strong wall velocity   -> restore tangent-space velocity, keep u.n = 0
-//   Step 4 energy RHS      -> CHT Kader normal-diffusion replacement, then AFC
+//   Step 4 energy RHS      -> CHT Kader normal-diffusion replacement OR AFC
+//
+// Temperature AFC is intentionally not combined with the CHT wall operator yet.
+// AFC reconstructs an isotropic elemental operator from k_eff_e; the CHT wall
+// model replaces that operator by an anisotropic rank-one normal correction.
+// Running both without deriving the same operator inside AFC would make the
+// limiter inconsistent with the residual it is limiting.
 //=============================================================================
 
 #include "cbs/assembly/EnergyAssembly.hpp"
@@ -21,6 +27,8 @@
 #include "cbs/turbulence/TurbulencePreprocess.hpp"
 #include "cbs/turbulence/WallModelCoupling.hpp"
 
+#include <stdexcept>
+
 namespace cbs
 {
     class RestartCHTTurbulencePreprocess
@@ -29,6 +37,16 @@ namespace cbs
         static void prepareSpalartAllmaras(CBSStateSI& s)
         {
             TurbulencePreprocess::prepareSpalartAllmaras(s);
+
+            // Fail before the first pressure/timestep setup if an unsupported
+            // combination was requested.  Silently applying AFC to a different
+            // thermal operator would be numerically worse than stopping here.
+            if (turbulence::CHTWallModelCoupling::enabled(s) &&
+                TemperatureAFC::enabled())
+            {
+                throw std::runtime_error(
+                    "CBS3D CHT wall treatment cannot currently be combined with CBS3D_TEMPERATURE_AFC: AFC reconstructs an isotropic k_eff operator while the Kader wall treatment uses anisotropic wall-normal conductivity");
+            }
 
             // This is the critical first-step stability hook.  SA preprocessing
             // has just rebuilt nu_t_e/k_eff_e, so wall-adjacent conductivity can
@@ -74,7 +92,7 @@ namespace cbs
         {
             MomentumAssembly::assembleStep1Rhs(s);
 
-            // The two modes are intentionally independent.  The CHT module
+            // The two wall modes are intentionally independent.  The CHT module
             // rejects simultaneous activation so an accidental double wall load
             // cannot pass silently.
             (void)turbulence::WallModelCoupling::replaceMomentumWallFlux(s);
