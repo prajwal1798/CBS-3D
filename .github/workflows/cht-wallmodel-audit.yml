@@ -41,6 +41,7 @@ jobs:
             -fno-omit-frame-pointer \
             -Iinclude \
             tests/CHTWallModelCouplingVerification.cpp \
+            src/turbulence/CHTWallModelCoupling.cpp \
             src/turbulence/WallTreatment.cpp \
             -o CHTWallModelCouplingVerification
 
@@ -106,6 +107,7 @@ jobs:
             -DCBS3D_USE_MPI=1 \
             -Iinclude \
             tests/CHTWallModelCouplingMPIVerification.cpp \
+            src/turbulence/CHTWallModelCoupling.cpp \
             src/turbulence/WallTreatment.cpp \
             src/parallel/HaloExchange.cpp \
             -o CHTWallModelCouplingMPIVerification
