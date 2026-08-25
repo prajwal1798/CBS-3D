@@ -1,0 +1,132 @@
+name: CHT wall-model audit
+
+on:
+  push:
+    branches:
+      - integration/sa-mpi
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  serial-cht-wall:
+    name: Serial CHT wall algebra and coupling
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compile Kader thermal regression
+        run: |
+          g++ -std=c++20 -O1 -g \
+            -Wall -Wextra -Werror -pedantic \
+            -fsanitize=address,undefined \
+            -fno-omit-frame-pointer \
+            -Iinclude \
+            tests/ThermalWallTreatmentVerification.cpp \
+            -o ThermalWallTreatmentVerification
+
+      - name: Run Kader thermal regression
+        env:
+          ASAN_OPTIONS: detect_leaks=1:halt_on_error=1
+          UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+        run: ./ThermalWallTreatmentVerification
+
+      - name: Compile conformal CHT coupling regression
+        run: |
+          g++ -std=c++20 -O1 -g \
+            -Wall -Wextra -Werror -pedantic \
+            -fsanitize=address,undefined \
+            -fno-omit-frame-pointer \
+            -Iinclude \
+            tests/CHTWallModelCouplingVerification.cpp \
+            src/turbulence/WallTreatment.cpp \
+            -o CHTWallModelCouplingVerification
+
+      - name: Run conformal CHT coupling regression
+        env:
+          ASAN_OPTIONS: detect_leaks=1:halt_on_error=1
+          UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+          CBS3D_CHT_WALL_TREATMENT: "1"
+        run: ./CHTWallModelCouplingVerification
+
+      - name: Configure complete serial solver
+        run: |
+          cmake -S . -B build-serial \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCBS3D_ENABLE_OPENMP=ON \
+            -DCBS3D_ENABLE_MPI=OFF \
+            -DCBS3D_ENABLE_PETSC=OFF \
+            -DCBS3D_BUILD_TESTS=ON \
+            -DCBS3D_BUILD_SOURCE_VALIDATION=ON
+
+      - name: Build complete serial solver
+        run: cmake --build build-serial --parallel 2
+
+      - name: Run existing serial CTest suite
+        run: ctest --test-dir build-serial --output-on-failure
+
+  mpi-cht-wall:
+    name: MPI/PETSc build and cross-rank CHT wall
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install MPI and PETSc
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            cmake g++ openmpi-bin libopenmpi-dev \
+            libpetsc-real-dev pkg-config
+
+      - name: Resolve PETSc prefix
+        run: |
+          set -euo pipefail
+          if pkg-config --exists PETSc; then
+            PETSC_PREFIX="$(pkg-config --variable=prefix PETSc)"
+          elif pkg-config --exists petsc; then
+            PETSC_PREFIX="$(pkg-config --variable=prefix petsc)"
+          else
+            echo "PETSc pkg-config metadata not found" >&2
+            exit 1
+          fi
+          test -f "$PETSC_PREFIX/include/petsc.h"
+          test -d "$PETSC_PREFIX/lib"
+          echo "PETSC_DIR=$PETSC_PREFIX" >> "$GITHUB_ENV"
+
+      - name: Compile two-rank conformal CHT regression
+        run: |
+          mpic++ -std=c++20 -O2 \
+            -Wall -Wextra -Werror -Wno-error=unused-function -pedantic \
+            -DOMPI_SKIP_MPICXX=1 \
+            -DMPICH_SKIP_MPICXX=1 \
+            -DCBS3D_USE_MPI=1 \
+            -Iinclude \
+            tests/CHTWallModelCouplingMPIVerification.cpp \
+            src/turbulence/WallTreatment.cpp \
+            src/parallel/HaloExchange.cpp \
+            -o CHTWallModelCouplingMPIVerification
+
+      - name: Run two-rank conformal CHT regression
+        env:
+          CBS3D_CHT_WALL_TREATMENT: "1"
+        run: mpirun -np 2 ./CHTWallModelCouplingMPIVerification
+
+      - name: Configure complete MPI/PETSc solver
+        run: |
+          cmake -S . -B build-mpi-petsc \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCBS3D_ENABLE_MPI=ON \
+            -DCBS3D_ENABLE_PETSC=ON \
+            -DCBS3D_ENABLE_OPENMP=ON \
+            -DCBS3D_BUILD_TESTS=OFF \
+            -DCBS3D_BUILD_SOURCE_VALIDATION=OFF
+
+      - name: Build complete MPI/PETSc solver
+        run: cmake --build build-mpi-petsc --parallel 2
+
+      - name: Verify MPI executable
+        run: test -x build-mpi-petsc/cbs3dpp_si
