@@ -6,16 +6,15 @@ ROOT=/scratch/s.2337862/CBS3D/cases/fw_straight
 CODE=/scratch/s.2337862/CBS3D/code
 GEO="$ROOT/mesh/FW_SquareChannel_CHT.geo"
 REPO_GEO="$CODE/cases/fw_straight/mesh/FW_SquareChannel_CHT.geo"
-PAR="$ROOT/fw_straight.par"
-MATPROP="$ROOT/fw_straight.matprop"
 DRIVER="$CODE/jobs/sunbird/prepare_fw_straight_p40.sh"
+PAR="$ROOT/fw_straight.par"
 
 [[ -s "$REPO_GEO" ]] || { echo "FATAL: repository geometry missing: $REPO_GEO" >&2; exit 1; }
-[[ -s "$PAR" ]] || { echo "FATAL: missing authoritative parameter file: $PAR" >&2; exit 1; }
-[[ -s "$MATPROP" ]] || { echo "FATAL: missing authoritative material-property file: $MATPROP" >&2; exit 1; }
 [[ -s "$DRIVER" ]] || { echo "FATAL: missing $DRIVER" >&2; exit 1; }
+[[ -s "$PAR" ]] || { echo "FATAL: missing $PAR" >&2; exit 1; }
 
-# Provision the repository-owned accepted geometry into the case directory.
+# The repo owns the accepted geometry. Provision that exact copy into the
+# Sunbird case directory every time, while retaining any previous local file.
 mkdir -p "$ROOT/mesh" "$ROOT/input_backup"
 if [[ -s "$GEO" ]] && ! cmp -s "$REPO_GEO" "$GEO"; then
     STAMP=$(date +%Y%m%d_%H%M%S)
@@ -82,12 +81,10 @@ print("  fluid core h = 0.0006 m")
 print("  physical IDs = volume 10/20; BC 511/520/530/532")
 PY
 
-# MeshIO reads the dimensional block positionally: dimensional flags, reference/
-# inlet/outlet, prescribed velocity, then Nusselt references. Historical .par
-# files used several different human-readable labels for that fourth pair.
-# Canonicalize that LABEL only, using the exact positional grammar implemented in
-# MeshIO.cpp. Numerical values are left untouched here; the main driver patches
-# the hydraulic diameter after this label has been normalized.
+# MeshIO reads the dimensional extension positionally.  Locate the Nusselt
+# label from that exact grammar instead of guessing its decorative wording.
+# Canonicalizing the label makes the downstream physics patch deterministic
+# while leaving the three existing numerical values untouched here.
 python3 - "$PAR" <<'PY'
 from pathlib import Path
 import sys
@@ -143,5 +140,16 @@ print("PARAMETER GRAMMAR AUDIT: PASS")
 print("  positional Nusselt block located and canonicalized")
 print("  data row preserved:", lines[nusselt_data])
 PY
+
+# prepare_fw_straight_p40.sh writes a Slurm script through one deliberately
+# expanded outer here-document.  Its nested quoted Python here-document contains
+# the literal MSH2 section markers "$Nodes" and "$Elements".  Supplying these
+# two shell variables as their own literal spellings prevents `set -u` from
+# treating those MSH2 tokens as undefined variables while the outer document is
+# generated.  The generated Slurm file therefore contains the intended literal
+# strings, which are protected by the nested quoted Python here-document when
+# the job later executes.
+export Nodes='$Nodes'
+export Elements='$Elements'
 
 exec bash "$DRIVER"
