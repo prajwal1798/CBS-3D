@@ -90,9 +90,13 @@ def next_data(label_pred, description):
             return t.split()
     raise SystemExit("FATAL: missing data after {}".format(description))
 
-free = next_data(lambda s: "freestream" in s and "u" in s, "freestream")
+free = next_data(
+    lambda s: ("freestream" in s) or ("ux" in s and "uy" in s and "uz" in s),
+    "freestream")
 reline = next_data(lambda s: s.startswith("re ") or "re pr ra ri" in s, "Re/Pr")
-dim = next_data(lambda s: "dimensional" in s and "mass-flow" in s, "dimensional controls")
+dim = next_data(
+    lambda s: "dimensional" in s and ("mass-flow" in s or "mass_flow" in s),
+    "dimensional controls")
 sa = next_data(lambda s: "spalart-allmaras controls" in s, "SA controls")
 sain = next_data(lambda s: "spalart-allmaras inlet" in s, "SA inlet controls")
 art = next_data(lambda s: "artificial diffusion" in s, "artificial diffusion")
