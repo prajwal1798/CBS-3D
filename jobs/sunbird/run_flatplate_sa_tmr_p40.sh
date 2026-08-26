@@ -58,6 +58,7 @@ printf '\n===== P40 STRUCTURE + PHYSICS + WALL-RESOLUTION AUDIT =====\n'
 python3 - "$PART" <<'PY'
 from pathlib import Path
 import math
+import re
 import statistics
 import sys
 
@@ -125,6 +126,57 @@ rho = float(f[3]); mu = float(f[6]); nu = mu / rho
 if abs(rho - 1.0) > 1e-12 or abs(nu - 2.0e-7) > 2.0e-15:
     raise SystemExit("FATAL: TMR scaling requires rho=1 and nu=2e-7; got rho={} nu={}".format(rho, nu))
 
+# The production C++ reader uses formatted stream extraction, so a legal legacy
+# record may place a negative real immediately after an integer field, e.g.
+#
+#     1-4.44186634687e-02 ...
+#
+# Python str.split() does not reproduce that behaviour.  Extract numeric fields
+# lexically instead, accepting both E and Fortran-D exponents.  This parser is
+# used only by the audit; it does not alter any retained partition file.
+NUMBER = re.compile(
+    r"[+-]?(?:(?:\d+\.\d*)|(?:\.\d+)|(?:\d+))(?:[EeDd][+-]?\d+)?"
+)
+
+def numeric_fields(line):
+    return NUMBER.findall(line)
+
+def to_float(token, context):
+    try:
+        value = float(token.replace("D", "E").replace("d", "e"))
+    except ValueError:
+        raise SystemExit("FATAL: invalid real '{}' in {}".format(token, context))
+    if not math.isfinite(value):
+        raise SystemExit("FATAL: non-finite real '{}' in {}".format(token, context))
+    return value
+
+def to_int(token, context):
+    value = to_float(token, context)
+    integer = int(value)
+    if value != integer:
+        raise SystemExit("FATAL: expected integer field in {}; got '{}'".format(context, token))
+    return integer
+
+def read_numeric_row(fh, minimum_fields, context):
+    while True:
+        line = fh.readline()
+        if line == "":
+            raise SystemExit("FATAL: unexpected EOF while reading {}".format(context))
+        stripped = line.strip()
+        if not stripped or stripped.startswith(("#", "!")):
+            continue
+        fields = numeric_fields(line)
+        if len(fields) < minimum_fields:
+            raise SystemExit(
+                "FATAL: expected at least {} numeric fields in {}; got {} from {!r}".format(
+                    minimum_fields, context, len(fields), line.rstrip("\n")))
+        return fields
+
+# Regression guard for the exact lexical form that broke the first preflight.
+probe = numeric_fields("1-4.4418663468700000e-02 0.0 0.0")
+if probe[:2] != ["1", "-4.4418663468700000e-02"]:
+    raise SystemExit("FATAL: internal fixed-width .plt parser self-test failed")
+
 
 def cross(a, b):
     return (a[1]*b[2]-a[2]*b[1], a[2]*b[0]-a[0]*b[2], a[0]*b[1]-a[1]*b[0])
@@ -163,19 +215,44 @@ for rank in ranks:
 
     plt_path = next(rank.glob("*.plt"))
     with plt_path.open("r", encoding="utf-8") as fh:
-        header = fh.readline().split()
-        if len(header) < 3:
-            raise SystemExit("FATAL: bad .plt header in {}".format(plt_path))
-        nelem, npoin, nboun = map(int, header[:3])
+        header = read_numeric_row(fh, 3, "{} header".format(plt_path))
+        nelem = to_int(header[0], "{} header nelem".format(plt_path))
+        npoin = to_int(header[1], "{} header npoin".format(plt_path))
+        nboun = to_int(header[2], "{} header nboun".format(plt_path))
+        if nelem <= 0 or npoin <= 0 or nboun < 0:
+            raise SystemExit("FATAL: invalid .plt sizes in {}".format(plt_path))
+
         tets = [None]*(nelem+1)
-        for _ in range(nelem):
-            p = fh.readline().split(); ie = int(p[0]); tets[ie] = tuple(map(int,p[1:5]))
+        for row_index in range(1, nelem+1):
+            p = read_numeric_row(fh, 5, "{} tetrahedron {}".format(plt_path, row_index))
+            ie = to_int(p[0], "{} tetrahedron id".format(plt_path))
+            if not 1 <= ie <= nelem:
+                raise SystemExit("FATAL: tetrahedron id {} out of range in {}".format(ie, plt_path))
+            nodes = tuple(to_int(p[k], "{} tetrahedron {} node".format(plt_path, ie)) for k in range(1,5))
+            if any(n < 1 or n > npoin for n in nodes):
+                raise SystemExit("FATAL: tetrahedron {} has node out of range in {}".format(ie, plt_path))
+            tets[ie] = nodes
+
         xyz = [None]*(npoin+1)
-        for _ in range(npoin):
-            p = fh.readline().split(); ip = int(p[0]); xyz[ip] = tuple(map(float,p[1:4]))
-        for _ in range(nboun):
-            p = fh.readline().split()
-            face = tuple(map(int,p[:3])); parent = int(p[3]); raw = int(p[4])
+        for row_index in range(1, npoin+1):
+            p = read_numeric_row(fh, 4, "{} coordinate {}".format(plt_path, row_index))
+            ip = to_int(p[0], "{} node id".format(plt_path))
+            if not 1 <= ip <= npoin:
+                raise SystemExit("FATAL: node id {} out of range in {}".format(ip, plt_path))
+            xyz[ip] = tuple(to_float(p[k], "{} node {} coordinate".format(plt_path, ip)) for k in range(1,4))
+
+        if any(t is None for t in tets[1:]) or any(p is None for p in xyz[1:]):
+            raise SystemExit("FATAL: incomplete tetrahedron/node numbering in {}".format(plt_path))
+
+        for row_index in range(1, nboun+1):
+            p = read_numeric_row(fh, 5, "{} boundary face {}".format(plt_path, row_index))
+            face = tuple(to_int(p[k], "{} boundary node".format(plt_path)) for k in range(3))
+            parent = to_int(p[3], "{} boundary parent".format(plt_path))
+            raw = to_int(p[4], "{} boundary side id".format(plt_path))
+            if any(n < 1 or n > npoin for n in face):
+                raise SystemExit("FATAL: boundary face node out of range in {}".format(plt_path))
+            if parent < 1 or parent > nelem:
+                raise SystemExit("FATAL: boundary parent {} out of range in {}".format(parent, plt_path))
             if mapping.get(raw) != 530:
                 continue
             pts = [xyz[n] for n in face]
