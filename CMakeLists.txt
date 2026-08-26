@@ -68,7 +68,10 @@ set(CBS3D_CORE_SOURCES
     src/assembly/MomentumAssembly.cpp
     src/assembly/EnergyAssembly.cpp
     src/assembly/TemperatureAFC.cpp
-    src/assembly/SpalartAllmarasAssembly.cpp
+    # Verified SA P1/TET4 assembly: positive nonlinear source quadrature,
+    # row-sum-lumped semi-implicit destruction, complete characteristic
+    # boundary term, and volume-weighted turbulence-field projection.
+    src/assembly/SpalartAllmarasAssemblyVerified.cpp
 
     src/turbulence/SpalartAllmaras.cpp
     src/turbulence/WallDistance.cpp
