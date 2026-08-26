@@ -26,6 +26,7 @@ CODE=$ROOT/code
 CASE=$ROOT/cases/flatplate
 SOURCE_PART=$CASE/partition/coarse/P0040/cbs
 EXE=$CODE/build/mpi-release/cbs3d_parallel
+ANALYZER=$CODE/examples/Flat_Plate_Turbulent/analyze_distributed_tmr.py
 RUN_ROOT=$CASE/runs/sa_tmr_wall_resolved
 JOB_ROOT=$RUN_ROOT/job_${SLURM_JOB_ID}
 STAGED=$JOB_ROOT/partitions
@@ -58,6 +59,7 @@ export CBS3D_VERBOSE=1
 unset CBS3D_ALL_RANK_OUTPUT
 
 [[ -x "$EXE" ]] || { echo "FATAL: executable missing: $EXE" >&2; exit 1; }
+[[ -f "$ANALYZER" ]] || { echo "FATAL: TMR analyzer missing: $ANALYZER" >&2; exit 1; }
 [[ -d "$SOURCE_PART" ]] || { echo "FATAL: partition missing: $SOURCE_PART" >&2; exit 1; }
 [[ "$SLURM_NTASKS" -eq 40 ]] || { echo "FATAL: expected 40 MPI ranks" >&2; exit 1; }
 
@@ -226,4 +228,22 @@ fi
 FINAL_PVTU=$(find "$RUN_DIR/output/flatplate" -maxdepth 1 -type f -name '*.pvtu' 2>/dev/null | sort | tail -1 || true)
 printf 'FINAL_PVTU=%s\n' "$FINAL_PVTU"
 printf 'BENCHMARK_ROOT=%s\n' "$JOB_ROOT"
+
+if [[ -z "$FINAL_PVTU" ]]; then
+    echo "FATAL: solver completed but no distributed VTU snapshot was found." >&2
+    exit 5
+fi
+
+echo
+echo "===== DISTRIBUTED TMR QUANTITATIVE DIAGNOSTICS ====="
+python3 "$ANALYZER" \
+    "$STAGED" \
+    "$RUN_DIR/output/flatplate" \
+    --station 0.97008 \
+    --re-x1 5.0e6 \
+    --u-inf 1.0 \
+    --kappa 0.41 \
+    | tee "$JOB_ROOT/tmr_diagnostics.json"
+
+echo "TMR_DIAGNOSTICS=$JOB_ROOT/tmr_diagnostics.json"
 echo "CBS3D WALL-RESOLVED SA TMR BENCHMARK: COMPLETED"
