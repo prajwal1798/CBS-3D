@@ -10,15 +10,6 @@
 #SBATCH --output=/scratch/s.2337862/CBS3D/cases/flatplate/jobs/logs/sa_tmr_%j.out
 #SBATCH --error=/scratch/s.2337862/CBS3D/cases/flatplate/jobs/logs/sa_tmr_%j.err
 
-# ==============================================================================
-# Wall-resolved Spalart-Allmaras NASA/TMR flat-plate benchmark.
-#
-# This job deliberately does NOT enable either momentum wall model.  It is the
-# numerical-verification gate for the SA transport + CBS/RANS coupling itself.
-# The retained P0040 partition is copied to a job-private staging tree before
-# parameter changes, so the source partition remains immutable.
-# ==============================================================================
-
 set -euo pipefail
 
 ROOT=/scratch/s.2337862/CBS3D
@@ -43,18 +34,15 @@ export PETSC_DIR
 unset PETSC_ARCH
 export OMPI_CC="$GCC_ROOT/bin/gcc"
 export OMPI_CXX="$GCC_ROOT/bin/g++"
-
 export OMP_NUM_THREADS=1
 export OMP_PLACES=cores
 export OMP_PROC_BIND=close
 
-# This is the wall-resolved benchmark.  If either wall law leaks into this job,
-# the comparison no longer tests the SA finite-element discretisation.
+# Mandatory wall-resolved benchmark: no wall model may leak into this run.
 unset CBS3D_SA_WALL_TREATMENT
 unset CBS3D_CHT_WALL_TREATMENT
 unset CBS3D_WALL_KAPPA
 unset CBS3D_WALL_B
-
 export CBS3D_VERBOSE=1
 unset CBS3D_ALL_RANK_OUTPUT
 
@@ -71,10 +59,10 @@ cp -a "$SOURCE_PART/." "$STAGED/"
 rank_dirs=$(find "$STAGED" -maxdepth 1 -type d -name 'rank_[0-9][0-9][0-9][0-9]' | wc -l)
 [[ "$rank_dirs" -eq 40 ]] || { echo "FATAL: expected 40 staged rank directories, found $rank_dirs" >&2; exit 1; }
 
-# Max 100k iterations for direct comparison with the previous benchmark.  The
-# run may terminate earlier, but only after both velocity and SA residual gates
-# have passed.  Output cadence is intentionally sparse enough not to turn this
-# CFD benchmark into an I/O benchmark, one of computing's less glorious genres.
+# Patch the retained .par files using the SAME positional grammar as MeshIO.
+# The old version searched for human-readable labels.  The retained partition
+# predates those exact label strings even though the C++ parser reads it just
+# fine positionally, which is why job 8197461 died before srun.
 python3 - "$STAGED" <<'PY'
 from pathlib import Path
 import sys
@@ -84,71 +72,89 @@ files = sorted(root.glob("rank_*/*.par"))
 if len(files) != 40:
     raise SystemExit("FATAL: expected 40 .par files, found {}".format(len(files)))
 
+def active_indices(lines):
+    return [
+        i for i, line in enumerate(lines)
+        if line.strip() and not line.lstrip().startswith(("#", "!"))
+    ]
+
+def find_active_position(lines, active, predicate, description):
+    hits = [p for p, i in enumerate(active) if predicate(lines[i].strip().lower())]
+    if len(hits) != 1:
+        raise SystemExit(
+            "FATAL: expected one {} anchor; found {}".format(description, len(hits))
+        )
+    return hits[0]
+
 for path in files:
     lines = path.read_text(encoding="utf-8").splitlines()
-    found_time = found_steady = found_output = found_sa = found_art = False
+    active = active_indices(lines)
 
-    for i, line in enumerate(lines):
-        key = line.strip()
-        lower = key.lower()
+    # MeshIO reads label/data pairs.  Anchor on labels that are known to exist
+    # in the retained files, then locate legacy-labelled fields by their parser
+    # position instead of their prose label.
+    time_pos = find_active_position(
+        lines, active,
+        lambda s: s == "ntime transient_on dtfixed dtfix iwrite",
+        "ntime")
+    out_pos = find_active_position(
+        lines, active,
+        lambda s: s.startswith("cbs3d output/monitor controls:"),
+        "output/monitor")
 
-        if key == "ntime transient_on dtfixed dtfix iwrite":
-            values = lines[i + 1].split()
-            if len(values) < 5:
-                raise SystemExit("FATAL: malformed timestep row in {}".format(path))
-            values[0] = "100000"
-            values[1] = "0"
-            # Preserve retained LTS/fixed-dt selection and dt value; only cap the
-            # benchmark length and reduce legacy output chatter.
-            values[4] = "1000"
-            lines[i + 1] = "  ".join(values)
-            found_time = True
+    # From MeshIO grammar:
+    # ntime block -> csafm -> timestep -> Re -> convection -> pnode ->
+    # write-output -> rel/abs tolerance -> steady controls.
+    steady_data_pos = time_pos + 17
 
-        elif "velocity/temperature steady controls" in lower:
-            values = lines[i + 1].split()
-            if len(values) < 4:
-                raise SystemExit("FATAL: malformed steady-control row in {}".format(path))
-            # Preserve velocity/temperature controls, but make SA convergence a
-            # mandatory steady-stop condition.
-            lines[i + 1] = "  ".join(values[:4] + ["1", "1.0e-7"])
-            found_steady = True
+    # output/monitor block -> artificial-diffusion block -> SA control block.
+    art_data_pos = out_pos + 3
+    sa_data_pos = out_pos + 5
 
-        elif key.startswith("CBS3D output/monitor controls:"):
-            # residual CSV every 10 iters; console every 1000; VTU every 10000;
-            # no live plot; retain boundary-debug fields; no early stop before
-            # 5000 iterations even if the initial field happens to look quiet.
-            lines[i + 1] = "1  10  1000  0  1  10000  0.0  1  5000"
-            found_output = True
+    needed = max(time_pos + 1, steady_data_pos, out_pos + 1, art_data_pos, sa_data_pos)
+    if needed >= len(active):
+        raise SystemExit("FATAL: positional .par grammar truncated in {}".format(path))
 
-        elif key.startswith("artificial diffusion control:"):
-            values = lines[i + 1].split()
-            if not values or values[0] != "0":
-                raise SystemExit("FATAL: wall-resolved benchmark requires art_diff=0 in {}".format(path))
-            found_art = True
+    time_i = active[time_pos + 1]
+    steady_i = active[steady_data_pos]
+    output_i = active[out_pos + 1]
+    art_i = active[art_data_pos]
+    sa_i = active[sa_data_pos]
 
-        elif key.startswith("Spalart-Allmaras controls:"):
-            values = lines[i + 1].split()
-            if len(values) < 3 or values[:3] != ["1", "0", "0"]:
-                raise SystemExit(
-                    "FATAL: expected standard SA [1 0 0] in {}; got {}".format(path, values)
-                )
-            found_sa = True
+    time_values = lines[time_i].split()
+    if len(time_values) < 5:
+        raise SystemExit("FATAL: malformed timestep row in {}".format(path))
+    time_values[0] = "100000"
+    time_values[1] = "0"
+    time_values[4] = "1000"
+    lines[time_i] = "  ".join(time_values)
 
-    missing = [
-        name for name, ok in (
-            ("ntime", found_time),
-            ("steady controls", found_steady),
-            ("output controls", found_output),
-            ("artificial diffusion", found_art),
-            ("SA controls", found_sa),
-        ) if not ok
-    ]
-    if missing:
-        raise SystemExit("FATAL: {} missing {}".format(path, ", ".join(missing)))
+    steady_values = lines[steady_i].split()
+    if len(steady_values) < 4:
+        raise SystemExit("FATAL: malformed steady-control row in {}".format(path))
+    # Preserve the velocity/temperature controls and force SA convergence into
+    # the stop rule: sa_check=1, RelSA tolerance=1e-7.
+    lines[steady_i] = "  ".join(steady_values[:4] + ["1", "1.0e-7"])
+
+    # residual every 10; console every 1000; VTU every 10000; no live plot;
+    # boundary diagnostics retained; minimum 5000 iterations.
+    lines[output_i] = "1  10  1000  0  1  10000  0.0  1  5000"
+
+    art_values = lines[art_i].split()
+    if not art_values or int(float(art_values[0])) != 0:
+        raise SystemExit(
+            "FATAL: wall-resolved benchmark requires art_diff=0 in {}".format(path)
+        )
+
+    sa_values = lines[sa_i].split()
+    if len(sa_values) < 3 or sa_values[:3] != ["1", "0", "0"]:
+        raise SystemExit(
+            "FATAL: expected standard SA [1 0 0] in {}; got {}".format(path, sa_values)
+        )
 
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
-print("Prepared 40 staged wall-resolved TMR parameter files.")
+print("Prepared 40 staged wall-resolved TMR parameter files: PASS")
 PY
 
 printf '============================================================\n'
@@ -165,16 +171,11 @@ printf 'wall model      = OFF (mandatory)\n'
 printf 'max iterations  = 100000\n'
 printf 'SA stop gate    = 1.0e-7 after >=5000 iterations\n'
 GIT_HEAD_FILE="$CODE/.git/refs/heads/integration/sa-mpi"
-if [[ -r "$GIT_HEAD_FILE" ]]; then
-    GIT_HEAD=$(cat "$GIT_HEAD_FILE")
-else
-    GIT_HEAD="unavailable-on-compute-node"
-fi
+if [[ -r "$GIT_HEAD_FILE" ]]; then GIT_HEAD=$(cat "$GIT_HEAD_FILE"); else GIT_HEAD="unavailable-on-compute-node"; fi
 printf 'git HEAD        = %s\n' "$GIT_HEAD"
 printf '============================================================\n'
 
 cd "$RUN_DIR"
-
 set +e
 srun \
     --mpi=pmix \
@@ -195,9 +196,7 @@ set -e
 
 echo
 echo "===== FINAL TURBULENCE / FLOW EVIDENCE ====="
-grep -E \
-    'Iter|RelU|RelV|RelW|RelP|RelSA|NuTilde|NuT=|MuT|MuEff|DivRMS|CG=|Run complete|FATAL|ERROR' \
-    solver.out | tail -n 240 || true
+grep -E 'Iter|RelU|RelV|RelW|RelP|RelSA|NuTilde|NuT=|MuT|MuEff|DivRMS|CG=|Run complete|FATAL|ERROR' solver.out | tail -n 240 || true
 
 echo
 echo "===== LAST 160 SOLVER LINES ====="
@@ -214,12 +213,10 @@ if [[ "$RC" -ne 0 ]]; then
     echo "CBS3D WALL-RESOLVED SA TMR BENCHMARK: FAILED" >&2
     exit "$RC"
 fi
-
 if grep -Eqi 'nan|FATAL|ERROR:' solver.out solver.err; then
     echo "FATAL: non-finite/fatal diagnostic detected in benchmark logs." >&2
     exit 3
 fi
-
 if grep -q 'SA production wall treatment: ON' solver.out; then
     echo "FATAL: Spalding wall treatment was active in a wall-resolved benchmark." >&2
     exit 4
@@ -228,11 +225,7 @@ fi
 FINAL_PVTU=$(find "$RUN_DIR/output/flatplate" -maxdepth 1 -type f -name '*.pvtu' 2>/dev/null | sort | tail -1 || true)
 printf 'FINAL_PVTU=%s\n' "$FINAL_PVTU"
 printf 'BENCHMARK_ROOT=%s\n' "$JOB_ROOT"
-
-if [[ -z "$FINAL_PVTU" ]]; then
-    echo "FATAL: solver completed but no distributed VTU snapshot was found." >&2
-    exit 5
-fi
+[[ -n "$FINAL_PVTU" ]] || { echo "FATAL: no distributed VTU snapshot found." >&2; exit 5; }
 
 echo
 echo "===== DISTRIBUTED TMR QUANTITATIVE DIAGNOSTICS ====="
