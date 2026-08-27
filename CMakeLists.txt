@@ -65,13 +65,16 @@ set(CBS3D_CORE_SOURCES
 
     src/assembly/PressureAssembly.cpp
     src/assembly/VelocityCorrectionAssembly.cpp
-    src/assembly/MomentumAssembly.cpp
+
+    # RANS/CBS Step 1 and SA transport are taken directly from the
+    # Liu/Nithiarasu P1-TET4 matrices in Chun-Bin Liu (2005), Appendix B.
+    # Keep the historical experimental assemblies in the tree for A/B audit
+    # work, but do not compile them into the production solver.
+    src/assembly/MomentumAssemblyLiu.cpp
+    src/assembly/SpalartAllmarasAssemblyLiu.cpp
+
     src/assembly/EnergyAssembly.cpp
     src/assembly/TemperatureAFC.cpp
-    # Verified SA P1/TET4 assembly: positive nonlinear source quadrature,
-    # row-sum-lumped semi-implicit destruction, complete characteristic
-    # boundary term, and volume-weighted turbulence-field projection.
-    src/assembly/SpalartAllmarasAssemblyVerified.cpp
 
     src/turbulence/SpalartAllmaras.cpp
     src/turbulence/WallDistance.cpp
