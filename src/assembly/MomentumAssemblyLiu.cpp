@@ -1,22 +1,35 @@
 //=============================================================================
 // CBS3D++_SI
 //
-// CBS Step-1 momentum assembly aligned with the 3-D RANS matrices in
-// Chun-Bin Liu (2005), Appendix B.
+// CBS Step-1 momentum assembly following Chun-Bin Liu (2005), Chapter 4 and
+// Appendix B for the three-dimensional P1/TET4 RANS CBS formulation.
 //
-// The crucial distinction from the historical C++ port is the diffusion/stress
-// operator.  Liu Eq. B.5 uses
+// Source equations used here:
 //
-//   B^T (I_o - 2/3 m m^T) B
+//   Eq. (4.20)  characteristic Step-1 intermediate momentum equation
+//   Eq. (B.3)   conservative momentum convection matrix C_u
+//   Eq. (B.5)   deviatoric molecular+turbulent diffusion matrix K_tau
+//   Eq. (B.9)   viscous/turbulent traction vector
+//   Eq. (B.13)  CBS stabilisation matrix K_u
 //
-// multiplied by the molecular+turbulent viscosity.  In tensor notation the
-// kinematic stress is
+// Two details are intentionally different from the historical C++ port:
 //
-//   tau_ij = nu_eff (du_i/dx_j + du_j/dx_i
-//                    - 2/3 div(u) delta_ij).
+//   1. convection is assembled as the strong conservative operator
+//        integral N_a div(u u_i) dV,
+//      rather than by linearly interpolating the nodal products u_j u_i;
 //
-// This file therefore does NOT apply a scalar Laplacian independently to u, v
-// and w.  The cross derivatives and deviatoric trace subtraction are retained.
+//   2. diffusion uses the full deviatoric RANS stress
+//        nu_eff [grad(u)+grad(u)^T-(2/3)div(u)I],
+//      rather than three independent scalar Laplacians.
+//
+// The CBS characteristic term is the Appendix-B matrix
+//
+//   -dt/2 integral div(u N_a) div(u N_b) dV,
+//
+// applied to each momentum component.  No separate advective/characteristic
+// boundary correction is added: Appendix B represents those terms by the
+// volume matrices C_u and K_u, while the explicit boundary vector in this part
+// of the formulation is the stress traction f_u.
 //=============================================================================
 
 #include "cbs/assembly/MomentumAssembly.hpp"
@@ -103,125 +116,102 @@ namespace cbs
             return s.cfg.ani;
         }
 
-        // Galerkin conservative momentum convection.  This is retained from the
-        // established CBS implementation.
-        void step1_convective_galerkin(
+        void velocity_gradient_and_divergence(
             const CBSStateSI& s,
             const Int ie,
-            const Real lunk[4][4][5],
-            Real lrhs[4][5])
+            const Real velocity[5][4],
+            Real velocity_gradient[4][4],
+            Real& div_u)
         {
-            Real lunksum[4][4] = {};
-            Real lunksum_face[4][4] = {};
-            const Real volume_factor = s.detJ(ie) * s.cfg.fcon[1];
-
-            for (Int i = 1; i <= 3; ++i)
-            {
-                for (Int j = 1; j <= 3; ++j)
-                {
-                    for (Int a = 1; a <= 4; ++a)
-                    {
-                        lunksum[i][j] += lunk[i][j][a];
-                    }
-                }
-            }
-
-            for (Int a = 1; a <= 4; ++a)
-            {
-                for (Int i = 1; i <= 3; ++i)
-                {
-                    for (Int j = 1; j <= 3; ++j)
-                    {
-                        lrhs[i][a] +=
-                            grad(s, ie, j, a) * volume_factor * lunksum[i][j];
-                    }
-                }
-            }
-
-            for (Int is = 1; is <= 4; ++is)
-            {
-                if (s.fedge(is, ie) == 0)
-                {
-                    continue;
-                }
-
-                for (Int i = 1; i <= 3; ++i)
-                {
-                    for (Int j = 1; j <= 3; ++j)
-                    {
-                        lunksum_face[i][j] =
-                            lunksum[i][j] - lunk[i][j][is];
-                    }
-                }
-
-                for (Int j = 1; j <= 3; ++j)
-                {
-                    const Real face_factor =
-                        s.annxf(j, is, ie) * s.cfg.fcon[2];
-
-                    for (Int face_node = 1; face_node <= 3; ++face_node)
-                    {
-                        const Int a = s.ippn1(is, face_node);
-                        for (Int i = 1; i <= 3; ++i)
-                        {
-                            lrhs[i][a] -=
-                                (lunksum_face[i][j] + lunk[i][j][a])
-                                * face_factor;
-                        }
-                    }
-                }
-            }
-        }
-
-        // Existing transferred-CBS momentum stabilisation.  The RANS correction
-        // in this source concerns the stress operator; this characteristic term
-        // is kept identical to the established laminar CBS path so the change is
-        // isolated and testable.
-        void step1_characteristic_correction(
-            const CBSStateSI& s,
-            const Int ie,
-            const Real lunk[4][4][5],
-            const Real lunkno[4][5],
-            Real lrhs[4][5])
-        {
-            Real lunksum[4][4] = {};
-            Real lunksumk[4][4] = {};
-            Real umean[4] = {};
-
-            for (Int i = 1; i <= 3; ++i)
-            {
-                for (Int j = 1; j <= 3; ++j)
-                {
-                    for (Int a = 1; a <= 4; ++a)
-                    {
-                        lunksum[i][j] +=
-                            grad(s, ie, j, a) * lunk[i][j][a];
-                    }
-                }
-            }
-
             for (Int i = 1; i <= 3; ++i)
             {
                 for (Int a = 1; a <= 4; ++a)
                 {
-                    umean[i] += lunkno[i][a];
+                    for (Int j = 1; j <= 3; ++j)
+                    {
+                        velocity_gradient[i][j] +=
+                            velocity[a][i] * grad(s, ie, j, a);
+                    }
                 }
-                umean[i] *= 0.25;
             }
+
+            div_u =
+                velocity_gradient[1][1]
+                + velocity_gradient[2][2]
+                + velocity_gradient[3][3];
+        }
+
+        // Liu Appendix B Eq. (B.3):
+        //
+        //   C_u = integral N_u^T div(u N_u) dV.
+        //
+        // For each momentum component q=u_i,
+        //
+        //   div(u q) = u.grad(q) + q div(u).
+        //
+        // With P1 u and q this is a P1 scalar, so the V/20 consistent-load
+        // identity integrates N_a div(u q) exactly.
+        void step1_conservative_convection(
+            const CBSStateSI& s,
+            const Int ie,
+            const Real velocity[5][4],
+            const Real velocity_gradient[4][4],
+            const Real div_u,
+            Real lrhs[4][5])
+        {
+            const Real volume = s.detJ(ie) / 6.0;
 
             for (Int i = 1; i <= 3; ++i)
             {
-                Real div_flux = 0.0;
+                Real q[5] = {};
+                Real grad_q[4] = {};
+                Real div_uq[5] = {};
+
+                for (Int a = 1; a <= 4; ++a)
+                {
+                    q[a] = velocity[a][i];
+                }
                 for (Int j = 1; j <= 3; ++j)
                 {
-                    div_flux += lunksum[i][j];
+                    grad_q[j] = velocity_gradient[i][j];
                 }
-                for (Int k = 1; k <= 3; ++k)
+
+                liu_nithiarasu::conservative_scalar_divergence_nodes(
+                    velocity,
+                    q,
+                    grad_q,
+                    div_u,
+                    div_uq);
+
+                for (Int a = 1; a <= 4; ++a)
                 {
-                    lunksumk[i][k] = umean[k] * div_flux;
+                    lrhs[i][a] -=
+                        liu_nithiarasu::consistent_linear_load(
+                            volume,
+                            div_uq,
+                            a);
                 }
             }
+        }
 
+        // Liu Appendix B Eq. (B.13):
+        //
+        //   K_u = -1/2 integral div(u N)^T div(u N) dV.
+        //
+        // Multiplication by the old nodal momentum gives, component by
+        // component,
+        //
+        //   -dt/2 integral div(u N_a) div(u u_i) dV.
+        //
+        // Both factors are P1 scalars, so the product integral is exact.
+        void step1_characteristic_stabilisation(
+            const CBSStateSI& s,
+            const Int ie,
+            const Real velocity[5][4],
+            const Real velocity_gradient[4][4],
+            const Real div_u,
+            Real lrhs[4][5])
+        {
             const Real dt = s.delte(ie);
             if (!(dt > 0.0) || !std::isfinite(dt))
             {
@@ -230,69 +220,72 @@ namespace cbs
                     + std::to_string(ie));
             }
 
-            const Real volume_factor =
-                0.5 * dt * s.detJ(ie) * s.cfg.fcon[3];
-            const Real face_factor_base =
-                0.5 * dt * s.cfg.fcon[4];
+            const Real volume = s.detJ(ie) / 6.0;
+            Real div_momentum[4][5] = {};
+
+            for (Int i = 1; i <= 3; ++i)
+            {
+                Real q[5] = {};
+                Real grad_q[4] = {};
+
+                for (Int b = 1; b <= 4; ++b)
+                {
+                    q[b] = velocity[b][i];
+                }
+                for (Int j = 1; j <= 3; ++j)
+                {
+                    grad_q[j] = velocity_gradient[i][j];
+                }
+
+                liu_nithiarasu::conservative_scalar_divergence_nodes(
+                    velocity,
+                    q,
+                    grad_q,
+                    div_u,
+                    div_momentum[i]);
+            }
 
             for (Int a = 1; a <= 4; ++a)
             {
-                for (Int k = 1; k <= 3; ++k)
+                Real grad_na[4] = {};
+                Real div_u_na[5] = {};
+                for (Int j = 1; j <= 3; ++j)
                 {
-                    for (Int i = 1; i <= 3; ++i)
-                    {
-                        lrhs[i][a] -=
-                            grad(s, ie, k, a)
-                            * lunksumk[i][k]
-                            * volume_factor;
-                    }
-                }
-            }
-
-            for (Int is = 1; is <= 4; ++is)
-            {
-                if (s.fedge(is, ie) == 0)
-                {
-                    continue;
+                    grad_na[j] = grad(s, ie, j, a);
                 }
 
-                for (Int k = 1; k <= 3; ++k)
+                liu_nithiarasu::test_function_divergence_nodes(
+                    velocity,
+                    grad_na,
+                    div_u,
+                    a,
+                    div_u_na);
+
+                for (Int i = 1; i <= 3; ++i)
                 {
-                    const Real face_factor =
-                        s.annxf(k, is, ie) * face_factor_base;
-                    for (Int face_node = 1; face_node <= 3; ++face_node)
-                    {
-                        const Int a = s.ippn1(is, face_node);
-                        for (Int i = 1; i <= 3; ++i)
-                        {
-                            lrhs[i][a] += lunksumk[i][k] * face_factor;
-                        }
-                    }
+                    lrhs[i][a] -= 0.5 * dt *
+                        liu_nithiarasu::p1_product_integral(
+                            volume,
+                            div_u_na,
+                            div_momentum[i]);
                 }
             }
         }
 
-        // Liu Appendix B Eq. B.5.  This is the formulation-level correction.
+        // Liu Appendix B Eqs. (B.5), (B.9)-(B.12).
+        //
+        //   tau_ij = nu_eff [du_i/dx_j + du_j/dx_i
+        //                    - (2/3) div(u) delta_ij].
+        //
+        // Since a P1/TET4 velocity has a constant element gradient, tau is
+        // constant within the element when nu_eff is represented elementwise.
         void step1_deviatoric_diffusion(
             const CBSStateSI& s,
             const Int ie,
-            const Real lunkno[4][5],
+            const Real velocity_gradient[4][4],
             const Real nu_eff,
             Real lrhs[4][5])
         {
-            Real velocity_gradient[4][4] = {};
-            for (Int i = 1; i <= 3; ++i)
-            {
-                for (Int a = 1; a <= 4; ++a)
-                {
-                    for (Int j = 1; j <= 3; ++j)
-                    {
-                        velocity_gradient[i][j] +=
-                            lunkno[i][a] * grad(s, ie, j, a);
-                    }
-                }
-            }
-
             Real tau[4][4] = {};
             liu_nithiarasu::deviatoric_stress(
                 velocity_gradient,
@@ -301,7 +294,7 @@ namespace cbs
 
             const Real volume = s.detJ(ie) / 6.0;
 
-            // Weak volume term: -int grad(N_a)_j tau_ij dV.
+            // Volume weak term: -integral grad(N_a)_j tau_ij dV.
             for (Int a = 1; a <= 4; ++a)
             {
                 for (Int i = 1; i <= 3; ++i)
@@ -315,9 +308,9 @@ namespace cbs
                 }
             }
 
-            // Natural traction term: +int N_a tau_ij n_j dGamma.
-            // annxf stores the area-weighted outward normal and fdif[2] is the
-            // established TRI3 integral factor (1/3).
+            // Natural traction vector f_u.  annxf is area-weighted outward
+            // normal and fdif[2]=1/3 integrates a constant traction against a
+            // TRI3 face shape function.
             for (Int is = 1; is <= 4; ++is)
             {
                 if (s.fedge(is, ie) == 0)
@@ -382,8 +375,8 @@ namespace cbs
                     continue;
                 }
 
-                Real lunkno[4][5] = {};
-                Real lunk[4][4][5] = {};
+                Real velocity[5][4] = {};
+                Real velocity_gradient[4][4] = {};
                 Real lrhs[4][5] = {};
                 Int ipn[5] = {};
 
@@ -393,28 +386,38 @@ namespace cbs
                     ipn[a] = ip;
                     for (Int i = 1; i <= 3; ++i)
                     {
-                        lunkno[i][a] = s.unkn1(i, ip);
+                        velocity[a][i] = s.unkn1(i, ip);
                     }
                 }
 
-                for (Int a = 1; a <= 4; ++a)
-                {
-                    for (Int j = 1; j <= 3; ++j)
-                    {
-                        for (Int i = 1; i <= 3; ++i)
-                        {
-                            lunk[i][j][a] =
-                                lunkno[j][a] * lunkno[i][a];
-                        }
-                    }
-                }
+                Real div_u = 0.0;
+                velocity_gradient_and_divergence(
+                    s,
+                    ie,
+                    velocity,
+                    velocity_gradient,
+                    div_u);
 
-                step1_convective_galerkin(s, ie, lunk, lrhs);
-                step1_characteristic_correction(s, ie, lunk, lunkno, lrhs);
+                step1_conservative_convection(
+                    s,
+                    ie,
+                    velocity,
+                    velocity_gradient,
+                    div_u,
+                    lrhs);
+
+                step1_characteristic_stabilisation(
+                    s,
+                    ie,
+                    velocity,
+                    velocity_gradient,
+                    div_u,
+                    lrhs);
+
                 step1_deviatoric_diffusion(
                     s,
                     ie,
-                    lunkno,
+                    velocity_gradient,
                     momentum_diffusivity(s, ie),
                     lrhs);
 
