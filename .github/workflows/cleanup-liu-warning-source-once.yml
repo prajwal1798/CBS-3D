@@ -1,6 +1,6 @@
 name: One-shot Liu source warning cleanup
 
-on:
+"on":
   push:
     branches:
       - integration/sa-mpi
@@ -12,6 +12,7 @@ permissions:
 
 jobs:
   patch-source:
+    name: Patch and verify Liu source
     runs-on: ubuntu-latest
     steps:
       - name: Check out branch
@@ -20,102 +21,103 @@ jobs:
           ref: integration/sa-mpi
           fetch-depth: 0
 
-      - name: Apply exact source hygiene patch
+      - name: Guard disabled OpenMP and remove dead code
         shell: bash
         run: |
           python3 - <<'PY'
           from pathlib import Path
 
-          momentum = Path('src/assembly/MomentumAssemblyLiu.cpp')
-          sa = Path('src/assembly/SpalartAllmarasAssemblyLiu.cpp')
+          momentum = Path("src/assembly/MomentumAssemblyLiu.cpp")
+          sa = Path("src/assembly/SpalartAllmarasAssemblyLiu.cpp")
 
-          def guard_openmp(path):
-              text = path.read_text(encoding='utf-8')
-              pragmas = (
-                  '#pragma omp parallel for schedule(static)',
-                  '#pragma omp atomic write',
-                  '#pragma omp critical(sa_liu_ceiling)',
-                  '#pragma omp critical(sa_liu_update_failure)',
-              )
-              replaced = 0
+          def guard_pragmas(path):
+              text = path.read_text(encoding="utf-8")
+              pragmas = [
+                  "#pragma omp parallel for schedule(static)",
+                  "#pragma omp atomic write",
+                  "#pragma omp critical(sa_liu_ceiling)",
+                  "#pragma omp critical(sa_liu_update_failure)",
+              ]
+              total = 0
               for pragma in pragmas:
-                  marker = '#ifdef CBS3D_USE_OPENMP\n' + pragma + '\n#endif'
-                  if marker in text:
-                      raise SystemExit(f'FATAL: {path}: pragma already guarded: {pragma}')
                   count = text.count(pragma)
                   if count:
-                      text = text.replace(pragma, marker)
-                      replaced += count
-              if replaced == 0:
-                  raise SystemExit(f'FATAL: {path}: no OpenMP pragmas found')
-              path.write_text(text, encoding='utf-8')
-              return replaced
+                      guarded = "#ifdef CBS3D_USE_OPENMP\n" + pragma + "\n#endif"
+                      text = text.replace(pragma, guarded)
+                      total += count
+              if total == 0:
+                  raise SystemExit("FATAL: no Liu OpenMP pragmas found in " + str(path))
+              path.write_text(text, encoding="utf-8")
+              return total
 
-          m_count = guard_openmp(momentum)
-          sa_count = guard_openmp(sa)
+          nm = guard_pragmas(momentum)
+          ns = guard_pragmas(sa)
 
-          text = sa.read_text(encoding='utf-8')
-          dead_function = '''        Real element_wall_distance(
-            const CBSStateSI& s,
-            const Int ie,
-            bool& ok)
-        {
-            ok = true;
-            Real d = 0.0;
-            for (Int a = 1; a <= 4; ++a)
-            {
-                const Int ip = s.intma(a, ie);
-                const Real da = s.wall_distance(ip);
-                if (!(da > 0.0) || !std::isfinite(da))
-                {
-                    ok = false;
-                    return s.cfg.sa_min_wall_distance;
-                }
-                d += da;
-            }
-            return std::max(0.25 * d, s.cfg.sa_min_wall_distance);
-        }
+          text = sa.read_text(encoding="utf-8")
+          start_marker = "        Real element_wall_distance(\n"
+          end_marker = "        Real vorticity_magnitude("
+          start = text.find(start_marker)
+          end = text.find(end_marker)
+          if start < 0 or end < 0 or end <= start:
+              raise SystemExit("FATAL: could not uniquely locate unused element_wall_distance helper")
+          text = text[:start] + text[end:]
 
-'''
-          if text.count(dead_function) != 1:
-              raise SystemExit('FATAL: expected exactly one unused element_wall_distance helper')
-          text = text.replace(dead_function, '')
-
-          dead_chi = '''                const Real chi_value =
-                    turbulence::chi(q_average, molecular_nu);
-'''
+          dead_chi = (
+              "                const Real chi_value =\n"
+              "                    turbulence::chi(q_average, molecular_nu);\n"
+          )
           if text.count(dead_chi) != 1:
-              raise SystemExit('FATAL: expected exactly one unused chi_value declaration')
-          text = text.replace(dead_chi, '')
-          sa.write_text(text, encoding='utf-8')
+              raise SystemExit("FATAL: expected exactly one unused chi_value declaration")
+          text = text.replace(dead_chi, "")
+          sa.write_text(text, encoding="utf-8")
 
-          # Structural proof: every remaining OpenMP pragma in the two Liu
-          # assemblies must be immediately guarded by CBS3D_USE_OPENMP.
           for path in (momentum, sa):
-              lines = path.read_text(encoding='utf-8').splitlines()
+              lines = path.read_text(encoding="utf-8").splitlines()
               for i, line in enumerate(lines):
-                  if line.lstrip().startswith('#pragma omp'):
-                      if i == 0 or lines[i-1].strip() != '#ifdef CBS3D_USE_OPENMP':
+                  if line.strip().startswith("#pragma omp"):
+                      if i == 0 or lines[i - 1].strip() != "#ifdef CBS3D_USE_OPENMP":
                           raise SystemExit(
-                              f'FATAL: unguarded OpenMP pragma in {path}:{i+1}: {line}')
+                              "FATAL: unguarded OpenMP pragma at " + str(path) + ":" + str(i + 1)
+                          )
 
-          if 'element_wall_distance(' in sa.read_text(encoding='utf-8'):
-              raise SystemExit('FATAL: unused element_wall_distance helper still present')
-          if 'const Real chi_value' in sa.read_text(encoding='utf-8'):
-              raise SystemExit('FATAL: unused chi_value declaration still present')
+          final_sa = sa.read_text(encoding="utf-8")
+          if "element_wall_distance(" in final_sa:
+              raise SystemExit("FATAL: unused element_wall_distance remains")
+          if "const Real chi_value" in final_sa:
+              raise SystemExit("FATAL: unused chi_value remains")
 
-          print(f'PASS: guarded {m_count} momentum and {sa_count} SA OpenMP pragmas')
-          print('PASS: removed unused element_wall_distance and chi_value')
+          print("PASS: guarded", nm, "momentum and", ns, "SA OpenMP pragmas")
+          print("PASS: removed both genuinely unused SA declarations")
           PY
 
-      - name: Compile and run Liu deterministic verification
+      - name: Check patch whitespace
+        run: git diff --check
+
+      - name: Build and run deterministic Liu gate
         shell: bash
         run: |
           cmake -S tests/liu -B build/liu-warning-clean -DCMAKE_BUILD_TYPE=Release
           cmake --build build/liu-warning-clean --parallel 2
           ctest --test-dir build/liu-warning-clean --output-on-failure
 
-      - name: Commit source cleanup
+      - name: Verify pure-MPI-style compilation has no Liu warnings
+        shell: bash
+        run: |
+          rm -rf build/liu-warning-compile
+          cmake -S . -B build/liu-warning-compile \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCBS3D_ENABLE_OPENMP=OFF \
+            -DCBS3D_ENABLE_MPI=OFF \
+            -DCBS3D_ENABLE_PETSC=OFF \
+            -DCBS3D_KEEP_LEGACY_EXECUTABLE_NAME=OFF \
+            2>&1 | tee /tmp/configure.log
+          cmake --build build/liu-warning-compile --parallel 2 2>&1 | tee /tmp/build.log
+          if grep -E "MomentumAssemblyLiu.cpp|SpalartAllmarasAssemblyLiu.cpp" /tmp/build.log | grep -E "warning:|warning C"; then
+            echo "FATAL: Liu source still emits compiler warnings" >&2
+            exit 1
+          fi
+
+      - name: Commit verified cleanup
         shell: bash
         run: |
           git config user.name "github-actions[bot]"
