@@ -38,6 +38,11 @@ export OMP_NUM_THREADS=1
 export OMP_PLACES=cores
 export OMP_PROC_BIND=close
 
+# This benchmark is explicitly single-node, so Open MPI does not need the
+# openib BTL.  Disabling that probe avoids repeated mlx5/OpenFabrics warnings
+# while preserving shared-memory MPI transports for all 40 local ranks.
+export OMPI_MCA_btl="^openib"
+
 # Mandatory wall-resolved benchmark: no wall model may leak into this run.
 unset CBS3D_SA_WALL_TREATMENT
 unset CBS3D_CHT_WALL_TREATMENT
