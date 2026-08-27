@@ -14,6 +14,7 @@ ROOT=/scratch/s.2337862/CBS3D
 CODE=$ROOT/code
 CASE=$ROOT/cases/flatplate
 VERIFY_BUILD=$CODE/build/liu-verification
+VERIFY_EXE=$VERIFY_BUILD/liu_nithiarasu_element_verification
 PROD_EXE=$CODE/build/mpi-release/cbs3d_parallel
 CANONICAL_JOB=$CODE/jobs/sunbird/flatplate_sa_tmr_p40.slurm
 SMOKE_DIR=$CASE/jobs/generated
@@ -42,7 +43,23 @@ printf 'HEAD   = %s\n' "$HEAD"
 printf '\n===== LIU/NITHIARASU DETERMINISTIC ELEMENT VERIFICATION =====\n'
 module purge
 module load cmake/3.31.10
+
+# The Sunbird login image carries an older /lib64/libstdc++.so.6 than the
+# GCC-12.1 compiler used for CBS3D.  Building succeeds with GCC-12 but executing
+# without this runtime path loads the system C++ library and fails with missing
+# GLIBCXX/CXXABI symbols.  Pin both compile and runtime environments explicitly.
 export PATH="$GCC_ROOT/bin:$PATH"
+export LD_LIBRARY_PATH="$GCC_ROOT/lib64:${LD_LIBRARY_PATH:-}"
+export LIBRARY_PATH="$GCC_ROOT/lib64:${LIBRARY_PATH:-}"
+
+[[ -x "$GCC_ROOT/bin/g++" ]] || {
+    echo "FATAL: GCC-12.1 g++ missing: $GCC_ROOT/bin/g++" >&2
+    exit 1
+}
+[[ -r "$GCC_ROOT/lib64/libstdc++.so.6" ]] || {
+    echo "FATAL: GCC-12.1 libstdc++ missing: $GCC_ROOT/lib64/libstdc++.so.6" >&2
+    exit 1
+}
 
 rm -rf "$VERIFY_BUILD"
 CXX="$GCC_ROOT/bin/g++" cmake \
@@ -50,6 +67,20 @@ CXX="$GCC_ROOT/bin/g++" cmake \
     -B "$VERIFY_BUILD" \
     -DCMAKE_BUILD_TYPE=Release
 cmake --build "$VERIFY_BUILD" --parallel 4
+
+[[ -x "$VERIFY_EXE" ]] || {
+    echo "FATAL: Liu verifier executable missing after build: $VERIFY_EXE" >&2
+    exit 1
+}
+
+printf '\n===== LIU VERIFIER RUNTIME LINK AUDIT =====\n'
+LDD_OUTPUT=$(ldd "$VERIFY_EXE")
+printf '%s\n' "$LDD_OUTPUT"
+printf '%s\n' "$LDD_OUTPUT" | grep -F "$GCC_ROOT/lib64/libstdc++.so.6" >/dev/null || {
+    echo "FATAL: verifier is not resolving GCC-12.1 libstdc++.so.6" >&2
+    exit 1
+}
+
 ctest --test-dir "$VERIFY_BUILD" --output-on-failure
 
 printf '\nLIU FORMULATION GATE: PASS\n'
@@ -59,6 +90,7 @@ module purge
 module load cmake/3.31.10
 export PATH="$MPI_ROOT/bin:$GCC_ROOT/bin:$PATH"
 export LD_LIBRARY_PATH="$PETSC_DIR/lib:$MPI_ROOT/lib:$GCC_ROOT/lib64:${LD_LIBRARY_PATH:-}"
+export LIBRARY_PATH="$GCC_ROOT/lib64:${LIBRARY_PATH:-}"
 unset PETSC_ARCH
 export OMPI_CC="$GCC_ROOT/bin/gcc"
 export OMPI_CXX="$GCC_ROOT/bin/g++"
