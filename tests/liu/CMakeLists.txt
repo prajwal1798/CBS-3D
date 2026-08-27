@@ -18,6 +18,16 @@ target_include_directories(liu_nithiarasu_element_verification PRIVATE
     "${CBS3D_ROOT}/include"
 )
 
+# The production assemblies contain OpenMP pragmas.  Enabling OpenMP here when
+# available keeps -Werror meaningful instead of accepting ignored-pragmas noise.
+find_package(OpenMP QUIET)
+if (OpenMP_CXX_FOUND)
+    target_link_libraries(
+        liu_nithiarasu_element_verification PRIVATE OpenMP::OpenMP_CXX)
+    target_compile_definitions(
+        liu_nithiarasu_element_verification PRIVATE CBS3D_USE_OPENMP=1)
+endif()
+
 if (MSVC)
     target_compile_options(liu_nithiarasu_element_verification PRIVATE
         /W4
@@ -32,6 +42,10 @@ else()
         -Werror
         -pedantic
     )
+    if (NOT OpenMP_CXX_FOUND)
+        target_compile_options(
+            liu_nithiarasu_element_verification PRIVATE -Wno-unknown-pragmas)
+    endif()
 endif()
 
 enable_testing()
