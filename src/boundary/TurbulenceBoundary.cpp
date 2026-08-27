@@ -283,6 +283,11 @@ namespace cbs
                 s.nu_tilde1(ip) = 0.0;
                 s.nu_t(ip) = 0.0;
                 s.mu_t(ip) = 0.0;
+
+                // This is a strong Dirichlet degree of freedom, not an SA
+                // transport unknown.  Any unconstrained update assembled before
+                // the boundary package must not contaminate the convergence norm.
+                s.sa_residual(ip) = 0.0;
             }
         }
     }
@@ -330,6 +335,11 @@ namespace cbs
                 const Real nu = nodal_molecular_nu(s, ip, fluid_touch_count);
                 s.nu_tilde(ip) = std::max(0.0, s.cfg.sa_inlet_ratio * nu);
                 s.nu_tilde1(ip) = s.nu_tilde(ip);
+
+                // The inlet value is prescribed strongly.  The transport
+                // equation is not a convergence equation at this degree of
+                // freedom, so discard the provisional unconstrained update.
+                s.sa_residual(ip) = 0.0;
             }
         }
     }
