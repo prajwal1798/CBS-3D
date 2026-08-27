@@ -1,0 +1,46 @@
+name: Liu formulation verification
+
+on:
+  push:
+    branches:
+      - integration/sa-mpi
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    name: Liu element / Linux GCC
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Configure deterministic verifier
+        run: cmake -S tests/liu -B build/liu-verification -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build deterministic verifier
+        run: cmake --build build/liu-verification --parallel 2
+
+      - name: Run deterministic verifier
+        run: ctest --test-dir build/liu-verification --output-on-failure
+
+  windows:
+    name: Liu element / Windows MSVC
+    runs-on: windows-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Configure deterministic verifier
+        shell: pwsh
+        run: cmake -S tests/liu -B build/liu-verification
+
+      - name: Build deterministic verifier
+        shell: pwsh
+        run: cmake --build build/liu-verification --config Release --parallel 2
+
+      - name: Run deterministic verifier
+        shell: pwsh
+        run: ctest --test-dir build/liu-verification -C Release --output-on-failure
