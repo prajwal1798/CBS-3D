@@ -1,0 +1,126 @@
+name: One-shot Liu source warning cleanup
+
+on:
+  push:
+    branches:
+      - integration/sa-mpi
+    paths:
+      - .github/workflows/cleanup-liu-warning-source-once.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch-source:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out branch
+        uses: actions/checkout@v4
+        with:
+          ref: integration/sa-mpi
+          fetch-depth: 0
+
+      - name: Apply exact source hygiene patch
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          momentum = Path('src/assembly/MomentumAssemblyLiu.cpp')
+          sa = Path('src/assembly/SpalartAllmarasAssemblyLiu.cpp')
+
+          def guard_openmp(path):
+              text = path.read_text(encoding='utf-8')
+              pragmas = (
+                  '#pragma omp parallel for schedule(static)',
+                  '#pragma omp atomic write',
+                  '#pragma omp critical(sa_liu_ceiling)',
+                  '#pragma omp critical(sa_liu_update_failure)',
+              )
+              replaced = 0
+              for pragma in pragmas:
+                  marker = '#ifdef CBS3D_USE_OPENMP\n' + pragma + '\n#endif'
+                  if marker in text:
+                      raise SystemExit(f'FATAL: {path}: pragma already guarded: {pragma}')
+                  count = text.count(pragma)
+                  if count:
+                      text = text.replace(pragma, marker)
+                      replaced += count
+              if replaced == 0:
+                  raise SystemExit(f'FATAL: {path}: no OpenMP pragmas found')
+              path.write_text(text, encoding='utf-8')
+              return replaced
+
+          m_count = guard_openmp(momentum)
+          sa_count = guard_openmp(sa)
+
+          text = sa.read_text(encoding='utf-8')
+          dead_function = '''        Real element_wall_distance(
+            const CBSStateSI& s,
+            const Int ie,
+            bool& ok)
+        {
+            ok = true;
+            Real d = 0.0;
+            for (Int a = 1; a <= 4; ++a)
+            {
+                const Int ip = s.intma(a, ie);
+                const Real da = s.wall_distance(ip);
+                if (!(da > 0.0) || !std::isfinite(da))
+                {
+                    ok = false;
+                    return s.cfg.sa_min_wall_distance;
+                }
+                d += da;
+            }
+            return std::max(0.25 * d, s.cfg.sa_min_wall_distance);
+        }
+
+'''
+          if text.count(dead_function) != 1:
+              raise SystemExit('FATAL: expected exactly one unused element_wall_distance helper')
+          text = text.replace(dead_function, '')
+
+          dead_chi = '''                const Real chi_value =
+                    turbulence::chi(q_average, molecular_nu);
+'''
+          if text.count(dead_chi) != 1:
+              raise SystemExit('FATAL: expected exactly one unused chi_value declaration')
+          text = text.replace(dead_chi, '')
+          sa.write_text(text, encoding='utf-8')
+
+          # Structural proof: every remaining OpenMP pragma in the two Liu
+          # assemblies must be immediately guarded by CBS3D_USE_OPENMP.
+          for path in (momentum, sa):
+              lines = path.read_text(encoding='utf-8').splitlines()
+              for i, line in enumerate(lines):
+                  if line.lstrip().startswith('#pragma omp'):
+                      if i == 0 or lines[i-1].strip() != '#ifdef CBS3D_USE_OPENMP':
+                          raise SystemExit(
+                              f'FATAL: unguarded OpenMP pragma in {path}:{i+1}: {line}')
+
+          if 'element_wall_distance(' in sa.read_text(encoding='utf-8'):
+              raise SystemExit('FATAL: unused element_wall_distance helper still present')
+          if 'const Real chi_value' in sa.read_text(encoding='utf-8'):
+              raise SystemExit('FATAL: unused chi_value declaration still present')
+
+          print(f'PASS: guarded {m_count} momentum and {sa_count} SA OpenMP pragmas')
+          print('PASS: removed unused element_wall_distance and chi_value')
+          PY
+
+      - name: Compile and run Liu deterministic verification
+        shell: bash
+        run: |
+          cmake -S tests/liu -B build/liu-warning-clean -DCMAKE_BUILD_TYPE=Release
+          cmake --build build/liu-warning-clean --parallel 2
+          ctest --test-dir build/liu-warning-clean --output-on-failure
+
+      - name: Commit source cleanup
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/assembly/MomentumAssemblyLiu.cpp src/assembly/SpalartAllmarasAssemblyLiu.cpp
+          git diff --cached --check
+          git commit -m "Guard Liu OpenMP pragmas and remove dead warnings"
+          git push origin HEAD:integration/sa-mpi
