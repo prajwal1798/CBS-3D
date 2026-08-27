@@ -18,23 +18,28 @@ target_include_directories(liu_nithiarasu_element_verification PRIVATE
     "${CBS3D_ROOT}/include"
 )
 
-find_package(OpenMP QUIET)
-if (OpenMP_CXX_FOUND)
-    target_link_libraries(
-        liu_nithiarasu_element_verification PRIVATE OpenMP::OpenMP_CXX)
-    target_compile_definitions(
-        liu_nithiarasu_element_verification PRIVATE CBS3D_USE_OPENMP=1)
-endif()
-
 if (MSVC)
+    # MSVC's plain /openmp mode does not accept the OpenMP 3.1 atomic-write
+    # syntax used by the production assemblies.  The LLVM mode does.
     target_compile_options(liu_nithiarasu_element_verification PRIVATE
         /W4
         /WX
         /permissive-
+        /openmp:llvm
         /wd4189
         /wd4505
     )
+    target_compile_definitions(
+        liu_nithiarasu_element_verification PRIVATE CBS3D_USE_OPENMP=1)
 else()
+    find_package(OpenMP QUIET)
+    if (OpenMP_CXX_FOUND)
+        target_link_libraries(
+            liu_nithiarasu_element_verification PRIVATE OpenMP::OpenMP_CXX)
+        target_compile_definitions(
+            liu_nithiarasu_element_verification PRIVATE CBS3D_USE_OPENMP=1)
+    endif()
+
     target_compile_options(liu_nithiarasu_element_verification PRIVATE
         -O2
         -Wall
