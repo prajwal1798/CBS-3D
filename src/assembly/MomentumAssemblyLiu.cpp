@@ -359,7 +359,9 @@ namespace cbs
             const Int cbeg = s.color_ptr[static_cast<Size>(colour)];
             const Int cend = s.color_ptr[static_cast<Size>(colour) + 1];
 
+#ifdef CBS3D_USE_OPENMP
 #pragma omp parallel for schedule(static)
+#endif
             for (Int k = cbeg; k < cend; ++k)
             {
                 const Int ie = s.color_elem[static_cast<Size>(k)];
@@ -370,7 +372,9 @@ namespace cbs
 
                 if (!(s.detJ(ie) > 0.0) || !std::isfinite(s.detJ(ie)))
                 {
+#ifdef CBS3D_USE_OPENMP
 #pragma omp atomic write
+#endif
                     bad_detj = 1;
                     continue;
                 }

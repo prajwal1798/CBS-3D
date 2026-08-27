@@ -117,27 +117,6 @@ namespace cbs
             return s.cfg.ani;
         }
 
-        Real element_wall_distance(
-            const CBSStateSI& s,
-            const Int ie,
-            bool& ok)
-        {
-            ok = true;
-            Real d = 0.0;
-            for (Int a = 1; a <= 4; ++a)
-            {
-                const Int ip = s.intma(a, ie);
-                const Real da = s.wall_distance(ip);
-                if (!(da > 0.0) || !std::isfinite(da))
-                {
-                    ok = false;
-                    return s.cfg.sa_min_wall_distance;
-                }
-                d += da;
-            }
-            return std::max(0.25 * d, s.cfg.sa_min_wall_distance);
-        }
-
         Real vorticity_magnitude(const CBSStateSI& s, const Int ie)
         {
             Real du[4][4] = {};
@@ -203,7 +182,9 @@ namespace cbs
 
     void SpalartAllmarasAssembly::resetEffectiveProperties(CBSStateSI& s)
     {
+#ifdef CBS3D_USE_OPENMP
 #pragma omp parallel for schedule(static)
+#endif
         for (Int ie = 1; ie <= s.cfg.nelem; ++ie)
         {
             s.nu_tilde_e(ie) = 0.0;
@@ -236,7 +217,9 @@ namespace cbs
             const Int cbeg = s.color_ptr[static_cast<Size>(colour)];
             const Int cend = s.color_ptr[static_cast<Size>(colour) + 1];
 
+#ifdef CBS3D_USE_OPENMP
 #pragma omp parallel for schedule(static)
+#endif
             for (Int k = cbeg; k < cend; ++k)
             {
                 const Int ie = s.color_elem[static_cast<Size>(k)];
@@ -247,7 +230,9 @@ namespace cbs
 
                 if (!(s.detJ(ie) > 0.0) || !std::isfinite(s.detJ(ie)))
                 {
+#ifdef CBS3D_USE_OPENMP
 #pragma omp atomic write
+#endif
                     bad_material = 1;
                     continue;
                 }
@@ -267,7 +252,9 @@ namespace cbs
                     molecular_kinematic_viscosity(s, ie, material_ok);
                 if (!material_ok)
                 {
+#ifdef CBS3D_USE_OPENMP
 #pragma omp atomic write
+#endif
                     bad_material = 1;
                     continue;
                 }
@@ -276,7 +263,9 @@ namespace cbs
                     molecular_nu > 0.0 &&
                     q_average > s.cfg.sa_nu_tilde_ceiling_ratio * molecular_nu)
                 {
+#ifdef CBS3D_USE_OPENMP
 #pragma omp critical(sa_liu_ceiling)
+#endif
                     {
                         if (diverged_element == 0)
                         {
@@ -339,7 +328,9 @@ namespace cbs
         }
 #endif
 
+#ifdef CBS3D_USE_OPENMP
 #pragma omp parallel for schedule(static)
+#endif
         for (Int ip = 1; ip <= s.cfg.npoin; ++ip)
         {
             const Real weight = s.sa_nodal_weight(ip);
@@ -394,7 +385,9 @@ namespace cbs
             const Int cbeg = s.color_ptr[static_cast<Size>(colour)];
             const Int cend = s.color_ptr[static_cast<Size>(colour) + 1];
 
+#ifdef CBS3D_USE_OPENMP
 #pragma omp parallel for schedule(static)
+#endif
             for (Int k = cbeg; k < cend; ++k)
             {
                 const Int ie = s.color_elem[static_cast<Size>(k)];
@@ -405,7 +398,9 @@ namespace cbs
 
                 if (!(s.detJ(ie) > 0.0) || !std::isfinite(s.detJ(ie)))
                 {
+#ifdef CBS3D_USE_OPENMP
 #pragma omp atomic write
+#endif
                     bad_detj = 1;
                     continue;
                 }
@@ -442,7 +437,9 @@ namespace cbs
 
                 if (!local_distance_ok)
                 {
+#ifdef CBS3D_USE_OPENMP
 #pragma omp atomic write
+#endif
                     bad_wall_distance = 1;
                     continue;
                 }
@@ -457,7 +454,9 @@ namespace cbs
                     molecular_kinematic_viscosity(s, ie, material_ok);
                 if (!material_ok)
                 {
+#ifdef CBS3D_USE_OPENMP
 #pragma omp atomic write
+#endif
                     bad_material = 1;
                     continue;
                 }
@@ -465,7 +464,9 @@ namespace cbs
                 const Real dt = s.delte(ie);
                 if (!(dt > 0.0) || !std::isfinite(dt))
                 {
+#ifdef CBS3D_USE_OPENMP
 #pragma omp atomic write
+#endif
                     bad_dt = 1;
                     continue;
                 }
@@ -510,8 +511,6 @@ namespace cbs
                     omega + s_bar,
                     s.cfg.sa_min_stilde);
 
-                const Real chi_value =
-                    turbulence::chi(q_average, molecular_nu);
                 const Real r_value = turbulence::rFunction(
                     q_average,
                     s_tilde,
@@ -666,7 +665,9 @@ namespace cbs
             ? static_cast<Int>(s.owned_nodes.size())
             : s.cfg.npoin;
 
+#ifdef CBS3D_USE_OPENMP
 #pragma omp parallel for schedule(static)
+#endif
         for (Int index = 0; index < count; ++index)
         {
             const Int ip = have_owned
@@ -697,7 +698,9 @@ namespace cbs
 
             if (!std::isfinite(new_value))
             {
+#ifdef CBS3D_USE_OPENMP
 #pragma omp critical(sa_liu_update_failure)
+#endif
                 {
                     if (failed_node == 0)
                     {
