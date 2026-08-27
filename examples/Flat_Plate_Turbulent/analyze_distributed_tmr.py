@@ -27,6 +27,33 @@ Vec = Tuple[float, float, float]
 Tet = Tuple[int, int, int, int]
 Face = Tuple[int, int, int]
 
+# Legacy CBS .plt writers use Fortran-style fixed records with no explicit
+# delimiter between the integer node id and a negative first coordinate, e.g.
+# "         1-4.4418663468700000e-02 ...".  C++ stream extraction handles
+# that naturally by stopping the integer token before '-', while str.split()
+# does not.  Parse the leading integer like operator>> and then scan exactly
+# three signed real tokens, including glued negative values and D exponents.
+_REAL_TOKEN = re.compile(
+    r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eEdD][+-]?\d+)?"
+)
+
+
+def parse_legacy_coordinate_record(line: str) -> Tuple[int, Vec]:
+    match = re.match(r"^\s*([+-]?\d+)", line)
+    if match is None:
+        raise ValueError("missing node id in .plt coordinate record: {!r}".format(line.rstrip()))
+
+    node_id = int(match.group(1))
+    tokens = _REAL_TOKEN.findall(line[match.end():])
+    if len(tokens) != 3:
+        raise ValueError(
+            "expected exactly 3 coordinates after node id {} but found {} in {!r}"
+            .format(node_id, len(tokens), line.rstrip())
+        )
+
+    xyz = tuple(float(token.replace("D", "E").replace("d", "e")) for token in tokens)
+    return node_id, (xyz[0], xyz[1], xyz[2])
+
 
 def sub(a: Vec, b: Vec) -> Vec:
     return (a[0]-b[0], a[1]-b[1], a[2]-b[2])
@@ -93,7 +120,10 @@ def read_partition(rank: Path):
             p=fh.readline().split(); tets[int(p[0])-1]=tuple(map(int,p[1:5]))
         points: List[Vec] = [(0.0,0.0,0.0)]*npoin
         for _ in range(npoin):
-            p=fh.readline().split(); points[int(p[0])-1]=tuple(map(float,p[1:4]))
+            node_id, xyz = parse_legacy_coordinate_record(fh.readline())
+            if node_id < 1 or node_id > npoin:
+                raise ValueError("coordinate node id {} outside 1..{}".format(node_id, npoin))
+            points[node_id-1] = xyz
         faces=[]
         for _ in range(nboun):
             p=fh.readline().split(); faces.append((tuple(map(int,p[:3])),int(p[3]),int(p[4])))
