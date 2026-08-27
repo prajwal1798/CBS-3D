@@ -12,6 +12,11 @@ out/
 CMakeCache.txt
 CMakeFiles/
 
+# Python-generated cache files. These are runtime artifacts, never source.
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
 input/blanket/partitions/40/
 
 # Generated solver output
