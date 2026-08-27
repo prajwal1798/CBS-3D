@@ -11,10 +11,9 @@ post-processing errors:
 * maximum element mu_t/mu, i.e. the value actually supplied to momentum;
 * maximum projected nodal mu_t/mu written for visualisation.
 
-No third-party Python modules are required.
+No third-party Python modules are required.  Keep this script compatible with
+the Python 3.6 interpreter available on older RHEL7-class HPC environments.
 """
-
-from __future__ import annotations
 
 import argparse
 import json
