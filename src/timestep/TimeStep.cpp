@@ -301,17 +301,44 @@ namespace cbs
 
                         const Real nu_tilde_e = s.nu_tilde_e(ie);
 
-                        if (nu_tilde_e < 0.0 || !std::isfinite(nu_tilde_e))
+                        if (!std::isfinite(nu_tilde_e))
                         {
                             throw std::runtime_error(
-                                "TimeStep - invalid nu_tilde_e at element "
+                                "TimeStep - non-finite nu_tilde_e at element "
                                 + std::to_string(ie));
                         }
 
                         const Real molecular_nu = s.mu_e(ie) / s.rho_e(ie);
+                        Real sa_transport_viscosity = nu_tilde_e;
+
+                        if (s.cfg.turbulence_model == 1 && nu_tilde_e < 0.0)
+                        {
+                            const Real chi_value = turbulence::chi(
+                                nu_tilde_e,
+                                molecular_nu);
+                            const Real fn_value = turbulence::negativeBranchFn(
+                                chi_value,
+                                sa_constants);
+                            sa_transport_viscosity = nu_tilde_e * fn_value;
+                        }
+                        else if (nu_tilde_e < 0.0)
+                        {
+                            throw std::runtime_error(
+                                "TimeStep - negative nu_tilde_e in non-SA-neg model at element "
+                                + std::to_string(ie));
+                        }
 
                         const Real sa_diffusivity =
-                            (molecular_nu + nu_tilde_e) / sa_constants.sigma;
+                            (molecular_nu + sa_transport_viscosity) /
+                            sa_constants.sigma;
+
+                        if (!(sa_diffusivity > 0.0) ||
+                            !std::isfinite(sa_diffusivity))
+                        {
+                            throw std::runtime_error(
+                                "TimeStep - invalid SA transport diffusivity at element "
+                                + std::to_string(ie));
+                        }
 
                         diff = std::max(diff, sa_diffusivity);
                     }

@@ -325,3 +325,40 @@ if (CBS3D_BUILD_TESTS)
         COMMAND wall_distance_verification 60 40 20
     )
 endif()
+
+#==============================================================================
+# SA-neg deterministic negative-branch verification
+#==============================================================================
+if (CBS3D_BUILD_TESTS)
+    add_executable(sa_neg_element_verification
+        tests/SANegElementVerification.cpp
+        src/assembly/SpalartAllmarasAssemblyLiu.cpp
+        src/turbulence/SpalartAllmaras.cpp
+    )
+
+    target_include_directories(sa_neg_element_verification PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/include"
+    )
+
+    target_compile_features(sa_neg_element_verification PRIVATE cxx_std_20)
+
+    if (MSVC)
+        target_compile_options(sa_neg_element_verification PRIVATE
+            /W4
+            /permissive-
+        )
+    else()
+        target_compile_options(sa_neg_element_verification PRIVATE
+            -O2
+            -Wall
+            -Wextra
+            -pedantic
+        )
+    endif()
+
+    add_test(
+        NAME sa_neg_negative_branch
+        COMMAND sa_neg_element_verification
+    )
+endif()
+
