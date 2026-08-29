@@ -41,6 +41,11 @@ def replace_once(text: str, old: str, new: str, description: str) -> str:
     return text.replace(old, new, 1)
 
 
+def write_text(path, text):
+    with path.open("w", encoding="utf-8", newline="\n") as output:
+        output.write(text)
+
+
 def patch_assembly() -> None:
     text = ASSEMBLY.read_text(encoding="utf-8")
 
@@ -290,7 +295,7 @@ def patch_assembly() -> None:
         text, old, new,
         "remove hard zero projection from turbulence_model=1")
 
-    ASSEMBLY.write_text(text, encoding="utf-8", newline="\n")
+    write_text(ASSEMBLY, text)
 
 
 def patch_timestep() -> None:
@@ -359,7 +364,7 @@ def patch_timestep() -> None:
         text, old, new,
         "use SA-neg negative diffusion coefficient in timestep stability bound")
 
-    TIMESTEP.write_text(text, encoding="utf-8", newline="\n")
+    write_text(TIMESTEP, text)
 
 
 def patch_cmake() -> None:
@@ -408,7 +413,7 @@ if (CBS3D_BUILD_TESTS)
 endif()
 '''
     print("[patch] add SA-neg deterministic CMake verification target")
-    CMAKE.write_text(text.rstrip() + addition + "\n", encoding="utf-8", newline="\n")
+    write_text(CMAKE, text.rstrip() + addition + "\n")
 
 
 def main() -> int:
