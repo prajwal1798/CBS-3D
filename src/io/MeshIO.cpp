@@ -1622,22 +1622,19 @@ namespace cbs
                 "MeshIO::readParameterFile - TURBULENCE_ON must be 0 or 1");
         }
 
-        // turbulence_model selects the SA variant:
+        // turbulence_model selects the production SA variant:
         //
-        //     0  standard Spalart-Allmaras
-        //     1  SA-neg, reserved
+        //     0  Liu/Nithiarasu SA-noft2
+        //     1  NASA/TMR SA-neg
         //
-        // SA-neg is not implemented.  The transported variable is clipped at
-        // sa_nu_tilde_floor rather than following the negative branch of the
-        // model, so accepting turbulence_model = 1 would silently run standard
-        // SA under an SA-neg label and invalidate any result reported as SA-neg.
-        if (s.cfg.turbulence_model != 0)
+        // Model 1 preserves finite negative nu_tilde values, uses the
+        // Allmaras-Johnson-Spalart negative branch, and supplies zero turbulent
+        // eddy viscosity to momentum while nu_tilde is negative.
+        if (s.cfg.turbulence_model < 0 || s.cfg.turbulence_model > 1)
         {
             throw std::runtime_error(
-                "MeshIO::readParameterFile - turbulence_model must be 0."
-                " Value 1 is reserved for SA-neg, which is not implemented:"
-                " the solver clips nu_tilde at sa_nu_tilde_floor instead of"
-                " integrating the negative branch of the model.");
+                "MeshIO::readParameterFile - turbulence_model must be "
+                "0 (Liu/SA-noft2) or 1 (NASA/TMR SA-neg)");
         }
 
         if (s.cfg.turbulent_thermal_diffusivity_on < 0 ||
