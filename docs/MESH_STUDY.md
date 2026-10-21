@@ -85,7 +85,8 @@ iterations.
 
 1. Run corrected and refined to the same physical time or steady tolerance and
    compare an integral quantity.
-2. Investigate steady acceleration or SA under-relaxation.  A 10x larger
-   pseudo-time step (`dt=1.0e-4`) is unstable and cannot be used as-is.
+2. Investigate `ilots=1` local pseudo-time stepping (which requires
+   `dtfixed=0`) or SA under-relaxation.  A 10x larger fixed step
+   (`dt=1.0e-4`) is unstable and cannot be used as-is.
 3. Run the quality mesh on Sunbird; it is likely too large for the 16 GB tower.
 4. Keep the legacy `coarse.msh`/`fine.msh` out of the convergence claim.
