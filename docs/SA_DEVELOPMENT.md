@@ -145,6 +145,8 @@ itself is exercised by `sa_neg_negative_branch`.
   comparisons require rebuilding PETSc with `--with-hypre=1`.
 - The three-iteration case is a stability smoke test; the 200-iteration run is
   stable but remains far from the steady convergence tolerance.
+- A 10x larger pseudo-time step (`dt=1.0e-4`) exceeded the SA `nu_tilde/nu`
+  ceiling in its first iteration, so the baseline `dt=1.0e-5` is retained.
 
 ## Next steps
 

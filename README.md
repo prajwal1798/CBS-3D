@@ -40,6 +40,8 @@ Set-Location cases\flat_plate_petsc
   MSYS2 PETSc, measured flat-plate timings.
 - [docs/MESH_FORMAT.md](docs/MESH_FORMAT.md) — native `.plt/.bco/.material`
   format, boundary codes, Gmsh partition/export workflow.
+- [docs/MESH_STUDY.md](docs/MESH_STUDY.md) — canonical corrected/refined/quality
+  family, serial conversion, and the first PETSc/AMG smoke timings.
 - [docs/SA_DEVELOPMENT.md](docs/SA_DEVELOPMENT.md) — SA/SA-neg status and
   next validation steps.
 
