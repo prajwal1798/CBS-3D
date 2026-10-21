@@ -124,6 +124,16 @@ a large relative CG residual (`3.62e-2`) because it is normalized by the current
 initial residual, which is already only `7.76e-12`; the final absolute residual
 is `2.81e-13`.
 
+### SA-neg full-case regression
+
+The same 200-iteration case was rerun with `turbulence_model = 1` (NASA SA-neg).
+The final residuals were `RelU=2.056e-4`, `RelV=2.404e-3`, `RelW=5.508e-3` and
+`RelP=2.418e-3`, within 1% of the standard SA result at every sampled
+iteration.  This is the expected result when `nu_tilde` stays positive: the
+SA-neg branch is inactive and the run checks that model selection and the
+production assembly are wired through the full solver.  The negative branch
+itself is exercised by `sa_neg_negative_branch`.
+
 ## Current limitations
 
 - The 284k flat plate is a coarse near-wall mesh; the first-cell `y+` is not
