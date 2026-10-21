@@ -196,6 +196,35 @@ Material tets : 0=284400
 RESULT: PASS
 ```
 
+## Serial conversion from Gmsh
+
+`tools/gmsh_to_cbs.py` converts an unpartitioned Gmsh MSH4 mesh into a serial
+CBS3D case.  It maps physical surface names/IDs to CBS3D boundary codes and
+physical volume names to material flags:
+
+```powershell
+python tools\gmsh_to_cbs.py `
+    C:\PhD\MESH\examples\3D\flat_plate\flat_plate_sa_3d_corrected.msh `
+    --case-name flat_plate_serial `
+    --out-dir C:\Users\prajw\AppData\Local\Temp\opencode\flat_plate_serial `
+    --par C:\PhD\MESH\examples\3D\flat_plate\flat_plate_sa_3d_corrected.par `
+    --matprop C:\PhD\MESH\examples\3D\flat_plate\flat_plate_sa_3d_corrected.matprop
+```
+
+The converter was checked against the canonical corrected mesh: it reproduces
+284,400 tets, 64,320 nodes, 66,548 boundary faces, the same BC counts, and a
+volume of `5.000000000000e-02` with `RESULT: PASS`.
+
+> The legacy `coarse.msh` and `fine.msh` files in the examples are **not** the
+> same geometry family as the corrected/quality/refined `.geo` files.  The
+> coarse mesh starts at `x=-1/3` instead of `x=-1/2`, and the fine mesh spans
+> `z=1` instead of the thin `z=0.02` domain.  Do not use them as refinement
+> levels without regenerating them on the canonical geometry.
+
+For the canonical family, the corrected mesh is the 284k-cell level, the
+refined `.geo` targets about 1.24M tets, and the quality `.geo` targets about
+6.48M tets.
+
 ## Partition workflow
 
 The canonical mesh examples are in `C:\PhD\MESH\examples\3D\flat_plate`.
