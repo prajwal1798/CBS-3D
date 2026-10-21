@@ -30,7 +30,7 @@
 
 #ifdef CBS3D_USE_PETSC
 
-#include <petscksp.h>
+#include "cbs/linalg/PetscHeaders.hpp"
 
 #include <algorithm>
 #include <cmath>

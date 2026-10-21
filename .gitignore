@@ -22,5 +22,18 @@ input/blanket/partitions/40/
 # Generated solver output
 output/
 
+# Local case meshes are large and generated from C:\PhD\MESH.
+# Keep the .par controls and case READMEs, not the mesh bytes.
+cases/**/*.plt
+cases/**/*.material
+cases/**/*.bco
+cases/**/*.matprop
+cases/**/*.msh
+cases/**/*.mpi
+cases/**/mesh_summary.json
+cases/**/ranks/
+cases/**/partitioned_*/
+cases/**/split/
+
 # Retired/generated visual layout; never track this again.
 tools/CHT_UTube_layout.png

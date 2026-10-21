@@ -7,7 +7,7 @@
 #include "cbs/parallel/HaloExchange.hpp"
 
 #include <mpi.h>
-#include <petscksp.h>
+#include "cbs/linalg/PetscHeaders.hpp"
 
 #include <algorithm>
 #include <cmath>

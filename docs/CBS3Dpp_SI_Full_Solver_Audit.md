@@ -5,6 +5,12 @@
 **Code changes made:** none.  
 **Build check:** the active serial/OpenMP source tree was configured and compiled cleanly as C++20 with warnings enabled.
 
+> **Historical note (October 2026):** this audit predates the master
+> consolidation.  The standalone `Makefile` and `src/main.cpp` have been
+> retired.  The current entry points are `apps/serial/main.cpp` and
+> `apps/parallel/main.cpp`, and CMake is the authoritative build.  The findings
+> below are retained for traceability.
+
 ---
 
 ## 1. Audit status legend

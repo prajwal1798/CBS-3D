@@ -185,26 +185,37 @@ endif()
 
 #==============================================================================
 # OpenMP
+#
+# MSVC's legacy /openmp mode implements only OpenMP 2.0 and rejects the
+# atomic-write pragmas used by the coloured CSM assemblies.  `/openmp:llvm`
+# provides the OpenMP 3.1+ runtime (libomp) that those kernels require.
 #==============================================================================
-if (CBS3D_ENABLE_OPENMP)
-    find_package(OpenMP)
-
-    if (OpenMP_CXX_FOUND)
-        target_link_libraries(
-            ${CBS3D_APPLICATION_TARGET}
-            PRIVATE OpenMP::OpenMP_CXX
-        )
-
-        target_compile_definitions(
-            ${CBS3D_APPLICATION_TARGET}
-            PRIVATE CBS3D_USE_OPENMP=1
-        )
-    else()
-        message(WARNING
-            "OpenMP was requested but no C++ OpenMP implementation was found. "
-            "Building without OpenMP.")
+function(cbs3d_link_openmp target)
+    if (NOT CBS3D_ENABLE_OPENMP)
+        return()
     endif()
-endif()
+
+    if (MSVC)
+        target_compile_options(${target} PRIVATE /openmp:llvm)
+        target_compile_definitions(${target} PRIVATE CBS3D_USE_OPENMP=1)
+        target_link_libraries(${target} PRIVATE libomp)
+        set(CBS3D_OPENMP_CXX_READY TRUE PARENT_SCOPE)
+    else()
+        find_package(OpenMP QUIET)
+        if (OpenMP_CXX_FOUND)
+            target_link_libraries(${target} PRIVATE OpenMP::OpenMP_CXX)
+            target_compile_definitions(${target} PRIVATE CBS3D_USE_OPENMP=1)
+            set(CBS3D_OPENMP_CXX_READY TRUE PARENT_SCOPE)
+        else()
+            message(WARNING
+                "OpenMP was requested but no C++ OpenMP implementation was found. "
+                "Building without OpenMP.")
+            set(CBS3D_OPENMP_CXX_READY FALSE PARENT_SCOPE)
+        endif()
+    endif()
+endfunction()
+
+cbs3d_link_openmp(${CBS3D_APPLICATION_TARGET})
 
 #==============================================================================
 # MPI
@@ -234,19 +245,46 @@ if (CBS3D_ENABLE_PETSC)
 
     set(PETSC_DIR "$ENV{PETSC_DIR}")
     set(PETSC_PREFIX "${PETSC_DIR}")
+    set(PETSC_LIB_HINTS "${PETSC_DIR}/lib")
+    set(PETSC_INCLUDE_DIRS
+        "${PETSC_DIR}/include"
+        "${PETSC_DIR}/include/petsc"
+    )
 
-    if (DEFINED ENV{PETSC_ARCH}
-        AND EXISTS "${PETSC_DIR}/$ENV{PETSC_ARCH}/include")
-        set(PETSC_PREFIX "${PETSC_DIR}/$ENV{PETSC_ARCH}")
+    if (DEFINED ENV{PETSC_ARCH})
+        set(PETSC_ARCH "$ENV{PETSC_ARCH}")
+
+        # Source-tree or legacy install: ${PETSC_DIR}/${PETSC_ARCH}/lib.
+        if (EXISTS "${PETSC_DIR}/${PETSC_ARCH}/include")
+            set(PETSC_PREFIX "${PETSC_DIR}/${PETSC_ARCH}")
+            list(PREPEND PETSC_LIB_HINTS "${PETSC_PREFIX}/lib")
+            list(PREPEND PETSC_INCLUDE_DIRS "${PETSC_PREFIX}/include")
+        endif()
+
+        # Packaged install (for example MSYS2 UCRT64): architecture headers
+        # live in include/petsc/${PETSC_ARCH} and the import library in
+        # lib/petsc/${PETSC_ARCH}.
+        if (EXISTS "${PETSC_DIR}/include/petsc/${PETSC_ARCH}")
+            list(PREPEND PETSC_INCLUDE_DIRS
+                "${PETSC_DIR}/include/petsc/${PETSC_ARCH}"
+            )
+        endif()
+        if (EXISTS "${PETSC_DIR}/lib/petsc/${PETSC_ARCH}")
+            list(PREPEND PETSC_LIB_HINTS
+                "${PETSC_DIR}/lib/petsc/${PETSC_ARCH}"
+            )
+            set(PETSC_PREFIX "${PETSC_DIR}/lib/petsc/${PETSC_ARCH}")
+        endif()
     endif()
 
     find_library(PETSC_LIBRARY
         NAMES petsc
-        HINTS
-            "${PETSC_PREFIX}/lib"
-            "${PETSC_DIR}/lib"
+        HINTS ${PETSC_LIB_HINTS}
         REQUIRED
     )
+
+    message(STATUS "  PETSc library       : ${PETSC_LIBRARY}")
+    message(STATUS "  PETSc include dirs  : ${PETSC_INCLUDE_DIRS}")
 
     target_compile_definitions(
         ${CBS3D_APPLICATION_TARGET}
@@ -254,8 +292,7 @@ if (CBS3D_ENABLE_PETSC)
     )
 
     target_include_directories(${CBS3D_APPLICATION_TARGET} PRIVATE
-        "${PETSC_DIR}/include"
-        "${PETSC_PREFIX}/include"
+        ${PETSC_INCLUDE_DIRS}
     )
 
     target_link_libraries(${CBS3D_APPLICATION_TARGET} PRIVATE
@@ -297,68 +334,179 @@ message(STATUS "  PETSc               : ${CBS3D_ENABLE_PETSC}")
 message(STATUS "  Source validation   : ${CBS3D_BUILD_SOURCE_VALIDATION}")
 
 #==============================================================================
-# Wall-distance verification test
+# Verification and regression tests
+#
+# One switch builds every test that has a well-defined serial target:
+#
+#     cmake -S . -B build/tests -DCBS3D_BUILD_TESTS=ON
+#     cmake --build build/tests
+#     ctest --test-dir build/tests --output-on-failure
+#
+# The MPI-only regressions require a real MPI implementation (two ranks).
+# They are opt-in because the packaged Windows PETSc used for the local tower
+# is an MPIUNI build.
 #==============================================================================
+option(CBS3D_BUILD_MPI_TESTS "Build the two-rank MPI wall/topology regressions" OFF)
+
 if (CBS3D_BUILD_TESTS)
-    add_executable(wall_distance_verification
-        tests/WallDistanceVerification.cpp
-        src/turbulence/WallDistance.cpp
-    )
-
-    target_include_directories(wall_distance_verification PRIVATE
-        "${CMAKE_CURRENT_SOURCE_DIR}/include"
-    )
-
-    target_compile_features(wall_distance_verification PRIVATE cxx_std_20)
-
-    if (CBS3D_ENABLE_OPENMP AND OpenMP_CXX_FOUND)
-        target_link_libraries(wall_distance_verification
-            PRIVATE OpenMP::OpenMP_CXX)
-        target_compile_definitions(wall_distance_verification
-            PRIVATE CBS3D_USE_OPENMP=1)
-    endif()
-
     enable_testing()
 
-    add_test(
-        NAME wall_distance_exactness
-        COMMAND wall_distance_verification 60 40 20
-    )
-endif()
+    function(cbs3d_add_verification target)
+        cmake_parse_arguments(V "MPI" "TEST_NAME" "SOURCES;ARGS" ${ARGN})
 
-#==============================================================================
-# SA-neg deterministic negative-branch verification
-#==============================================================================
-if (CBS3D_BUILD_TESTS)
-    add_executable(sa_neg_element_verification
-        tests/SANegElementVerification.cpp
-        src/assembly/SpalartAllmarasAssemblyLiu.cpp
-        src/turbulence/SpalartAllmaras.cpp
-    )
+        if (V_MPI AND NOT (CBS3D_ENABLE_MPI AND TARGET MPI::MPI_CXX))
+            return()
+        endif()
 
-    target_include_directories(sa_neg_element_verification PRIVATE
-        "${CMAKE_CURRENT_SOURCE_DIR}/include"
-    )
+        add_executable(${target} ${V_SOURCES})
 
-    target_compile_features(sa_neg_element_verification PRIVATE cxx_std_20)
-
-    if (MSVC)
-        target_compile_options(sa_neg_element_verification PRIVATE
-            /W4
-            /permissive-
+        target_include_directories(${target} PRIVATE
+            "${CMAKE_CURRENT_SOURCE_DIR}/include"
         )
-    else()
-        target_compile_options(sa_neg_element_verification PRIVATE
-            -O2
-            -Wall
-            -Wextra
-            -pedantic
+
+        target_compile_features(${target} PRIVATE cxx_std_20)
+
+        if (MSVC)
+            target_compile_options(${target} PRIVATE /W4 /permissive-)
+        else()
+            target_compile_options(${target} PRIVATE -O2 -Wall -Wextra -pedantic)
+        endif()
+
+        cbs3d_link_openmp(${target})
+
+        if (V_MPI)
+            target_compile_definitions(${target} PRIVATE CBS3D_USE_MPI=1)
+            target_link_libraries(${target} PRIVATE MPI::MPI_CXX)
+        endif()
+
+        if (NOT V_TEST_NAME)
+            set(V_TEST_NAME ${target})
+        endif()
+
+        if (V_MPI AND MPIEXEC_EXECUTABLE)
+            add_test(
+                NAME ${V_TEST_NAME}
+                COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 2
+                        $<TARGET_FILE:${target}> ${V_ARGS}
+            )
+        else()
+            add_test(
+                NAME ${V_TEST_NAME}
+                COMMAND ${target} ${V_ARGS}
+            )
+        endif()
+    endfunction()
+
+    #--------------------------------------------------------------------------
+    # Turbulence and wall-model kernels
+    #--------------------------------------------------------------------------
+    cbs3d_add_verification(wall_distance_verification
+        TEST_NAME wall_distance_exactness
+        ARGS 60 40 20
+        SOURCES
+            tests/WallDistanceVerification.cpp
+            src/turbulence/WallDistance.cpp
+    )
+
+    cbs3d_add_verification(wall_treatment_verification
+        TEST_NAME wall_treatment
+        SOURCES
+            tests/WallTreatmentVerification.cpp
+            src/turbulence/WallTreatment.cpp
+    )
+
+    cbs3d_add_verification(wall_treatment_nasa_reference
+        TEST_NAME wall_treatment_nasa_reference
+        SOURCES
+            tests/WallTreatmentNASAReference.cpp
+            src/turbulence/WallTreatment.cpp
+    )
+
+    cbs3d_add_verification(wall_treatment_reynolds_sweep
+        TEST_NAME wall_treatment_reynolds_sweep
+        SOURCES
+            tests/WallTreatmentReynoldsSweep.cpp
+            src/turbulence/WallTreatment.cpp
+    )
+
+    cbs3d_add_verification(thermal_wall_treatment_verification
+        TEST_NAME thermal_wall_treatment
+        SOURCES tests/ThermalWallTreatmentVerification.cpp
+    )
+
+    cbs3d_add_verification(turbulence_wall_topology_verification
+        TEST_NAME turbulence_wall_topology
+        SOURCES
+            tests/TurbulenceWallTopologyVerification.cpp
+            src/turbulence/WallDistance.cpp
+    )
+
+    cbs3d_add_verification(wall_model_coupling_verification
+        TEST_NAME wall_model_coupling
+        SOURCES
+            tests/WallModelCouplingVerification.cpp
+            src/turbulence/WallModelCoupling.cpp
+            src/turbulence/WallTreatment.cpp
+    )
+
+    cbs3d_add_verification(cht_wall_model_coupling_verification
+        TEST_NAME cht_wall_model_coupling
+        SOURCES
+            tests/CHTWallModelCouplingVerification.cpp
+            src/turbulence/CHTWallModelCoupling.cpp
+            src/turbulence/WallModelCoupling.cpp
+            src/turbulence/WallTreatment.cpp
+    )
+
+    #--------------------------------------------------------------------------
+    # Spalart-Allmaras finite-element verification
+    #--------------------------------------------------------------------------
+    cbs3d_add_verification(sa_neg_element_verification
+        TEST_NAME sa_neg_negative_branch
+        SOURCES
+            tests/SANegElementVerification.cpp
+            src/assembly/SpalartAllmarasAssemblyLiu.cpp
+            src/turbulence/SpalartAllmaras.cpp
+    )
+
+    cbs3d_add_verification(liu_nithiarasu_element_verification
+        TEST_NAME liu_nithiarasu_element
+        SOURCES
+            tests/LiuNithiarasuElementVerification.cpp
+            src/assembly/MomentumAssemblyLiu.cpp
+            src/assembly/SpalartAllmarasAssemblyLiu.cpp
+            src/turbulence/SpalartAllmaras.cpp
+    )
+
+    #--------------------------------------------------------------------------
+    # Two-rank MPI regressions (opt-in; see CBS3D_BUILD_MPI_TESTS)
+    #--------------------------------------------------------------------------
+    if (CBS3D_BUILD_MPI_TESTS)
+        cbs3d_add_verification(turbulence_wall_topology_mpi
+            MPI
+            TEST_NAME turbulence_wall_topology_mpi
+            SOURCES tests/TurbulenceWallTopologyMPIVerification.cpp
+        )
+
+        cbs3d_add_verification(wall_model_coupling_mpi
+            MPI
+            TEST_NAME wall_model_coupling_mpi
+            SOURCES
+                tests/WallModelCouplingMPIRankLocalVerification.cpp
+                src/turbulence/WallModelCoupling.cpp
+                src/turbulence/WallTreatment.cpp
+        )
+
+        cbs3d_add_verification(cht_wall_model_coupling_mpi
+            MPI
+            TEST_NAME cht_wall_model_coupling_mpi
+            SOURCES
+                tests/CHTWallModelCouplingMPIVerification.cpp
+                src/turbulence/CHTWallModelCoupling.cpp
+                src/turbulence/WallModelCoupling.cpp
+                src/turbulence/WallTreatment.cpp
         )
     endif()
-
-    add_test(
-        NAME sa_neg_negative_branch
-        COMMAND sa_neg_element_verification
-    )
 endif()
+
 

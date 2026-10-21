@@ -3,7 +3,7 @@
 #ifdef CBS3D_USE_PETSC
 
 #include "cbs/parallel/HaloExchange.hpp"
-#include <petscksp.h>
+#include "cbs/linalg/PetscHeaders.hpp"
 
 #ifdef CBS3D_USE_MPI
 #include <mpi.h>

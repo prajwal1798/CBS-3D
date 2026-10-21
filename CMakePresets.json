@@ -96,43 +96,136 @@
         "CBS3D_ENABLE_PETSC": "ON",
         "CBS3D_KEEP_LEGACY_EXECUTABLE_NAME": "OFF"
       }
+    },
+    {
+      "name": "tests-msvc-release",
+      "displayName": "MSVC Verification Suite",
+      "description": "Native Windows Release build of every serial verification test",
+      "generator": "Visual Studio 18 2026",
+      "architecture": "x64",
+      "binaryDir": "${sourceDir}/build/tests-msvc-release",
+      "cacheVariables": {
+        "CBS3D_ENABLE_OPENMP": "ON",
+        "CBS3D_ENABLE_MPI": "OFF",
+        "CBS3D_ENABLE_PETSC": "OFF",
+        "CBS3D_BUILD_TESTS": "ON",
+        "CBS3D_BUILD_SOURCE_VALIDATION": "ON"
+      }
+    },
+    {
+      "name": "local-msys2-petsc",
+      "displayName": "Local MSYS2 UCRT64 PETSc",
+      "description": "Native Windows GCC/OpenMP build with the MSYS2 UCRT64 PETSc (GAMG) pressure solver",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/local-msys2-petsc",
+      "environment": {
+        "PETSC_DIR": "C:/msys64/ucrt64",
+        "PETSC_ARCH": "dto",
+        "PATH": "C:/msys64/ucrt64/bin;$penv{PATH}"
+      },
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_CXX_COMPILER": "C:/msys64/ucrt64/bin/g++.exe",
+        "CBS3D_ENABLE_OPENMP": "ON",
+        "CBS3D_ENABLE_MPI": "OFF",
+        "CBS3D_ENABLE_PETSC": "ON",
+        "CBS3D_BUILD_TESTS": "ON",
+        "CBS3D_BUILD_SOURCE_VALIDATION": "ON",
+        "CBS3D_KEEP_LEGACY_EXECUTABLE_NAME": "ON"
+      }
     }
   ],
   "buildPresets": [
     {
       "name": "build-serial-release",
       "configurePreset": "serial-release",
-      "targets": ["cbs3d_serial"]
+      "targets": [
+        "cbs3d_serial"
+      ]
     },
     {
       "name": "build-serial-openmp-release",
       "configurePreset": "serial-openmp-release",
-      "targets": ["cbs3d_serial"]
+      "targets": [
+        "cbs3d_serial"
+      ]
     },
     {
       "name": "build-serial-petsc-release",
       "configurePreset": "serial-petsc-release",
-      "targets": ["cbs3d_serial"]
+      "targets": [
+        "cbs3d_serial"
+      ]
     },
     {
       "name": "build-mpi-release",
       "configurePreset": "mpi-release",
-      "targets": ["cbs3d_parallel"]
+      "targets": [
+        "cbs3d_parallel"
+      ]
     },
     {
       "name": "build-hybrid-release",
       "configurePreset": "hybrid-release",
-      "targets": ["cbs3d_parallel"]
+      "targets": [
+        "cbs3d_parallel"
+      ]
     },
     {
       "name": "build-sa-serial-dev",
       "configurePreset": "sa-serial-dev",
-      "targets": ["cbs3d_serial"]
+      "targets": [
+        "cbs3d_serial"
+      ]
     },
     {
       "name": "build-sa-mpi-dev",
       "configurePreset": "sa-mpi-dev",
-      "targets": ["cbs3d_parallel"]
+      "targets": [
+        "cbs3d_parallel"
+      ]
+    },
+    {
+      "name": "build-tests-msvc-release",
+      "configurePreset": "tests-msvc-release",
+      "configuration": "Release",
+      "targets": [
+        "ALL_BUILD"
+      ]
+    },
+    {
+      "name": "build-local-msys2-petsc",
+      "configurePreset": "local-msys2-petsc",
+      "targets": [
+        "all"
+      ],
+      "environment": {
+        "PETSC_DIR": "C:/msys64/ucrt64",
+        "PETSC_ARCH": "dto",
+        "PATH": "C:/msys64/ucrt64/bin;$penv{PATH}"
+      }
+    }
+  ],
+  "testPresets": [
+    {
+      "name": "test-tests-msvc-release",
+      "configurePreset": "tests-msvc-release",
+      "configuration": "Release",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "test-local-msys2-petsc",
+      "configurePreset": "local-msys2-petsc",
+      "output": {
+        "outputOnFailure": true
+      },
+      "environment": {
+        "PETSC_DIR": "C:/msys64/ucrt64",
+        "PETSC_ARCH": "dto",
+        "PATH": "C:/msys64/ucrt64/bin;$penv{PATH}"
+      }
     }
   ]
 }

@@ -1,0 +1,54 @@
+Pressure Field Solver (1 - Conjugate Gradient, 2 - Gaussian Elimination Banded Solver, 3 - AMG/PETSc if enabled)
+1
+Restart from prior run (0 - NO, 1 - YES)
+0
+Energy Calculation Desired (0 - NO, 1 - YES)
+0
+Free stream values - Ux Uy Uz P T
+20  0  1  1.0e-5  20
+ntime transient_on dtfixed dtfix iwrite
+100  0  1  1.0e-5  100
+csafm theta1
+0.50  1.00
+CBS3D timestep controls: cbs_scheme ilots htype step2_check rem_deltp beta_opt dtfix_end csafm2 epsilon1 deltr
+1  0  1  0  0  1  0  2.0  1.0e-6  1.0e20
+Re Pr Ra Ri
+1000000.0  0.71  0.0  0.0
+Convection Type (1 - Natural, 0 - Mixed/Forced)
+0
+pnode - Node in domain for Pressure BC if no other Pressure BCs exist
+1
+Output Controls - write_output write_time_output time_output_interval end_rtime
+0  3600.0  0.01  0.0
+Conjugate Gradient Convergence Tolerances - relToler absToler
+1.0e-6  1.0e-14
+Steady State Convergence Tolerances - vel_check l2norm_vel temp_check l2norm_temp
+1  1.0e-6  0  1.0e-7
+Output Formats - paraview_output tecplot_output nusselt_calc nusselt_flag
+1  0  0  530
+Run Time Adjustable Option
+0
+alpha_sf k_ratio source_solid heat_flux_bc
+1.0  1.0  0.0  0.0
+Dimensional controls: dimensional_mode material_properties_enabled mass_flow_inlet_enabled
+1  1  0
+Reference and inlet/outlet data: p_ref model_depth inlet_mass_flow_rate inlet_density inlet_temperature outlet_pressure_gauge
+0.0  1.0  0.0  1.0  300.0  0.0
+Prescribed inlet velocity: inlet_u inlet_v inlet_w
+1.0  0.0  0.0
+Nusselt reference data: nusselt_Tinf nusselt_Tref nusselt_diameter
+300.0  300.0  1.0
+Pressure CG controls: cg_preconditioner cg_conv_test cg_max_iter l2norm_pres_tolerance
+1  2  5000  1.0e-5
+CBS3D output/monitor controls: residual_log_enabled residual_log_every console_log_every live_residual_plot vtu_output_enabled vtu_output_every_iterations vtu_output_every_sim_time write_boundary_debug_arrays steady_min_iterations
+1  10  10  0  0  100  0.0  0  1
+Artificial diffusion control: art_diff
+0
+Spalart-Allmaras controls: turbulence_on turbulence_model turbulent_thermal_diffusivity_on
+1  0  0
+Spalart-Allmaras inlet and thermal controls: sa_inlet_ratio sa_prandtl_t
+3.0  0.90
+Spalart-Allmaras numerical floors: sa_min_wall_distance sa_min_stilde sa_nu_tilde_floor
+1.0e-14  1.0e-14  0.0
+Spalart-Allmaras switches: sa_use_stilde_limiter sa_implicit_destruction
+1  1
