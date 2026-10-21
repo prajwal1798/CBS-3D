@@ -17,10 +17,11 @@ meshes still use the MESH repository's ``export_rank_local_cbs.py`` workflow.
 from __future__ import annotations
 
 import argparse
+import math
 import shutil
-from collections import Counter
+from collections import Counter, defaultdict
 from pathlib import Path
-from typing import Dict, List, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 try:
     import gmsh
@@ -92,14 +93,111 @@ def get_elements(dim: int, entity: int, wanted_type: int) -> Tuple[List[int], Li
     return tags, nodes
 
 
-def tet_faces(conn: Sequence[int]) -> Tuple[Tuple[int, int, int], ...]:
-    a, b, c, d = conn
+def subtract(u: Sequence[float], v: Sequence[float]) -> Tuple[float, float, float]:
+    return (u[0] - v[0], u[1] - v[1], u[2] - v[2])
+
+
+def dot(u: Sequence[float], v: Sequence[float]) -> float:
+    return u[0] * v[0] + u[1] * v[1] + u[2] * v[2]
+
+
+def cross(u: Sequence[float], v: Sequence[float]) -> Tuple[float, float, float]:
     return (
-        tuple(sorted((b, c, d))),
-        tuple(sorted((a, d, c))),
-        tuple(sorted((a, b, d))),
-        tuple(sorted((a, c, b))),
+        u[1] * v[2] - u[2] * v[1],
+        u[2] * v[0] - u[0] * v[2],
+        u[0] * v[1] - u[1] * v[0],
     )
+
+
+def distance2(u: Sequence[float], v: Sequence[float]) -> float:
+    dx = u[0] - v[0]
+    dy = u[1] - v[1]
+    dz = u[2] - v[2]
+    return dx * dx + dy * dy + dz * dz
+
+
+def outward_faces(
+    conn: Sequence[int],
+    coords: Dict[int, Tuple[float, float, float]],
+) -> Tuple[Tuple[int, int, int], ...]:
+    """Return the four tet faces with outward-pointing node order."""
+    a, b, c, d = conn
+    raw = (
+        (a, b, c, d),
+        (a, b, d, c),
+        (a, c, d, b),
+        (b, c, d, a),
+    )
+    result: List[Tuple[int, int, int]] = []
+    for p0, p1, p2, opposite in raw:
+        normal = cross(
+            subtract(coords[p1], coords[p0]),
+            subtract(coords[p2], coords[p0]),
+        )
+        if dot(normal, subtract(coords[opposite], coords[p0])) > 0.0:
+            p1, p2 = p2, p1
+        result.append((p0, p1, p2))
+    return tuple(result)
+
+
+def point_triangle_distance2(
+    p: Sequence[float],
+    a: Sequence[float],
+    b: Sequence[float],
+    c: Sequence[float],
+) -> float:
+    """Squared distance from p to triangle abc (Ericson, Real-Time Collision Detection)."""
+    ab = subtract(b, a)
+    ac = subtract(c, a)
+    ap = subtract(p, a)
+    d1 = dot(ab, ap)
+    d2 = dot(ac, ap)
+    if d1 <= 0.0 and d2 <= 0.0:
+        return distance2(p, a)
+
+    bp = subtract(p, b)
+    d3 = dot(ab, bp)
+    d4 = dot(ac, bp)
+    if d3 >= 0.0 and d4 <= d3:
+        return distance2(p, b)
+
+    vc = d1 * d4 - d3 * d2
+    if vc <= 0.0 and d1 >= 0.0 and d3 <= 0.0:
+        v = d1 / (d1 - d3)
+        closest = (a[0] + v * ab[0], a[1] + v * ab[1], a[2] + v * ab[2])
+        return distance2(p, closest)
+
+    cp = subtract(p, c)
+    d5 = dot(ab, cp)
+    d6 = dot(ac, cp)
+    if d6 >= 0.0 and d5 <= d6:
+        return distance2(p, c)
+
+    vb = d5 * d2 - d1 * d6
+    if vb <= 0.0 and d2 >= 0.0 and d6 <= 0.0:
+        w = d2 / (d2 - d6)
+        closest = (a[0] + w * ac[0], a[1] + w * ac[1], a[2] + w * ac[2])
+        return distance2(p, closest)
+
+    va = d3 * d6 - d5 * d4
+    if va <= 0.0 and (d4 - d3) >= 0.0 and (d5 - d6) >= 0.0:
+        w = (d4 - d3) / ((d4 - d3) + (d5 - d6))
+        closest = (
+            b[0] + w * (c[0] - b[0]),
+            b[1] + w * (c[1] - b[1]),
+            b[2] + w * (c[2] - b[2]),
+        )
+        return distance2(p, closest)
+
+    denom = 1.0 / (va + vb + vc)
+    v = vb * denom
+    w = vc * denom
+    closest = (
+        a[0] + ab[0] * v + ac[0] * w,
+        a[1] + ab[1] * v + ac[1] * w,
+        a[2] + ab[2] * v + ac[2] * w,
+    )
+    return distance2(p, closest)
 
 
 def physical_entity_map(dim: int) -> Dict[int, int]:
@@ -114,6 +212,145 @@ def physical_entity_map(dim: int) -> Dict[int, int]:
                 )
             result[entity] = int(ptag)
     return result
+
+
+def unit(v: Sequence[float]) -> Tuple[float, float, float]:
+    length = math.sqrt(dot(v, v))
+    if length <= 0.0:
+        return (0.0, 0.0, 0.0)
+    return (v[0] / length, v[1] / length, v[2] / length)
+
+
+def classify_boundary_faces(
+    tetrahedra: Sequence[Tuple[int, Tuple[int, int, int, int], int]],
+    physical_triangles: Sequence[Tuple[Tuple[int, int, int], int]],
+    coords: Dict[int, Tuple[float, float, float]],
+) -> List[Tuple[Tuple[int, int, int], int, int]]:
+    """Match volume-boundary faces to physical surface triangles.
+
+    The structured ``Alternate`` transfinite meshes can use a different
+    diagonal on the geometric surface than on the corresponding volume
+    boundary.  Matching the surface triangles by node identity therefore fails
+    for half of the faces.  Instead, extract the true exterior faces from the
+    tetrahedra and classify each face by its nearest physical triangle
+    (point-triangle distance), with the face normal used to break ties at
+    surface seams.
+    """
+    face_owners: Dict[Tuple[int, int, int], List[int]] = defaultdict(list)
+    face_nodes: Dict[Tuple[int, int, int], Tuple[int, int, int]] = {}
+    for lid, (_eid, conn, _mat) in enumerate(tetrahedra, start=1):
+        for face in outward_faces(conn, coords):
+            key = tuple(sorted(face))
+            face_owners[key].append(lid)
+            face_nodes[key] = face
+
+    exterior: List[Tuple[Tuple[int, int, int], int]] = []
+    for key, owners in face_owners.items():
+        if len(owners) > 2:
+            raise RuntimeError(
+                f"Non-manifold tet face shared by {len(owners)} elements"
+            )
+        if len(owners) == 1:
+            exterior.append((face_nodes[key], owners[0]))
+
+    if not exterior:
+        raise RuntimeError("No exterior tetrahedron faces found")
+
+    triangle_data: List[
+        Tuple[Tuple[float, float, float], Tuple[float, float, float], Tuple[float, float, float], int, Tuple[float, float, float]]
+    ] = []
+    edge_lengths: List[float] = []
+    for conn, bc in physical_triangles:
+        p0 = coords[conn[0]]
+        p1 = coords[conn[1]]
+        p2 = coords[conn[2]]
+        n = unit(cross(subtract(p1, p0), subtract(p2, p0)))
+        triangle_data.append((p0, p1, p2, bc, n))
+        edge_lengths.extend(
+            (
+                math.sqrt(distance2(p0, p1)),
+                math.sqrt(distance2(p1, p2)),
+                math.sqrt(distance2(p2, p0)),
+            )
+        )
+
+    edge_lengths.sort()
+    median_edge = edge_lengths[len(edge_lengths) // 2] if edge_lengths else 1.0
+    all_x = [p[0] for data in triangle_data for p in data[:3]]
+    all_y = [p[1] for data in triangle_data for p in data[:3]]
+    all_z = [p[2] for data in triangle_data for p in data[:3]]
+    diagonal = math.sqrt(
+        (max(all_x) - min(all_x)) ** 2
+        + (max(all_y) - min(all_y)) ** 2
+        + (max(all_z) - min(all_z)) ** 2
+    )
+    cell = max(median_edge, diagonal * 1.0e-6, 1.0e-12)
+
+    grid: Dict[Tuple[int, int, int], List[int]] = defaultdict(list)
+    for ti, (p0, p1, p2, _bc, _n) in enumerate(triangle_data):
+        lo = (
+            math.floor((min(p0[0], p1[0], p2[0]) - 0.05 * cell) / cell),
+            math.floor((min(p0[1], p1[1], p2[1]) - 0.05 * cell) / cell),
+            math.floor((min(p0[2], p1[2], p2[2]) - 0.05 * cell) / cell),
+        )
+        hi = (
+            math.floor((max(p0[0], p1[0], p2[0]) + 0.05 * cell) / cell),
+            math.floor((max(p0[1], p1[1], p2[1]) + 0.05 * cell) / cell),
+            math.floor((max(p0[2], p1[2], p2[2]) + 0.05 * cell) / cell),
+        )
+        for ix in range(lo[0], hi[0] + 1):
+            for iy in range(lo[1], hi[1] + 1):
+                for iz in range(lo[2], hi[2] + 1):
+                    grid[(ix, iy, iz)].append(ti)
+
+    tolerance2 = (max(1.0e-12, diagonal * 1.0e-8)) ** 2
+    records: List[Tuple[Tuple[int, int, int], int, int]] = []
+    for face, parent in exterior:
+        p0 = coords[face[0]]
+        p1 = coords[face[1]]
+        p2 = coords[face[2]]
+        centroid = (
+            (p0[0] + p1[0] + p2[0]) / 3.0,
+            (p0[1] + p1[1] + p2[1]) / 3.0,
+            (p0[2] + p1[2] + p2[2]) / 3.0,
+        )
+        face_normal = unit(cross(subtract(p1, p0), subtract(p2, p0)))
+
+        base = (
+            math.floor(centroid[0] / cell),
+            math.floor(centroid[1] / cell),
+            math.floor(centroid[2] / cell),
+        )
+        candidates: List[int] = []
+        for radius in (1, 2):
+            candidates = []
+            for ix in range(base[0] - radius, base[0] + radius + 1):
+                for iy in range(base[1] - radius, base[1] + radius + 1):
+                    for iz in range(base[2] - radius, base[2] + radius + 1):
+                        candidates.extend(grid.get((ix, iy, iz), ()))
+            if candidates:
+                break
+        if not candidates:
+            candidates = list(range(len(triangle_data)))
+
+        best: Optional[Tuple[float, float, int]] = None
+        for ti in candidates:
+            a, b, c, _bc, normal = triangle_data[ti]
+            d2 = point_triangle_distance2(centroid, a, b, c)
+            alignment = abs(dot(face_normal, normal))
+            score = (d2, -alignment, ti)
+            if best is None or score < best:
+                best = score
+        assert best is not None
+        if best[0] > tolerance2:
+            raise RuntimeError(
+                f"Exterior face {face} is {math.sqrt(best[0]):.3e} from the nearest "
+                "physical surface triangle; check the Gmsh physical groups"
+            )
+        records.append((face, parent, triangle_data[best[2]][3]))
+
+    records.sort(key=lambda row: (row[1], tuple(sorted(row[0]))))
+    return records
 
 
 def parse_args() -> argparse.Namespace:
@@ -189,42 +426,27 @@ def main() -> int:
                 conn = tuple(int(v) for v in flat[4 * i : 4 * i + 4])
                 tetrahedra.append((eid, conn, mat))
 
-        boundaries: List[Tuple[int, Tuple[int, int, int], int]] = []
+        physical_triangles: List[Tuple[Tuple[int, int, int], int]] = []
         for _dim, entity in gmsh.model.getEntities(2):
             if entity not in surface_physical:
                 continue
             ptag = surface_physical[entity]
             name = gmsh.model.getPhysicalName(2, ptag)
             bc = boundary_bc(ptag, name)
-            tags, flat = get_elements(2, entity, TRI3)
-            for i, tid in enumerate(tags):
-                conn = tuple(int(v) for v in flat[3 * i : 3 * i + 3])
-                boundaries.append((tid, conn, bc))
+            _tags, flat = get_elements(2, entity, TRI3)
+            for i in range(0, len(flat), 3):
+                conn = tuple(int(v) for v in flat[i : i + 3])
+                physical_triangles.append((conn, bc))
 
         if not tetrahedra:
             raise RuntimeError("No TET4 elements found")
-        if not boundaries:
+        if not physical_triangles:
             raise RuntimeError("No physical TRI3 boundary faces found")
 
         tetrahedra.sort(key=lambda row: row[0])
-        boundaries.sort(key=lambda row: row[0])
-
-        face_to_parent: Dict[Tuple[int, int, int], int] = {}
-        for lid, (_eid, conn, _mat) in enumerate(tetrahedra, start=1):
-            for face in tet_faces(conn):
-                if face in face_to_parent:
-                    face_to_parent[face] = -1
-                else:
-                    face_to_parent[face] = lid
-
-        boundary_records: List[Tuple[Tuple[int, int, int], int, int]] = []
-        for _tid, conn, bc in boundaries:
-            parent = face_to_parent.get(tuple(sorted(conn)), -1)
-            if parent < 1:
-                raise RuntimeError(
-                    f"Boundary triangle {_tid} does not match one exterior tetrahedron face"
-                )
-            boundary_records.append((conn, parent, bc))
+        boundary_records = classify_boundary_faces(
+            tetrahedra, physical_triangles, coords
+        )
 
         used_nodes = sorted(
             {node for _eid, conn, _mat in tetrahedra for node in conn}

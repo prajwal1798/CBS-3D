@@ -215,6 +215,16 @@ The converter was checked against the canonical corrected mesh: it reproduces
 284,400 tets, 64,320 nodes, 66,548 boundary faces, the same BC counts, and a
 volume of `5.000000000000e-02` with `RESULT: PASS`.
 
+The structured refined mesh uses `Transfinite Surface ... Alternate`, so the
+triangulation stored on a geometric surface can use the opposite diagonal from
+the corresponding volume-boundary face.  The converter therefore does not trust
+surface-node identity for the parent lookup.  It extracts exterior faces from
+the tetrahedra and assigns each one to the nearest physical surface triangle
+using a point-triangle distance, with the face normal breaking ties at surface
+seams.  On the 1.24M refined mesh this produces 1,235,520 tets, 234,900 nodes,
+114,448 boundary faces, BC counts `506=108080, 511=1584, 520=1584, 530=3200`,
+volume `5.000000000000e-02`, and `RESULT: PASS`.
+
 > The legacy `coarse.msh` and `fine.msh` files in the examples are **not** the
 > same geometry family as the corrected/quality/refined `.geo` files.  The
 > coarse mesh starts at `x=-1/3` instead of `x=-1/2`, and the fine mesh spans
