@@ -8,8 +8,8 @@ Full 284,400-tetrahedron flat plate with Spalart-Allmaras standard model.
 - Purpose: baseline for comparison with PETSc/AMG
 
 The native CG solve does not converge on this mesh.  It reaches the 5,000
-iteration cap with a true relative residual around `1.55e-4`.  Use
-`../flat_plate_petsc` for production runs.
+iteration cap with a true relative residual around `1.87e-4` (canonical `U=1`
+free stream).  Use `../flat_plate_petsc` for production runs.
 
 ```powershell
 Set-Location cases\flat_plate_local

@@ -90,15 +90,39 @@ without divergence:
 
 ```
 Pressure solver : PETSc KSP + AMG
+free stream      : U=1, T=300, Re=1.0e6
 dt              : 1.0e-5
-CG iterations   : 256, 450, 295
-CG rel L2       : 1.15e-3, 2.91e-6, 2.91e-6
-wall clock      : 5.4-5.8 s
+CG iterations   : 275, 396, 287
+CG rel L2       : 5.54e-4, 1.59e-5, 6.22e-5
+wall clock      : 5.9 s
 ```
 
 The native CG path on the same mesh stalls at 5,000 iterations with a true
-relative residual of about `1.55e-4`, which is why the PETSc/AMG path is the
-default for this mesh.
+relative residual of about `1.87e-4` (canonical `U=1` free stream), which is why
+the PETSc/AMG path is the default for this mesh.
+
+### 200-iteration stability run
+
+The same case was also run to `ntime=200` in a scratch directory with file
+output disabled.  It completed in 2 min 31 s on 20 OpenMP threads.  The final
+residuals were:
+
+| Quantity | Value |
+| --- | ---: |
+| `RelU` | 2.06e-4 |
+| `RelV` | 2.42e-3 |
+| `RelW` | 5.56e-3 |
+| `RelP` | 2.41e-3 |
+| CG iterations (last solve) | 67 |
+| CG absolute L2 (last solve) | 2.81e-13 |
+| stop reason | maximum iteration count |
+
+The run shows that the SA transport remains stable over a longer pseudo-time
+window, but it is **not** converged: the velocity residuals are still falling
+and the canonical case uses 30,000 iterations.  The last pressure solve reports
+a large relative CG residual (`3.62e-2`) because it is normalized by the current
+initial residual, which is already only `7.76e-12`; the final absolute residual
+is `2.81e-13`.
 
 ## Current limitations
 
@@ -109,12 +133,14 @@ default for this mesh.
   build.
 - The packaged PETSc has no hypre, so the local runs use GAMG.  BoomerAMG
   comparisons require rebuilding PETSc with `--with-hypre=1`.
-- Three iterations are a stability smoke test, not a converged solution.
+- The three-iteration case is a stability smoke test; the 200-iteration run is
+  stable but remains far from the steady convergence tolerance.
 
 ## Next steps
 
-1. Run the flat plate to a meaningful convergence level with PETSc/AMG and
-   write a residual history.
+1. Extend the flat plate to true steady convergence (thousands of iterations,
+   or a larger pseudo-time step/steady acceleration) and retain the full
+   residual history.
 2. Compare standard SA and SA-neg on the same case, including a forced
    negative-`nu_tilde` region or a rough-wall/inlet perturbation.
 3. Perform a mesh-convergence study with the Gmsh `coarse`, corrected and

@@ -101,6 +101,18 @@ parent elements are in the `.plt` file.
 The flat plate uses `506` symmetry, `511` mass-flow inlet, `520` pressure
 outlet and `530` no-slip adiabatic wall.
 
+The canonical flat-plate controls are `Re = 1.0e6`, `U = 1`, `T = 300`,
+`rho = 1` and `mu = 1.0e-6`.  The free-stream line is:
+
+```
+Free stream values - Ux Uy Uz P T
+1.0  0.0  0.0  0.0  300.0
+```
+
+Keep this consistent with the prescribed inlet velocity `1.0 0.0 0.0`.  A
+free-stream value of `20` from an older case makes the physical Reynolds
+number twenty times the intended value and changes the SA near-wall behaviour.
+
 ## `<case>.material`
 
 One record per tetrahedron:

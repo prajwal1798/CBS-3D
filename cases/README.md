@@ -11,7 +11,6 @@ $source = "C:\PhD\MESH\examples\3D\flat_plate\flat_plate_sa_3d_corrected"
 $cases = @{
     "flat_plate_local" = "flat_plate_local"
     "flat_plate_petsc" = "flat_plate_petsc"
-    "flat_plate_cg"    = "flat_plate_cg"
 }
 
 foreach ($entry in $cases.GetEnumerator()) {
@@ -41,5 +40,4 @@ python tools\mesh_summary.py cases\flat_plate_local\flat_plate_local
 | --- | --- |
 | `flat_plate_local` | Native CG baseline, expected to stall |
 | `flat_plate_petsc` | PETSc/AMG local production case |
-| `flat_plate_cg` | Native CG comparison |
 | `flat_plate_p8` | 8-part mesh, MPI only |

@@ -102,15 +102,37 @@ Measured on the tower:
 
 | Iteration | Pressure CG iterations | CG relative L2 | Pressure step | SA step | Total |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| 1 | 256 | 1.15e-03 | 1.35 s | 0.23 s | 1.60 s |
-| 2 | 450 | 2.91e-06 | 1.96 s | 0.23 s | 2.22 s |
-| 3 | 295 | 2.91e-06 | 1.33 s | 0.24 s | 1.60 s |
+| 1 | 275 | 5.54e-04 | 1.53 s | 0.26 s | 1.82 s |
+| 2 | 396 | 1.59e-05 | 1.97 s | 0.28 s | 2.28 s |
+| 3 | 287 | 6.22e-05 | 1.55 s | 0.23 s | 1.81 s |
 
-The wall-clock for the three-iteration run was 5.4-5.8 s.  The pressure solve is
-about 82-88% of the iteration; SA transport is about 10-16%.
+The wall-clock for the three-iteration run was 5.9 s.  The pressure solve is
+about 84-86% of the iteration; SA transport is about 12-14%.
 
-The native CG baseline is `cases\flat_plate_cg`.  It uses the same mesh and
-controls with `Pressure Field Solver = 1`.
+The `CG relative L2` column is the true residual recomputed from `b - A x`,
+normalized by the initial residual of that same solve.  PETSc's KSP stopping
+test uses the preconditioned residual.  Early initial residuals are already
+small (about `1e-8` to `1e-11`), so a ratio of `5e-4` can correspond to a final
+absolute residual of only `4e-11`.  Check `cg_final_l2` and `cg_max_abs` in the
+residual CSV before treating a large ratio as a failed solve.
+
+### Longer run
+
+Setting `ntime=200` on the same case (scratch directory, file output disabled)
+completed in 2 min 31 s.  The final residuals were `RelU=2.06e-4`,
+`RelV=2.42e-3`, `RelW=5.56e-3` and `RelP=2.41e-3`.  This is a stability run,
+not a converged solution.
+
+At late iterations the printed `CGrel` can look large even though the pressure
+solve is accurate.  At iteration 200 it was `3.62e-2`, but the initial true
+residual for that solve was only `7.76e-12` and the final true residual was
+`2.81e-13`.  The ratio is relative to an already tiny initial residual.  Use
+`cg_final_l2` and `cg_max_abs` in the residual CSV when judging late-time linear
+solves; the console percentage is most useful during the first few iterations.
+
+The native CG baseline is `cases\flat_plate_local`.  It uses the same mesh and
+controls with `Pressure Field Solver = 1` and can be run with either the MSVC or
+the PETSc-enabled executable.
 
 ### Important `.par` detail
 
