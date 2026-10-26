@@ -277,8 +277,10 @@ if (CBS3D_ENABLE_PETSC)
         endif()
     endif()
 
+    # Debian/Ubuntu packages name the library libpetsc_real; most other
+    # installs (Sunbird, PETSc source builds, MSYS2) use libpetsc.
     find_library(PETSC_LIBRARY
-        NAMES petsc
+        NAMES petsc petsc_real
         HINTS ${PETSC_LIB_HINTS}
         REQUIRED
     )
@@ -298,6 +300,36 @@ if (CBS3D_ENABLE_PETSC)
     target_link_libraries(${CBS3D_APPLICATION_TARGET} PRIVATE
         "${PETSC_LIBRARY}"
     )
+
+    # A PETSc built against a real MPI (Linux packages, Sunbird, source
+    # builds) includes <mpi.h> from petscsys.h, so even the serial application
+    # must compile and link against MPI. Only an MPIUNI PETSc (the MSYS2
+    # package on the Windows tower) needs no MPI.
+    if (NOT CBS3D_ENABLE_MPI)
+        find_file(CBS3D_PETSCCONF_H petscconf.h
+            HINTS ${PETSC_INCLUDE_DIRS}
+            NO_DEFAULT_PATH
+        )
+
+        set(CBS3D_PETSC_IS_MPIUNI FALSE)
+
+        if (CBS3D_PETSCCONF_H)
+            file(STRINGS "${CBS3D_PETSCCONF_H}" CBS3D_MPIUNI_LINE
+                REGEX "^#define PETSC_HAVE_MPIUNI 1")
+
+            if (CBS3D_MPIUNI_LINE)
+                set(CBS3D_PETSC_IS_MPIUNI TRUE)
+            endif()
+        endif()
+
+        if (NOT CBS3D_PETSC_IS_MPIUNI)
+            find_package(MPI REQUIRED COMPONENTS CXX)
+            target_link_libraries(${CBS3D_APPLICATION_TARGET} PRIVATE MPI::MPI_CXX)
+            message(STATUS "  PETSc uses MPI      : serial build links MPI for PETSc")
+        else()
+            message(STATUS "  PETSc uses MPI      : no (MPIUNI)")
+        endif()
+    endif()
 
     if (UNIX AND NOT APPLE)
         set_target_properties(
