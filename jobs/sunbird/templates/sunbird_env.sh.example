@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+# ================================
+# FILE      : sunbird_env.sh.example
+# PURPOSE   : THE ONLY SITE-SPECIFIC FILE. EVERY TEMPLATE JOB SOURCES IT.
+#             COPY ONCE, THEN EDIT ONLY THIS FILE WHEN THE CLUSTER CHANGES
+#             (E.G. THE MOVE FROM SUNBIRD TO SUNBIRD 2).
+#
+#   cp jobs/sunbird/templates/sunbird_env.sh.example $HOME/cbs3d_env.sh
+#
+# VALUES    : THE TOOLCHAIN THAT BUILT AND RAN THE ACCEPTED P40 JOBS
+#             (jobs/sunbird/build_production_matrix.slurm):
+#             GCC 12.1 + OpenMPI 4.1.6 + OWN PETSc BUILD IN $HOME/software.
+# ================================
+
+module purge
+
+# ================================
+# COMPILER, MPI, PETSc
+# ================================
+export GCC_ROOT=/lustrehome/apps/compilers/gnu/12.1.0
+export MPI_ROOT=/apps/libraries/openmpi/4.1.6/el7/AVX512/gnu-12.1
+export PETSC_DIR="$HOME/software/petsc-gcc12-install"
+unset PETSC_ARCH
+
+export PATH="$MPI_ROOT/bin:$GCC_ROOT/bin:$PATH"
+export LD_LIBRARY_PATH="$PETSC_DIR/lib:$MPI_ROOT/lib:$GCC_ROOT/lib64:${LD_LIBRARY_PATH:-}"
+export OMPI_CC="$GCC_ROOT/bin/gcc"
+export OMPI_CXX="$GCC_ROOT/bin/g++"
+
+# SINGLE-NODE JOBS: SKIP THE openib PROBE (REMOVES mlx5 WARNINGS).
+export OMPI_MCA_btl="^openib"
+
+# ================================
+# CBS3D LOCATIONS
+# ================================
+export CBS3D_CODE="/scratch/$USER/CBS3D/code"
+export CBS3D_SERIAL_EXE="$CBS3D_CODE/build/serial-petsc-release/cbs3d_serial"
+export CBS3D_MPI_EXE="$CBS3D_CODE/build/mpi-release/cbs3d_parallel"
+
+# ================================
+# SLURM DEFAULTS USED BY THE TEMPLATES
+# ================================
+export CBS3D_SRUN_MPI="pmix"     # srun --mpi=... ; CHECK WITH: srun --mpi=list

@@ -1,5 +1,11 @@
 # Sunbird HPC workflow
 
+> **Superseded for day-to-day use by [`../LINUX_SUNBIRD_RUNBOOK.md`](../LINUX_SUNBIRD_RUNBOOK.md).**
+> The Makefile build and the `cbs3dpp_si_petsc ... -pc_type hypre` launch below
+> predate the CMake presets: the serial executable accepts only the case name,
+> so pass PETSc options through `PETSC_OPTIONS`. The accepted P40 MPI runs use
+> `jobs/sunbird/build_production_matrix.slurm` and `cbs3d_parallel`.
+
 This page defines the public, sanitised Sunbird workflow. Usernames, project accounts and private filesystem paths must not be committed. Replace placeholders locally.
 
 ## Scope

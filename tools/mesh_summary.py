@@ -23,7 +23,6 @@ Examples:
         --json report.json
 """
 
-from __future__ import annotations
 
 import argparse
 import json
@@ -37,8 +36,8 @@ from typing import Dict, List, Sequence, Tuple
 
 NODE_RECORD = re.compile(
     r"^\s*(\d+)\s*"
-    r"([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)\s+"
-    r"([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)\s+"
+    r"([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)\s*"
+    r"([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)\s*"
     r"([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)\s*$"
 )
 
