@@ -132,6 +132,11 @@ def partition_with_gmsh(case, parts, gmsh_exe, work_dir):
             f.write("%d 4 2 1 1 %d %d %d %d\n" % (ie, n[0], n[1], n[2], n[3]))
         f.write("$EndElements\n")
 
+    # NO gmsh EXECUTABLE (E.G. A WINDOWS MACHINE WITH ONLY THE PYTHON MODULE):
+    # PARTITION THROUGH THE gmsh PYTHON API INSTEAD.
+    if shutil.which(gmsh_exe) is None:
+        return partition_with_gmsh_module(source, result, case["nelem"], parts)
+
     options = ["-part", str(parts),
                "-format", "msh2",
                "-setnumber", "Mesh.PartitionOldStyleMsh2", "1",
@@ -154,6 +159,33 @@ def partition_with_gmsh(case, parts, gmsh_exe, work_dir):
             return read_msh2_partition(result, case["nelem"], parts)
 
     raise SystemExit("ERROR: GMSH WROTE NO PARTITIONED MESH; SEE " + log_path)
+
+
+# ================================
+# PARTITION WITH THE gmsh PYTHON MODULE (SAME OPTIONS AS THE COMMAND LINE)
+# ================================
+def partition_with_gmsh_module(source, result, nelem, parts):
+    try:
+        import gmsh
+    except ImportError:
+        raise SystemExit("ERROR: NO gmsh EXECUTABLE AND NO gmsh PYTHON MODULE "
+                         "(pip install gmsh, OR USE --partition-file)")
+    print("PARTITIONING WITH THE gmsh PYTHON MODULE %s" % gmsh.__version__)
+    gmsh.initialize()
+    try:
+        gmsh.option.setNumber("General.Terminal", 0)
+        gmsh.open(source)
+        gmsh.option.setNumber("Mesh.PartitionOldStyleMsh2", 1)
+        gmsh.option.setNumber("Mesh.PartitionCreateGhostCells", 0)
+        gmsh.option.setNumber("Mesh.PartitionSplitMeshFiles", 0)
+        gmsh.option.setNumber("Mesh.PreserveNumberingMsh2", 1)
+        gmsh.option.setNumber("Mesh.SaveAll", 1)
+        gmsh.option.setNumber("Mesh.MshFileVersion", 2.2)
+        gmsh.model.mesh.partition(parts)
+        gmsh.write(result)
+    finally:
+        gmsh.finalize()
+    return read_msh2_partition(result, nelem, parts)
 
 
 # ================================
@@ -452,8 +484,9 @@ def main():
     else:
         work_dir = tempfile.mkdtemp(prefix="cbs_partition_")
         rank_of = partition_with_gmsh(case, args.parts, args.gmsh, work_dir)
-        shutil.copyfile(os.path.join(work_dir, "gmsh_partition.log"),
-                        os.path.join(args.out_dir, "gmsh_partition.log"))
+        log = os.path.join(work_dir, "gmsh_partition.log")
+        if os.path.isfile(log):
+            shutil.copyfile(log, os.path.join(args.out_dir, "gmsh_partition.log"))
         shutil.rmtree(work_dir)
 
     with open(os.path.join(args.out_dir, "element_partition.txt"), "w") as f:
