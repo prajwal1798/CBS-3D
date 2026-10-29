@@ -22,7 +22,7 @@
 #SBATCH --cpus-per-task=128
 #SBATCH --hint=nomultithread
 #SBATCH --exclusive
-#SBATCH --mem=0
+#SBATCH --mem-per-cpu=2G
 #SBATCH --time=04:00:00
 #SBATCH --output=cbs3d_omp_%j.out
 #SBATCH --error=cbs3d_omp_%j.err

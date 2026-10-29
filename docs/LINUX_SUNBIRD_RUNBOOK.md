@@ -267,7 +267,10 @@ sbatch $T/run_openmp_petsc.slurm serial NAME                         # 1 process
 ```
 
 The templates request `--hint=nomultithread` (one rank per physical core),
-`--exclusive` and `--mem=0` (all node memory).
+`--exclusive` and `--mem-per-cpu=2G` (256 GB or more per node; the
+2.3 M-tet cavity needs about 11 GB in total). Do not use `--mem=0`: it asks
+for more than the per-CPU memory limit and the job pends forever with
+`(MaxMemPerLimit)`.
 
 #### Any number of ranks, whole nodes or scattered free cores
 
