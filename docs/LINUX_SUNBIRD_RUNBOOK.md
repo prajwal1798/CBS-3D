@@ -269,6 +269,31 @@ sbatch $T/run_openmp_petsc.slurm serial NAME                         # 1 process
 The templates request `--hint=nomultithread` (one rank per physical core),
 `--exclusive` and `--mem=0` (all node memory).
 
+#### Any number of ranks, whole nodes or scattered free cores
+
+The rank count is fixed when the mesh is partitioned (N partitions = N
+ranks). `submit_mpi.sh` makes `partitions_N` if it does not exist yet (a
+partition job) and submits the run behind it:
+
+```bash
+T=$CBS3D_CODE/jobs/sunbird/templates
+bash $T/free_cores.sh                                    # idle cores per node, right now
+bash $T/submit_mpi.sh $CBS3D_SCRATCH/cases/NAME NAME 256           # 2 whole nodes
+bash $T/submit_mpi.sh $CBS3D_SCRATCH/cases/NAME NAME 300 any       # 300 cores anywhere
+bash $T/submit_mpi.sh $CBS3D_SCRATCH/cases/NAME NAME 256 nodes 24:00:00
+```
+
+- `nodes` (default): ceil(N/128) exclusive nodes. Fastest per rank; use it
+  whenever whole nodes are idle.
+- `any`: `run_mpi_anycores.slurm`, no `--nodes`, no `--exclusive`,
+  2 GB per core. Slurm fills idle cores on partly used nodes (20 here, 30
+  there). Ranks then share memory bandwidth with other jobs, and the slowest
+  rank sets the pace, so expect less speed per rank than on whole nodes.
+- More ranks help only while each rank keeps enough work: below roughly
+  10-20 k tets per rank, communication dominates. For the 2.3 M-tet cavity
+  that is about 128-256 ranks; a finer mesh (`lc = 0.010`, ~4.5 M tets)
+  justifies more.
+
 Watch and fetch:
 
 ```bash

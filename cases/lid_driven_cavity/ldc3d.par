@@ -7,13 +7,13 @@ Energy Calculation Desired (0 - NO, 1 - YES)
 Free stream values - Ux Uy Uz P T
 0.0  0.0  0.0  0.0  0.0
 ntime transient_on dtfixed dtfix iwrite
-20000  0  0  1.0e-4  1000
+20000  0  1  1.0e-3  1000
 csafm theta1
 0.50  1.00
 CBS3D timestep controls: cbs_scheme ilots htype step2_check rem_deltp beta_opt dtfix_end csafm2 epsilon1 deltr
 1  0  1  0  0  1  0  2.0  1.0e-6  1.0e20
 Re Pr Ra Ri
-400.0  0.71  0.0  0.0
+100.0  0.71  0.0  0.0
 Convection Type (1 - Natural, 0 - Mixed/Forced)
 0
 pnode - Node in domain for Pressure BC if no other Pressure BCs exist

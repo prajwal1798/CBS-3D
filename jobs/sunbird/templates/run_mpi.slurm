@@ -7,6 +7,7 @@
 # USAGE     : sbatch run_mpi.slurm PARTITION_ROOT CASE_NAME
 #             sbatch --nodes=2 --ntasks=256 run_mpi.slurm ...  (256 RANKS)
 #             sbatch --ntasks=64 run_mpi.slurm ...             (64 RANKS, 1 NODE)
+#             EASIER: bash submit_mpi.sh CASE_DIR CASE N   (PARTITIONS + RUN)
 #
 #   PARTITION_ROOT  FOLDER WITH rank_0000 ... rank_NNNN, MADE BY
 #                   tools/export_rank_local_cbs.py --parts N
@@ -73,6 +74,7 @@ done
 {
     echo "date      : $(date -Is)"
     echo "job       : $SLURM_JOB_ID, $SLURM_JOB_NUM_NODES node(s), $SLURM_NTASKS ranks"
+    echo "nodes     : $SLURM_JOB_NODELIST (tasks per node: ${SLURM_TASKS_PER_NODE:-?})"
     echo "partitions: $PART_ROOT"
     echo "exe       : $CBS3D_MPI_EXE"
     echo "git commit: $(git -C "$CBS3D_CODE" rev-parse HEAD 2>/dev/null || echo unknown)"
