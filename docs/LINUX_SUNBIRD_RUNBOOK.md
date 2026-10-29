@@ -176,58 +176,98 @@ python tools/dd4d_compare_rank_outputs.py run_p2/output/box run_p4/output/box --
 Laptop limits (8 cores, 16 GB): about 1-2 M tets with PETSc. Larger meshes
 belong on Sunbird.
 
-## 6. Sunbird
+## 6. Sunbird2
+
+SA2C Sunbird2 (from October 2026): login `login.sunbird.swansea.ac.uk` with
+password + MFA code; project `scw7008`; nodes of 2 x 64 cores (128 cores,
+256 hyperthreads) and 773 GB; partitions `compute` (3 days), `ondemand`
+(12 h), `highmem`. Home (`/pixhome/$USER`) was migrated from old Sunbird;
+scratch was not, and is now per project: `/scratch/scw7008/$USER`.
 
 ### 6.1 Which mode
 
 | Mode | Executable | When |
 |---|---|---|
-| One process, 40 OpenMP threads, PETSc AMG | `build/serial-petsc-release/cbs3d_serial` | Up to a few M tets; no partitioning needed |
-| MPI, 40 ranks per node | `build/mpi-release/cbs3d_parallel` | Production; strong scaling; anything large |
+| One process, 128 OpenMP threads, PETSc AMG | `build/serial-petsc-release/cbs3d_serial` | Up to a few M tets; no partitioning needed |
+| MPI, 128 ranks per node | `build/mpi-release/cbs3d_parallel` | Production; strong scaling; anything large |
 
-### 6.2 Once: environment and build
+### 6.2 Once: PETSc, Gmsh, environment, build
+
+Sunbird2 has no PETSc module, so build it once in `$HOME/software`
+(20-40 min, login node, because configure downloads HYPRE and METIS):
 
 ```bash
-ssh sunbird                                   # Cisco Secure Client connected first
-mkdir -p /scratch/$USER/CBS3D && cd /scratch/$USER/CBS3D
+mkdir -p ~/CBS3D_SB2 && cd ~/CBS3D_SB2
 git clone https://github.com/prajwal1798/CBS-3D.git code
-cp code/jobs/sunbird/templates/sunbird_env.sh.example ~/cbs3d_env.sh
-nano ~/cbs3d_env.sh                           # check GCC_ROOT, MPI_ROOT, PETSC_DIR
-cd code && sbatch jobs/sunbird/build_production_matrix.slurm
+T=~/CBS3D_SB2/code/jobs/sunbird/templates
+
+mkdir -p ~/software && cd ~/software
+nohup bash $T/build_petsc_sunbird2.sh > build_petsc_sb2.log 2>&1 &
+tail -f build_petsc_sb2.log                   # ends with "PETSC BUILD DONE"
+
+module load python/3.14.6                     # Python venv with the gmsh module
+python3 -m venv ~/venvs/cbs && ~/venvs/cbs/bin/pip install gmsh
+module unload python/3.14.6
+
+cp $T/sunbird_env.sh.example ~/cbs3d_env.sh   # the one site-specific file
+mkdir -p /scratch/scw7008/$USER
+bash $T/build_cbs3d.sh                        # OK serial-petsc-release, OK mpi-release
 ```
 
-`build_production_matrix.slurm` configures the CMake presets
-(`serial-release`, `serial-openmp-release`, `serial-petsc-release`,
-`mpi-release`, `hybrid-release`), builds them and runs `ctest` on a compute
-node. The presets name the executables `cbs3d_serial` / `cbs3d_parallel`.
+Check with the box case (seconds, login node is fine):
+
+```bash
+source ~/cbs3d_env.sh && cd $CBS3D_CODE
+bash tools/cbs_case.sh cases/box/box.geo cases/box/box.par cases/box/box.matprop \
+    $CBS3D_SCRATCH/runs/box --parts 4 --python ~/venvs/cbs/bin/python --overwrite
+cd $CBS3D_SCRATCH/runs/box/serial && $CBS3D_SERIAL_EXE box | grep "Final RelU"
+mkdir -p ../run_p4 && cd ../run_p4
+mpirun -np 4 $CBS3D_MPI_EXE box ../partitions_4 | grep "Iteration 5/5"
+```
+
+Both give `RelU=5.214855e-03 RelV=1.202367e-01 RelW=1.732350e-01
+RelP=4.308202e-01` (checked 29 Oct 2026 with GCC 13.5, OpenMPI 5.0.10,
+PETSc 3.26).
 
 ### 6.3 Every case
 
-Build and check the case on the laptop (Sunbird's `python3` is 3.6 and has no
-`gmsh` module, so `gmsh_to_cbs.py` runs on the laptop), then copy it up:
+Gmsh, the converter and the exporter all run on Sunbird2, so a case can be
+built there directly. Small meshes on the login node:
 
 ```bash
-rsync -av ~/PhD/runs/NAME/serial/ sunbird:/scratch/<user>/CBS3D/cases/NAME/serial/
+source ~/cbs3d_env.sh && cd $CBS3D_CODE
+bash tools/cbs_case.sh GEO PAR MATPROP $CBS3D_SCRATCH/cases/NAME \
+    --python ~/venvs/cbs/bin/python --threads 8
 ```
 
-Partition on Sunbird for the rank count you will run (40 per node):
+Large meshes (above ~0.5 M tets) on a compute node, mesh to partitions in one job:
 
 ```bash
-cd /scratch/$USER/CBS3D/cases/NAME
-sbatch ../../code/jobs/sunbird/templates/export_partitions.slurm serial/NAME 40 partitions_40
+T=$CBS3D_CODE/jobs/sunbird/templates
+sbatch $T/build_case.slurm GEO PAR MATPROP $CBS3D_SCRATCH/cases/NAME --parts 128
 ```
 
-(Or partition on the laptop with `--parts 40` and rsync `partitions_40/` up.
-`export_rank_local_cbs.py` needs only Python 3.6+ and a `gmsh` executable.)
-
-Submit:
+Or only new partitions of an existing serial case:
 
 ```bash
-T=/scratch/$USER/CBS3D/code/jobs/sunbird/templates
-sbatch $T/run_mpi.slurm partitions_40 NAME                          # 40 ranks, 1 node
-sbatch --nodes=2 --ntasks=80 $T/run_mpi.slurm partitions_80 NAME    # 80 ranks, 2 nodes
-sbatch $T/run_openmp_petsc.slurm serial NAME                        # 1 process x 40 threads
+cd $CBS3D_SCRATCH/cases/NAME
+sbatch $CBS3D_CODE/jobs/sunbird/templates/export_partitions.slurm serial/NAME 128 partitions_128
 ```
+
+(Or build it on the laptop and `rsync` the `serial/` or `partitions_N/`
+folder up.)
+
+Submit from the case folder:
+
+```bash
+T=$CBS3D_CODE/jobs/sunbird/templates
+sbatch $T/run_mpi.slurm partitions_128 NAME                          # 128 ranks, 1 node
+sbatch --nodes=2 --ntasks=256 $T/run_mpi.slurm partitions_256 NAME   # 256 ranks, 2 nodes
+sbatch $T/run_openmp_petsc.slurm serial NAME                         # 1 process x 128 threads
+```
+
+The templates request `--hint=nomultithread` (one rank per physical core),
+`--exclusive` and `--mem=0` (all node memory).
 
 Watch and fetch:
 
@@ -235,20 +275,22 @@ Watch and fetch:
 squeue -u $USER
 tail -f run_NAME_<jobid>/solver.out
 sacct -j <jobid> --format=JobID,Elapsed,State,MaxRSS
-rsync -av sunbird:/scratch/<user>/CBS3D/cases/NAME/run_NAME_<jobid>/output/ ~/PhD/runs/NAME/sunbird/
+rsync -av sunbird:/scratch/scw7008/<user>/cases/NAME/run_NAME_<jobid>/output/ ~/PhD/runs/NAME/sunbird/
 ```
 
 `run_mpi.slurm` hard-links the partitions into a private run folder, gives each
 rank its own `.par`, records the git commit and checksums, and launches
 `srun --mpi=pmix ... cbs3d_parallel NAME <run>/partitions`.
 
-### 6.4 Sunbird is being replaced
+### 6.4 Pitfalls found on Sunbird2
 
-The login banner says Sunbird is being replaced (SA2C "Sunbird 2"). All
-site-specific paths (compiler, MPI, PETSc, `srun --mpi` type) live in
-`~/cbs3d_env.sh`. On the new system: rebuild PETSc if needed, edit that one
-file, rerun `build_production_matrix.slurm`, and check partition names with
-`sinfo` and cores per node with `scontrol show node`.
+- `~/cbs3d_env.sh` starts with `module purge`; the venv Python needs the
+  `python/3.14.6` module loaded, so the env file loads it.
+- The pip `gmsh` command is a `#!/usr/bin/env python3` script: the venv must
+  be activated (the env file does this), not just its `python` used.
+- The OpenMPI 5.0.10 module also loads `cuda/13.0.3`; this is harmless.
+- `make check` for PETSc runs from the source tree (`~/software/petsc-src`),
+  not from the install prefix.
 
 ## 7. How the partitioned case is built
 

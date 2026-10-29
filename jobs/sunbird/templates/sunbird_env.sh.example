@@ -2,40 +2,52 @@
 # ================================
 # FILE      : sunbird_env.sh.example
 # PURPOSE   : THE ONLY SITE-SPECIFIC FILE. EVERY TEMPLATE JOB SOURCES IT.
-#             COPY ONCE, THEN EDIT ONLY THIS FILE WHEN THE CLUSTER CHANGES
-#             (E.G. THE MOVE FROM SUNBIRD TO SUNBIRD 2).
+#             COPY ONCE, THEN EDIT ONLY THIS FILE WHEN THE CLUSTER CHANGES.
 #
 #   cp jobs/sunbird/templates/sunbird_env.sh.example $HOME/cbs3d_env.sh
 #
-# VALUES    : THE TOOLCHAIN THAT BUILT AND RAN THE ACCEPTED P40 JOBS
-#             (jobs/sunbird/build_production_matrix.slurm):
-#             GCC 12.1 + OpenMPI 4.1.6 + OWN PETSc BUILD IN $HOME/software.
+# VALUES    : SUNBIRD2 (SA2C, OCT 2026), CHECKED WITH THE BOX CASE:
+#             GCC 13.5 + OpenMPI 5.0.10 (UCX) + OWN PETSc 3.26 IN $HOME/software
+#             (BUILT BY build_petsc_sunbird2.sh), PIP GMSH IN $HOME/venvs/cbs.
+#             NODES: 2 x 64 CORES (128 CORES, 256 HYPERTHREADS), 773 GB.
+#
+#             OLD SUNBIRD (RETIRED) USED GCC 12.1 + OpenMPI 4.1.6 FROM
+#             /lustrehome/apps AND /apps/libraries; SEE GIT HISTORY.
 # ================================
 
+type module > /dev/null 2>&1 || source /etc/profile
 module purge
 
 # ================================
-# COMPILER, MPI, PETSc
+# COMPILER, MPI, CMAKE, PYTHON (THE OpenMPI MODULE ALSO LOADS cuda; HARMLESS)
 # ================================
-export GCC_ROOT=/lustrehome/apps/compilers/gnu/12.1.0
-export MPI_ROOT=/apps/libraries/openmpi/4.1.6/el7/AVX512/gnu-12.1
-export PETSC_DIR="$HOME/software/petsc-gcc12-install"
+module load gnu/13.5.0-x86_64 \
+            mpi/openmpi/5.0.10-gnu-13.5.0-ucx-mt-x86_64 \
+            cmake/3.31.10 \
+            python/3.14.6
+
+# ================================
+# PETSc (OWN BUILD; NO PETSc MODULE ON SUNBIRD2)
+# ================================
+export PETSC_DIR="$HOME/software/petsc-sb2"
 unset PETSC_ARCH
+export LD_LIBRARY_PATH="$PETSC_DIR/lib:${LD_LIBRARY_PATH:-}"
 
-export PATH="$MPI_ROOT/bin:$GCC_ROOT/bin:$PATH"
-export LD_LIBRARY_PATH="$PETSC_DIR/lib:$MPI_ROOT/lib:$GCC_ROOT/lib64:${LD_LIBRARY_PATH:-}"
-export OMPI_CC="$GCC_ROOT/bin/gcc"
-export OMPI_CXX="$GCC_ROOT/bin/g++"
-
-# SINGLE-NODE JOBS: SKIP THE openib PROBE (REMOVES mlx5 WARNINGS).
-export OMPI_MCA_btl="^openib"
+# ================================
+# PYTHON VENV WITH THE gmsh MODULE. ITS bin/gmsh IS A
+# "#!/usr/bin/env python3" SCRIPT, SO THE VENV MUST BE ACTIVE.
+#   python3 -m venv ~/venvs/cbs && ~/venvs/cbs/bin/pip install gmsh
+# ================================
+source "$HOME/venvs/cbs/bin/activate"
 
 # ================================
 # CBS3D LOCATIONS
+#   CODE AND BUILDS IN $HOME (BACKED UP); CASES AND RUNS IN PROJECT SCRATCH.
 # ================================
-export CBS3D_CODE="/scratch/$USER/CBS3D/code"
+export CBS3D_CODE="$HOME/CBS3D_SB2/code"
 export CBS3D_SERIAL_EXE="$CBS3D_CODE/build/serial-petsc-release/cbs3d_serial"
 export CBS3D_MPI_EXE="$CBS3D_CODE/build/mpi-release/cbs3d_parallel"
+export CBS3D_SCRATCH="/scratch/scw7008/$USER"
 
 # ================================
 # SLURM DEFAULTS USED BY THE TEMPLATES

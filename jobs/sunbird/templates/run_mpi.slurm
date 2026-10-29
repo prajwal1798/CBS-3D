@@ -5,7 +5,8 @@
 #             ONE MPI RANK PER CORE, ONE RANK PER rank_XXXX FOLDER.
 #
 # USAGE     : sbatch run_mpi.slurm PARTITION_ROOT CASE_NAME
-#             sbatch --nodes=2 --ntasks=80 run_mpi.slurm ...   (80 RANKS)
+#             sbatch --nodes=2 --ntasks=256 run_mpi.slurm ...  (256 RANKS)
+#             sbatch --ntasks=64 run_mpi.slurm ...             (64 RANKS, 1 NODE)
 #
 #   PARTITION_ROOT  FOLDER WITH rank_0000 ... rank_NNNN, MADE BY
 #                   tools/export_rank_local_cbs.py --parts N
@@ -14,16 +15,20 @@
 # OUTPUT    : <SUBMIT DIR>/run_<CASE>_<JOBID>/output/<CASE>/
 #             (.pvtu + per-rank .vtu, <CASE>_distributed_residuals.csv)
 #
-# NOTES     : THE PARTITIONS ARE HARD-LINKED INTO THE RUN FOLDER, SO EDITING
+# NOTES     : SUNBIRD2 NODE = 128 CORES (256 HYPERTHREADS). --hint=nomultithread
+#             PUTS ONE RANK ON EACH PHYSICAL CORE.
+#             THE PARTITIONS ARE HARD-LINKED INTO THE RUN FOLDER, SO EDITING
 #             A .par FOR ONE RUN NEVER CHANGES THE MASTER COPY.
 # ================================
 #SBATCH --job-name=cbs3d_mpi
+#SBATCH --account=scw7008
 #SBATCH --partition=compute
 #SBATCH --nodes=1
-#SBATCH --ntasks=40
-#SBATCH --ntasks-per-node=40
+#SBATCH --ntasks=128
 #SBATCH --cpus-per-task=1
+#SBATCH --hint=nomultithread
 #SBATCH --exclusive
+#SBATCH --mem=0
 #SBATCH --time=04:00:00
 #SBATCH --output=cbs3d_mpi_%j.out
 #SBATCH --error=cbs3d_mpi_%j.err

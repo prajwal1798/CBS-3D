@@ -15,11 +15,14 @@
 #             THE CASE NAME ON ITS COMMAND LINE.
 # ================================
 #SBATCH --job-name=cbs3d_omp
+#SBATCH --account=scw7008
 #SBATCH --partition=compute
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=40
+#SBATCH --cpus-per-task=128
+#SBATCH --hint=nomultithread
 #SBATCH --exclusive
+#SBATCH --mem=0
 #SBATCH --time=04:00:00
 #SBATCH --output=cbs3d_omp_%j.out
 #SBATCH --error=cbs3d_omp_%j.err

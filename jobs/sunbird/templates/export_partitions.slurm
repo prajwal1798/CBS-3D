@@ -5,11 +5,13 @@
 #             COMPUTE NODE (LARGE MESHES NEED SEVERAL GB; NOT ON THE LOGIN NODE).
 #
 # USAGE     : sbatch export_partitions.slurm SERIAL_BASE NPARTS OUT_DIR
-#   SERIAL_BASE  e.g. /scratch/$USER/CBS3D/cases/fw/serial/fw  (NO EXTENSION)
+#   SERIAL_BASE  e.g. $CBS3D_SCRATCH/cases/fw/serial/fw  (NO EXTENSION)
 #
-# NEEDS     : A gmsh EXECUTABLE (MODULE OR $HOME/.local/bin/gmsh FROM pip).
+# NEEDS     : gmsh FROM THE VENV ACTIVATED IN cbs3d_env.sh (OR THE gmsh
+#             PYTHON MODULE: THE EXPORTER FALLS BACK TO IT).
 # ================================
 #SBATCH --job-name=cbs3d_part
+#SBATCH --account=scw7008
 #SBATCH --partition=compute
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
@@ -26,7 +28,7 @@ NPARTS="${2:?NPARTS}"
 OUT="${3:?OUT_DIR}"
 
 source "$HOME/cbs3d_env.sh"
-GMSH="${GMSH:-$(command -v gmsh || echo "$HOME/.local/bin/gmsh")}"
+GMSH="${GMSH:-$(command -v gmsh || echo gmsh)}"
 
 python3 "$CBS3D_CODE/tools/mesh_summary.py" "$BASE" --quiet
 python3 "$CBS3D_CODE/tools/export_rank_local_cbs.py" "$BASE" \

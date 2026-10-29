@@ -3,7 +3,7 @@ Pressure Field Solver (1 - Conjugate Gradient, 3 - PETSc AMG)
 Restart from prior run (0 - NO, 1 - YES)
 0
 Energy Calculation Desired (0 - NO, 1 - YES)
-1
+0
 Free stream values - Ux Uy Uz P T
 0.0  0.0  0.0  0.0  0.0
 ntime transient_on dtfixed dtfix iwrite
@@ -23,7 +23,7 @@ Output Controls - write_output write_time_output time_output_interval end_rtime
 Conjugate Gradient Convergence Tolerances - relToler absToler
 1.0e-8  1.0e-14
 Steady State Convergence Tolerances - vel_check l2norm_vel temp_check l2norm_temp
-1  1.0e-7  1  1.0e-7
+1  1.0e-7  0  1.0e-7
 Output Formats - paraview_output tecplot_output nusselt_calc nusselt_flag
 0  0  0  0
 Run Time Adjustable Option
