@@ -13,7 +13,7 @@
 #
 # OPTIONS   : --previous RESULT   AN EARLIER STEP OF THE SAME RUN. PRINTS HOW
 #                                 MUCH THE PROFILES STILL CHANGE (CONVERGENCE).
-#             --re 100            GHIA DATA SET (ONLY Re = 100 IS BUILT IN)
+#             --re 100            GHIA DATA SET: 100 OR 400 (MUST MATCH THE .par!)
 #             --ref-u CSV         OTHER REFERENCE u PROFILE: y,u PER LINE
 #             --ref-v CSV         OTHER REFERENCE v PROFILE: x,v PER LINE
 #             --ref-label TEXT    LEGEND TEXT FOR --ref-u / --ref-v
@@ -60,6 +60,24 @@ GHIA = {
             [0.2344, 0.17527], [0.2266, 0.17507], [0.1563, 0.16077],
             [0.0938, 0.12317], [0.0781, 0.10890], [0.0703, 0.10091],
             [0.0625, 0.09233], [0.0000, 0.00000]]),
+    },
+    400: {
+        "u": np.array([
+            [1.0000, 1.00000], [0.9766, 0.75837], [0.9688, 0.68439],
+            [0.9609, 0.61756], [0.9531, 0.55892], [0.8516, 0.29093],
+            [0.7344, 0.16256], [0.6172, 0.02135], [0.5000, -0.11477],
+            [0.4531, -0.17119], [0.2813, -0.32726], [0.1719, -0.24299],
+            [0.1016, -0.14612], [0.0703, -0.10338], [0.0625, -0.09266],
+            [0.0547, -0.08186], [0.0000, 0.00000]]),
+        # x = 0.9063 (-0.23827) IS WIDELY REGARDED AS A MISPRINT IN THE PAPER;
+        # IT IS KEPT AS PUBLISHED.
+        "v": np.array([
+            [1.0000, 0.00000], [0.9688, -0.12146], [0.9609, -0.15663],
+            [0.9531, -0.19254], [0.9453, -0.22847], [0.9063, -0.23827],
+            [0.8594, -0.44993], [0.8047, -0.38598], [0.5000, 0.05186],
+            [0.2344, 0.30174], [0.2266, 0.30203], [0.1563, 0.28124],
+            [0.0938, 0.22965], [0.0781, 0.20920], [0.0703, 0.19713],
+            [0.0625, 0.18360], [0.0000, 0.00000]]),
     },
 }
 
@@ -304,7 +322,7 @@ def main():
         ref_label = args.ref_label
     elif args.re in GHIA:
         ref_u, ref_v = GHIA[args.re]["u"], GHIA[args.re]["v"]
-        ref_label = "Ghia et al. (1982)"
+        ref_label = "Ghia et al. (1982), Re = %d" % args.re
     else:
         ref_u = ref_v = None
         ref_label = None
