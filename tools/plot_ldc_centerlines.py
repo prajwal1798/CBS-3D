@@ -153,7 +153,11 @@ def style_axes(ax):
 
 def legend_above(ax):
     # OUTSIDE THE AXES, ABOVE THE FRAME: IT CAN NEVER HIDE A CURVE OR MARKER.
-    ax.legend(loc="lower center", bbox_to_anchor=(0.5, 1.01), ncol=2,
+    # SIDE BY SIDE FOR SHORT LABELS; STACKED WHEN THEY WOULD BE WIDER THAN THE
+    # AXES (A WIDE LEGEND WOULD OTHERWISE SQUEEZE THE PLOT IN THE SAVED FIGURE).
+    labels = ax.get_legend_handles_labels()[1]
+    ncol = 2 if sum(len(t) for t in labels) <= 40 else 1
+    ax.legend(loc="lower center", bbox_to_anchor=(0.5, 1.01), ncol=ncol,
               frameon=False, handlelength=2.2, columnspacing=1.6,
               borderaxespad=0.2)
 
