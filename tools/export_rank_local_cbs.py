@@ -88,9 +88,16 @@ def read_serial_case(base):
             faces.append((int(fields[0]), int(fields[1]), int(fields[2]),
                           int(fields[3]), int(fields[4])))
 
-    # .bco : FIRST LINE nflag mass_flow_flag
+    # .bco : FIRST LINE nflag mass_flow_flag, THEN nflag MAPPING LINES
+    #        (raw side ID -> solver BC). THE WHOLE TABLE IS KEPT AND COPIED TO
+    #        EVERY RANK: A RANK INSIDE THE DOMAIN OWNS NO BOUNDARY FACES, BUT
+    #        THE SOLVER STILL NEEDS A NON-EMPTY TABLE (nflag >= 1).
     with open(base + ".bco", "r") as f:
-        mass_flow_flag = int(f.readline().split()[1])
+        header = f.readline().split()
+        nflag, mass_flow_flag = int(header[0]), int(header[1])
+        bco_table = [f.readline().rstrip("\n") for _ in range(nflag)]
+    if nflag < 1 or any(not line.split() for line in bco_table):
+        raise SystemExit("ERROR: %s.bco HAS NO VALID BC MAPPING LINES" % base)
 
     # .material : id n1 n2 n3 n4 material_id
     material = [0] * (nelem + 1)
@@ -104,7 +111,8 @@ def read_serial_case(base):
     return {
         "nelem": nelem, "npoin": npoin, "nboun": nboun,
         "elements": elements, "coord_text": coord_text, "faces": faces,
-        "mass_flow_flag": mass_flow_flag, "material": material,
+        "mass_flow_flag": mass_flow_flag, "bco_table": bco_table,
+        "material": material,
     }
 
 
@@ -331,10 +339,12 @@ def export_ranks(case, rank_of, parts, name, out_dir, par, matprop):
         bc_counts = {}
         for face in faces:
             bc_counts[face[4]] = bc_counts.get(face[4], 0) + 1
+        # THE FULL SERIAL TABLE ON EVERY RANK (SEE read_serial_case), SO A
+        # RANK WITH NO BOUNDARY FACES STILL HAS A VALID .bco.
         with open(base + ".bco", "w") as f:
-            f.write("%10d%10d\n" % (len(bc_counts), case["mass_flow_flag"]))
-            for bc in sorted(bc_counts):
-                f.write("%10d%10d\n" % (bc, bc))
+            f.write("%10d%10d\n" % (len(case["bco_table"]), case["mass_flow_flag"]))
+            for line in case["bco_table"]:
+                f.write(line + "\n")
 
         material_counts = {}
         with open(base + ".material", "w") as f:
