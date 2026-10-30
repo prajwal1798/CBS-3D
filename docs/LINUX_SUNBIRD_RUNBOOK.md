@@ -292,6 +292,20 @@ bash $T/submit_mpi.sh $CBS3D_SCRATCH/cases/NAME NAME 256 nodes 24:00:00
   2 GB per core. Slurm fills idle cores on partly used nodes (20 here, 30
   there). Ranks then share memory bandwidth with other jobs, and the slowest
   rank sets the pace, so expect less speed per rank than on whole nodes.
+Prepare several sets once, then let the script pick the largest set that
+fits the idle cores at submission time:
+
+```bash
+bash $T/prepare_partitions.sh $CBS3D_SCRATCH/cases/NAME NAME 40 80 128 256 384
+bash $T/submit_auto.sh $CBS3D_SCRATCH/cases/NAME NAME --dry-run      # see the choice
+bash $T/submit_auto.sh $CBS3D_SCRATCH/cases/NAME NAME --time 24:00:00
+```
+
+Whole exclusive nodes are used only when N fills them (N = k x 128) and k
+nodes are idle; otherwise the ranks go on scattered idle cores. Long steady
+runs should write checkpoints (`export CBS3D_CHECKPOINT_EVERY=10000` before
+submitting); a restart must use the same N as the checkpoint.
+
 - More ranks help only while each rank keeps enough work: below roughly
   10-20 k tets per rank, communication dominates. For the 2.3 M-tet cavity
   that is about 128-256 ranks; a finer mesh (`lc = 0.010`, ~4.5 M tets)

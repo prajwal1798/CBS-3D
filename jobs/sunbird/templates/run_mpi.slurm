@@ -77,6 +77,7 @@ done
     echo "nodes     : $SLURM_JOB_NODELIST (tasks per node: ${SLURM_TASKS_PER_NODE:-?})"
     echo "partitions: $PART_ROOT"
     echo "exe       : $CBS3D_MPI_EXE"
+    echo "checkpoint: every ${CBS3D_CHECKPOINT_EVERY:-0} iterations (0 = off; export CBS3D_CHECKPOINT_EVERY before sbatch)"
     echo "git commit: $(git -C "$CBS3D_CODE" rev-parse HEAD 2>/dev/null || echo unknown)"
     sha256sum "$CBS3D_MPI_EXE" "$RUN_DIR/partitions/rank_0000/${CASE}_rank_0000.par"
 } > "$RUN_DIR/run_record.txt"
