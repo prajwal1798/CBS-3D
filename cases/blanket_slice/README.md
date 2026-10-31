@@ -1,20 +1,26 @@
-# Blanket slice: tapered cooling plate with 4 nested U-channels
+# Blanket slice: tapered plate, first wall, 4 nested U-channels
 
-`BlanketSlice_CHT.geo`: a tapered plate (back 350 mm, front 270 mm, depth
-400 mm, thickness 24 mm) with a first wall and armour on the front, cooled by
-4 nested U-shaped square channels (12, 9.6, 7.8, 6 mm; largest next to the
-first wall) with 12 mm gaps, ports on the back face, and the solid core inside
-channel 4 removed (12 mm wall kept).
+`BlanketSlice_CHT.geo` follows the design drawing (mm, x from the left back
+corner):
 
-Uniform-offset construction: the plate outline, both edges of every channel
-and the core cut-out are offsets of one rounded outline; every front-corner
-arc shares one centre. Corners are concentric, channel widths and gaps are
-constant through the bends. The plate fillet R0 must exceed the deepest
-offset (checked; default R0 = 100 mm, deepest arc radius 10.6 mm).
+| | Front-run top edge | Width | Left-leg outer edge at y = 0 | Fillet (both edges) |
+|---|---|---|---|---|
+| Plate | 280 | 350 (back), 301 (front), sides 85 deg | 0 | R6 |
+| Channel 1 | 270 (first wall 10) | 15 | 20 | R10 |
+| Channel 2 | 220 | 10 | 65 | R5 |
+| Channel 3 | 150 | 10 | 105 | R5 |
+| Channel 4 | 100 | 5 | 135 | R3.5 |
 
-IDs: volumes 10 fluid, 20 structure, 21 armour; surfaces 511 inlets (4),
-520 outlets (4), 532 heated front (front face + fillets, 5 faces), 530 other.
+Channel legs are parallel to the plate sides; widths are true (perpendicular)
+widths; the plate is symmetric about x = 175 mm. Through the thickness each
+channel is square and centred in a 30 mm slice (7.5 mm walls either side of
+channel 1). All values are `DefineConstant` parameters (Gmsh Parameters panel
+or `-setnumber`).
 
-Checked (geometry only, `gmsh -0`): 4 fluid volumes (3.005e-4 m3), structure
-1.550e-3 m3, armour 6.80e-6 m3; inlet area 3.347e-4 m2 = sum of the four
-squares x 1/cos(taper).
+IDs: volumes 10 fluid, 20 solid (21 armour if `tArm` > 0); surfaces 511
+inlets (4 left legs), 520 outlets (4 right legs), 532 heated first wall (front
+face + R6 fillets), 530 all other external faces.
+
+Checked on the built CAD (`gmsh -0`, no mesh): every edge position, width and
+fillet radius above is reproduced exactly; fluid 2.809e-4 m3, solid
+2.453e-3 m3; inlet area 451.7 mm2 = (225 + 100 + 100 + 25) mm2 / sin 85 deg.

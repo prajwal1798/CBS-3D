@@ -1,154 +1,139 @@
 //==============================================================================
 // BlanketSlice_CHT.geo
 //
-// BLANKET SLICE: A TAPERED COOLING PLATE WITH 4 NESTED U-SHAPED SQUARE
-// CHANNELS UNDER A FIRST WALL WITH ARMOUR, FOR CBS3D++_SI CONJUGATE HEAT
-// TRANSFER.
+// BLANKET SLICE FOR CBS3D++_SI CONJUGATE HEAT TRANSFER:
+// A TAPERED SOLID PLATE WITH A FIRST WALL AND 4 NESTED U-SHAPED COOLANT
+// CHANNELS, PORTS ON THE BACK FACE, HEATED ON THE FRONT (FIRST-WALL) FACE.
 //
-// IN-PLANE GEOMETRY (x = WIDTH, y = DEPTH FROM THE BACK FACE; THE PLATE IS A
-// SLICE OF THICKNESS Tz IN z):
+// DIMENSIONS FOLLOW THE DESIGN DRAWING (mm, x FROM THE LEFT BACK CORNER):
 //
-//                 armour + first wall   <== HEAT FLUX (front + fillets)
-//                   ______________________
-//                .'  __________________  '.          channel 1: largest, next
-//              .'  .'  ______________  '.  '.        to the first wall
-//            .'  .'  .'  __________  '.  '.  '.      channels 2-4: smaller,
-//           /  .'  .'  .'          '.  '.  '.  \     equal gaps between them
-//          /  /  /  /    solid core   \  \  \  \
-//         /  /  /  /    (cut out)      \  \  \  \
-//        /__|__|__|____________________|__|__|__\    y = 0 (back face)
-//           ^  ^  ^  ^              v  v  v  v
-//           inlets (x < 0)          outlets (x > 0)
+//   PLATE      back width 350, height 280, sides at 85 deg, front fillet R6
+//   CHANNEL 1  top edge 270 (first wall 10), width 15, leg at x = 20, R10
+//   CHANNEL 2  top edge 220,                 width 10, leg at x = 65, R5
+//   CHANNEL 3  top edge 150,                 width 10, leg at x = 105, R5
+//   CHANNEL 4  top edge 100,                 width  5, leg at x = 135, R3.5
 //
-// UNIFORM-OFFSET RULE: THE PLATE OUTLINE, BOTH EDGES OF EVERY CHANNEL AND THE
-// CORE CUT-OUT ARE ALL OFFSETS OF ONE ROUNDED TAPERED OUTLINE. AT EACH FRONT
-// CORNER EVERY ARC SHARES ONE CENTRE, SO
-//   - CORNERS ARE PARALLEL (CONCENTRIC) THROUGHOUT,
-//   - EACH CHANNEL KEEPS A CONSTANT WIDTH THROUGH ITS BEND,
-//   - THE GAP BETWEEN NEIGHBOURING CHANNELS IS CONSTANT EVERYWHERE.
-// AN ARC AT OFFSET d FROM THE OUTLINE HAS RADIUS R0 - d, SO R0 MUST EXCEED
-// THE DEEPEST OFFSET (CHECKED BELOW).
+//   "top edge" = OUTER (UPPER) EDGE OF THE CHANNEL'S FRONT RUN, FROM y = 0.
+//   "leg at x" = OUTER EDGE OF THE LEFT LEG ON THE BACK FACE y = 0.
+//   Every channel leg is parallel to the plate side (85 deg). Both edges of a
+//   channel corner carry the SAME fillet radius, as drawn. Channel widths are
+//   true (perpendicular) widths. The plate is symmetric about its centre line.
 //
-// THROUGH-THICKNESS (z): EACH CHANNEL IS SQUARE (w x w), CENTRED AT z = Tz/2.
-// Tz = w1 + 2 tz.
+//                 R6  ______ FIRST WALL (heated) ______  R6
+//                    /  R10 ____________________ R10    \
+//                   /  /  ________________________ \  \   \
+//                  /  /  /  R5 ______________ R5  \  \  \  \
+//                 /  /  /  /  ______________   \  \  \  \  \
+//                /  /  /  /  /  R3.5 ___ R3.5 \  \  \  \  \  \
+//               /  /  /  /  /  /         \  \  \  \  \  \  \  \
+//              /__|__|__|__|__|___SOLID___|__|__|__|__|__|__|__\  y = 0
+//                 inlets (x < centre)      outlets (x > centre)
+//
+// THROUGH-THICKNESS (z): EACH CHANNEL IS SQUARE (DEPTH = WIDTH) AND CENTRED
+// AT z = Tz/2; Tz = w1 + 2 tz.
 //
 // CBS PHYSICAL IDS (tools/gmsh_to_cbs.py):
-//    10 fluid     20 structure     21 armour ("solid_armour")
-//   511 inlets (left leg ends)    520 outlets (right leg ends)
-//   532 heated front (front face + both front fillets)
-//   530 all other external faces (adiabatic)
+//    10 fluid   20 solid   21 armour (only if tArm > 0)
+//   511 inlets (4 left leg ends)   520 outlets (4 right leg ends)
+//   532 heated first-wall face (front face + both R6 fillets)
+//   530 every other external face (adiabatic)
 //
-// USAGE (EVERY PARAMETER CAN BE SET FROM THE COMMAND LINE):
-//   gmsh BlanketSlice_CHT.geo                                      geometry only
-//   gmsh BlanketSlice_CHT.geo -3 -setnumber hScale 5 -o slice.msh  coarse mesh
+// COORDINATES IN THIS FILE: x = 0 ON THE CENTRE LINE (DRAWING x MINUS 175 mm),
+// y = 0 ON THE BACK FACE, LENGTHS IN METRES.
+//
+// USAGE:
+//   gmsh BlanketSlice_CHT.geo                                       geometry
+//   gmsh BlanketSlice_CHT.geo -3 -setnumber hScale 4 -o slice.msh   coarse mesh
 //==============================================================================
 
 SetFactory("OpenCASCADE");
 Geometry.OCCBooleanPreserveNumbering = 1;
 
 //==============================================================================
-// 1. PARAMETERS (LENGTHS IN METRES; RATIOS ARE x a = CHANNEL 1 WIDTH)
+// 1. PARAMETERS (METRES)
 //==============================================================================
 
 DefineConstant[
-    a     = {0.012, Name "Geometry/01 channel 1 width a (m)"},
-    Wb    = {0.350, Name "Geometry/02 back width at y = 0 (m)"},
-    Wf    = {0.270, Name "Geometry/03 front width at y = H (m)"},
-    H     = {0.400, Name "Geometry/04 depth H, back face to front (m)"},
-    R0    = {0.100, Name "Geometry/05 front fillet radius of the plate (m)"},
-    w2R   = {0.80,  Name "Geometry/06 channel 2 width / a"},
-    w3R   = {0.65,  Name "Geometry/07 channel 3 width / a"},
-    w4R   = {0.50,  Name "Geometry/08 channel 4 width / a"},
-    gR    = {1.00,  Name "Geometry/09 gap between channels / a"},
-    tArmR = {0.20,  Name "Geometry/10 armour thickness / a (0 = none)"},
-    tFWR  = {0.30,  Name "Geometry/11 first wall (armour to channel 1) / a"},
-    tzR   = {0.50,  Name "Geometry/12 z wall each side of channel 1 / a"},
-    coreCut = {1,   Name "Geometry/13 remove solid inside channel 4 (1 = yes)"},
-    gCoreR  = {1.00,Name "Geometry/14 wall left inside channel 4 / a"}
+    Wb    = {0.350,  Name "Plate/1 back width (m)"},
+    H     = {0.280,  Name "Plate/2 height, back face to front (m)"},
+    angD  = {85.0,   Name "Plate/3 side angle to the back face (deg)"},
+    rP    = {0.006,  Name "Plate/4 front fillet radius (m)"},
+
+    yT1   = {0.270,  Name "Channel 1/1 top edge height (m)"},
+    w1    = {0.015,  Name "Channel 1/2 width (m)"},
+    x1    = {0.020,  Name "Channel 1/3 leg outer edge, x from left corner (m)"},
+    r1    = {0.010,  Name "Channel 1/4 fillet radius (m)"},
+
+    yT2   = {0.220,  Name "Channel 2/1 top edge height (m)"},
+    w2    = {0.010,  Name "Channel 2/2 width (m)"},
+    x2    = {0.065,  Name "Channel 2/3 leg outer edge, x from left corner (m)"},
+    r2    = {0.005,  Name "Channel 2/4 fillet radius (m)"},
+
+    yT3   = {0.150,  Name "Channel 3/1 top edge height (m)"},
+    w3    = {0.010,  Name "Channel 3/2 width (m)"},
+    x3    = {0.105,  Name "Channel 3/3 leg outer edge, x from left corner (m)"},
+    r3    = {0.005,  Name "Channel 3/4 fillet radius (m)"},
+
+    yT4   = {0.100,  Name "Channel 4/1 top edge height (m)"},
+    w4    = {0.005,  Name "Channel 4/2 width (m)"},
+    x4    = {0.135,  Name "Channel 4/3 leg outer edge, x from left corner (m)"},
+    r4    = {0.0035, Name "Channel 4/4 fillet radius (m)"},
+
+    tzR   = {0.5,    Name "Thickness/1 z wall each side of channel 1 / w1"},
+    squareCh = {1,   Name "Thickness/2 square channels (1) or all depth w1 (0)"},
+    tArm  = {0.0,    Name "Thickness/3 armour on the first wall (m), 0 = none"}
 ];
 
-nCh  = 4;
-wCh[] = {a, w2R * a, w3R * a, w4R * a};    // CHANNEL WIDTHS (SQUARE SECTIONS)
-g    = gR * a;
-tArm = tArmR * a;
-tFW  = tFWR * a;
-tz   = tzR * a;
-Tz   = a + 2.0 * tz;                       // SLICE THICKNESS
+nCh = 4;
+yT[] = {yT1, yT2, yT3, yT4};
+wC[] = {w1,  w2,  w3,  w4};
+xC[] = {x1,  x2,  x3,  x4};
+rF[] = {r1,  r2,  r3,  r4};
+
+ang = angD * Pi / 180.0;
+tz  = tzR * w1;
+Tz  = w1 + 2.0 * tz;                     // SLICE THICKNESS
 zMid = Tz / 2.0;
-gCore = gCoreR * a;
+xL0 = -Wb / 2.0;                         // LEFT BACK CORNER (CENTRED COORDS)
 
-// CENTRE-LINE OFFSET OF EACH CHANNEL FROM THE PLATE OUTLINE.
-dCh[] = {};
-dEdge = tArm + tFW;                        // OUTER EDGE OF CHANNEL 1
-For i In {0 : nCh - 1}
-    dCh[] += dEdge + wCh[i] / 2.0;
-    dEdge = dEdge + wCh[i] + g;
-EndFor
-dInner = dCh[nCh - 1] + wCh[nCh - 1] / 2.0;    // INNER EDGE OF CHANNEL 4
-dCore  = dInner + gCore;                       // CORE CUT-OUT BOUNDARY
+// LEFT SIDE DIRECTION (UP AND INWARD) AND INWARD NORMAL.
+tx = Cos(ang);  ty = Sin(ang);
+nx = Sin(ang);  ny = -Cos(ang);
 
-// LEFT SIDE: FROM (-Wb/2, 0) TO (-Wf/2, H). UNIT TANGENT t, INWARD NORMAL n.
-dxs = (Wb - Wf) / 2.0;
-Ls  = Sqrt(dxs * dxs + H * H);
-tx  = dxs / Ls;
-ty  = H / Ls;
-nx  = H / Ls;
-ny  = -dxs / Ls;
-
-eps = 1.0e-4 * a;                          // ENTITY-SELECTION TOLERANCE ONLY
-
-dDeepest = (coreCut == 1) ? dCore : dInner;
-If (Wf >= Wb || Wf <= 0)
-    Error("Need 0 < Wf < Wb (got Wf = %g, Wb = %g)", Wf, Wb);
-    Abort;
-EndIf
-If (R0 - dDeepest < 0.25 * a)
-    Error("R0 = %g is too small: the deepest offset is %g, so its arc radius would be %g (< a/4). Increase R0 or reduce gaps/widths.",
-          R0, dDeepest, R0 - dDeepest);
-    Abort;
-EndIf
+eps = 1.0e-6;                            // ENTITY-SELECTION TOLERANCE ONLY
 
 //==============================================================================
-// 2. MACRO: OFFSET REGION. THE PLATE OUTLINE OFFSET INWARD BY dOff, WITH THE
-//    CONCENTRIC CORNER RADIUS R0 - dOff, AS A FLAT SURFACE AT z = zB EXTRUDED
-//    BY hZ. THE REGION IS OPEN TO THE BACK FACE y = 0.
-//    INPUT : dOff, zB, hZ        OUTPUT: vTrap (VOLUME TAG)
+// 2. MACRO: REGION BOUNDED BY y = 0, TWO SIDES PARALLEL TO THE PLATE SIDES
+//    (LEFT SIDE THROUGH (xF, 0), MIRRORED ABOUT x = 0) AND A FRONT LINE
+//    y = yTop, WITH FILLETS OF RADIUS rr AT THE TWO FRONT CORNERS.
+//    FLAT FACE AT z = zB, EXTRUDED BY hZ.
+//    INPUT : xF, yTop, rr, zB, hZ        OUTPUT: vReg (VOLUME TAG)
 //==============================================================================
 
-Macro OffsetRegion
-    rC = R0 - dOff;
+Macro FilletedRegion
+    // FILLET CENTRE: rr INSIDE THE SIDE LINE AND rr BELOW THE FRONT LINE.
+    cyR = yTop - rr;
+    sR  = (cyR - rr * ny) / ty;
+    cxR = xF + rr * nx + sR * tx;
 
-    // OFFSET SIDE LINE: POINT (-Wb/2, 0) + dOff n, DIRECTION t; ITS FOOT ON y = 0.
-    q0x = -Wb / 2.0 + dOff * nx;
-    q0y = dOff * ny;
-    xBot = q0x + (-q0y / ty) * tx;
+    tsxR = cxR - rr * nx;                // TANGENT POINT ON THE SIDE
+    tsyR = cyR - rr * ny;
+    tfxR = cxR;                          // TANGENT POINT ON THE FRONT
+    tfyR = yTop;
 
-    // COMMON CORNER CENTRE: DISTANCE R0 FROM BOTH THE SIDE AND THE FRONT.
-    k0x = -Wb / 2.0 + R0 * nx;
-    k0y = R0 * ny;
-    cyC = H - R0;
-    cxC = k0x + ((cyC - k0y) / ty) * tx;
-
-    // TANGENT POINTS ON THE OFFSET SIDE AND ON THE OFFSET FRONT.
-    tsx = cxC - rC * nx;
-    tsy = cyC - rC * ny;
-    tfx = cxC;
-    tfy = H - dOff;
-
-    If (cxC >= 0.0 || tsy <= 0.0 || rC <= 0.0)
-        Error("Offset region does not fit: offset %g, radius %g (centre x %g, side tangent y %g)",
-              dOff, rC, cxC, tsy);
+    If (cxR >= 0.0 || tsyR <= 0.0 || rr <= 0.0)
+        Error("Region does not fit: foot x %g, top %g, radius %g", xF, yTop, rr);
         Abort;
     EndIf
 
-    pA = newp; Point(pA) = { xBot, 0.0, zB};
-    pB = newp; Point(pB) = { tsx,  tsy, zB};
-    pC = newp; Point(pC) = { cxC,  cyC, zB};
-    pD = newp; Point(pD) = { tfx,  tfy, zB};
-    pE = newp; Point(pE) = {-tfx,  tfy, zB};
-    pF = newp; Point(pF) = {-cxC,  cyC, zB};
-    pG = newp; Point(pG) = {-tsx,  tsy, zB};
-    pH = newp; Point(pH) = {-xBot, 0.0, zB};
+    pA = newp; Point(pA) = { xF,   0.0,  zB};
+    pB = newp; Point(pB) = { tsxR, tsyR, zB};
+    pC = newp; Point(pC) = { cxR,  cyR,  zB};
+    pD = newp; Point(pD) = { tfxR, tfyR, zB};
+    pE = newp; Point(pE) = {-tfxR, tfyR, zB};
+    pF = newp; Point(pF) = {-cxR,  cyR,  zB};
+    pG = newp; Point(pG) = {-tsxR, tsyR, zB};
+    pH = newp; Point(pH) = {-xF,   0.0,  zB};
 
     lAB = newl; Line(lAB)   = {pA, pB};
     lBD = newl; Circle(lBD) = {pB, pC, pD};
@@ -157,62 +142,55 @@ Macro OffsetRegion
     lGH = newl; Line(lGH)   = {pG, pH};
     lHA = newl; Line(lHA)   = {pH, pA};
 
-    clT = newcl; Curve Loop(clT) = {lAB, lBD, lDE, lEG, lGH, lHA};
-    sT  = news;  Plane Surface(sT) = {clT};
-    exT[] = Extrude {0, 0, hZ} { Surface{sT}; };
-    vTrap = exT[1];
+    clR = newcl; Curve Loop(clR) = {lAB, lBD, lDE, lEG, lGH, lHA};
+    sRg = news;  Plane Surface(sRg) = {clR};
+    exR[] = Extrude {0, 0, hZ} { Surface{sRg}; };
+    vReg = exR[1];
 Return
 
 //==============================================================================
-// 3. PLATE, WITH THE OPTIONAL CORE CUT-OUT
+// 3. PLATE
 //==============================================================================
 
-dOff = 0.0; zB = 0.0; hZ = Tz;
-Call OffsetRegion;
-vPlate = vTrap;
-
-If (coreCut == 1)
-    dOff = dCore; zB = -a; hZ = Tz + 2.0 * a;
-    Call OffsetRegion;
-    vPlateCut[] = BooleanDifference { Volume{vPlate}; Delete; } { Volume{vTrap}; Delete; };
-    vPlate = vPlateCut[0];
-EndIf
+xF = xL0; yTop = H; rr = rP; zB = 0.0; hZ = Tz;
+Call FilletedRegion;
+vPlate = vReg;
 
 //==============================================================================
-// 4. CHANNELS: BAND BETWEEN TWO CONCENTRIC OFFSETS, SQUARE SECTION w x w
+// 4. CHANNELS: OUTER REGION MINUS INNER REGION (SAME FILLET RADIUS ON BOTH
+//    EDGES, AS DRAWN). THE INNER REGION IS THE OUTER ONE MOVED IN BY THE
+//    CHANNEL WIDTH: SIDES BY w (PERPENDICULAR), FRONT DOWN BY w.
 //==============================================================================
 
 vChan[] = {};
 For i In {0 : nCh - 1}
-    w  = wCh[i];
-    dC = dCh[i];
+    w  = wC[i];
+    dZ = (squareCh == 1) ? w : w1;       // CHANNEL DEPTH IN z
 
-    dOff = dC - w / 2.0; zB = zMid - w / 2.0; hZ = w;
-    Call OffsetRegion;
-    vOuter = vTrap;
+    xF = xL0 + xC[i]; yTop = yT[i]; rr = rF[i]; zB = zMid - dZ / 2.0; hZ = dZ;
+    Call FilletedRegion;
+    vOuter = vReg;
 
-    dOff = dC + w / 2.0; zB = zMid - w / 2.0; hZ = w;
-    Call OffsetRegion;
-    vInner = vTrap;
+    xF = xL0 + xC[i] + w / nx; yTop = yT[i] - w; rr = rF[i]; zB = zMid - dZ / 2.0; hZ = dZ;
+    Call FilletedRegion;
+    vInner = vReg;
 
     vBand[] = BooleanDifference { Volume{vOuter}; Delete; } { Volume{vInner}; Delete; };
     vChan[] += vBand[];
 
-    Printf("channel %g: %.4e x %.4e m, centre-line offset %.4e m, bend radius %.4e m (inner %.4e, outer %.4e)",
-           i + 1, w, w, dC, R0 - dC, R0 - dC - w / 2.0, R0 - dC + w / 2.0);
+    Printf("channel %g: width %.4e m, depth %.4e m, top edges %.4e / %.4e m, leg x %.4e m, fillet %.4e m",
+           i + 1, w, dZ, yT[i], yT[i] - w, xC[i], rF[i]);
 EndFor
 
 //==============================================================================
-// 5. ARMOUR STRIP (y >= H - tArm) AND CONFORMAL SPLIT
+// 5. OPTIONAL ARMOUR STRIP AND CONFORMAL SPLIT
 //==============================================================================
 
 vSolidParts[] = {vPlate};
 If (tArm > 0)
     vPlateCopy[] = Translate {0, 0, 0} { Duplicata { Volume{vPlate}; } };
-    bA = newv;
-    Box(bA) = {-Wb, H - tArm, -a, 2.0 * Wb, 2.0 * tArm, Tz + 2.0 * a};
-    bB = newv;
-    Box(bB) = {-Wb, H - tArm, -a, 2.0 * Wb, 2.0 * tArm, Tz + 2.0 * a};
+    bA = newv; Box(bA) = {-Wb, H - tArm, -Tz, 2.0 * Wb, 2.0 * tArm, 3.0 * Tz};
+    bB = newv; Box(bB) = {-Wb, H - tArm, -Tz, 2.0 * Wb, 2.0 * tArm, 3.0 * Tz};
     vArmRaw[] = BooleanIntersection { Volume{vPlateCopy[]}; Delete; } { Volume{bA}; Delete; };
     vStRaw[]  = BooleanDifference   { Volume{vPlate};       Delete; } { Volume{bB}; Delete; };
     vSolidParts[] = {vStRaw[], vArmRaw[]};
@@ -224,31 +202,28 @@ allVol[] = BooleanFragments { Volume{vSolidParts[]}; Delete; } { Volume{vChan[]}
 // 6. VOLUME IDENTIFICATION
 //==============================================================================
 
-// FLUID: THE CHANNELS LIE INSIDE THE z-RANGE OF CHANNEL 1; THE SOLIDS SPAN Tz.
-padz = 0.5 * tz;
+padz = 0.5 * tz;                         // CHANNELS STAY INSIDE THE w1 LAYER
 vFluid[] = Volume In BoundingBox {
-    -Wb, -eps, zMid - a / 2.0 - padz,
-     Wb,  H + eps, zMid + a / 2.0 + padz };
+    -Wb, -eps, zMid - w1 / 2.0 - padz,
+     Wb,  H + eps, zMid + w1 / 2.0 + padz };
 
 vArmour[] = {};
 If (tArm > 0)
-    vArmour[] = Volume In BoundingBox {
-        -Wb, H - 1.5 * tArm, -eps,
-         Wb, H + eps, Tz + eps };
+    vArmour[] = Volume In BoundingBox { -Wb, H - 1.5 * tArm, -eps, Wb, H + eps, Tz + eps };
 EndIf
 
-vStruct[] = allVol[];
-vStruct[] -= vFluid[];
-vStruct[] -= vArmour[];
+vSolid[] = allVol[];
+vSolid[] -= vFluid[];
+vSolid[] -= vArmour[];
 
-If (#vFluid[] != nCh || #vStruct[] < 1)
-    Error("Volume identification failed: %g fluid (expected %g), %g structure",
-          #vFluid[], nCh, #vStruct[]);
+If (#vFluid[] != nCh || #vSolid[] < 1)
+    Error("Volume identification failed: %g fluid (expected %g), %g solid",
+          #vFluid[], nCh, #vSolid[]);
     Abort;
 EndIf
 
 Physical Volume("fluid", 10) = {vFluid[]};
-Physical Volume("solid", 20) = {vStruct[]};
+Physical Volume("solid", 20) = {vSolid[]};
 If (tArm > 0)
     Physical Volume("solid_armour", 21) = {vArmour[]};
 EndIf
@@ -257,39 +232,23 @@ EndIf
 // 7. BOUNDARY SURFACES
 //==============================================================================
 
-// PORTS: CHANNEL END FACES ON y = 0 (INSIDE THE CHANNEL LAYER).
 sInlet[] = Surface In BoundingBox {
-    -Wb, -eps, zMid - a / 2.0 - eps,
-    0.0,  eps, zMid + a / 2.0 + eps };
+    -Wb, -eps, zMid - w1 / 2.0 - eps,
+    0.0,  eps, zMid + w1 / 2.0 + eps };
 sOutlet[] = Surface In BoundingBox {
-    0.0, -eps, zMid - a / 2.0 - eps,
-     Wb,  eps, zMid + a / 2.0 + eps };
+    0.0, -eps, zMid - w1 / 2.0 - eps,
+     Wb,  eps, zMid + w1 / 2.0 + eps };
 
-// HEATED FRONT: FRONT FACE + BOTH FRONT FILLETS (THE CURVED FACES START AT
-// THE SIDE TANGENT POINT, BELOW y = H - R0), EXCLUDING THE z FACES.
-yHeat = H - R0 - R0 * Fabs(ny) - eps;
-sFront[] = Surface In BoundingBox {
-    -Wb, yHeat, -eps,
-     Wb, H + eps, Tz + eps };
-sZ0[] = Surface In BoundingBox { -Wb, -eps, -eps,      Wb, H + eps, eps };
-sZ1[] = Surface In BoundingBox { -Wb, -eps, Tz - eps,  Wb, H + eps, Tz + eps };
-sCand[] = sFront[];
-sCand[] -= sZ0[];
-sCand[] -= sZ1[];
-
-// KEEP ONLY EXTERNAL FACES THAT REACH THE FRONT LAYER (y >= H - tArm): THIS
-// DROPS CHANNEL WALLS, THE ARMOUR CUT AND THE FACES OF THE CORE CUT-OUT.
+// HEATED FIRST WALL: EXTERNAL FACES THAT REACH y = H (FRONT FACE AND THE
+// R6 FILLETS), EXCLUDING THE TWO z FACES.
 sExternal[] = Abs(CombinedBoundary { Volume{allVol[]}; });
 sHeated[] = {};
-For k In {0 : #sCand[] - 1}
-    For m In {0 : #sExternal[] - 1}
-        If (sCand[k] == sExternal[m])
-            bbS[] = BoundingBox Surface{ sCand[k] };
-            If (bbS[4] >= H - tArm - 1.0e-3 * a)
-                sHeated[] += sCand[k];
-            EndIf
-        EndIf
-    EndFor
+For k In {0 : #sExternal[] - 1}
+    bbS[] = BoundingBox Surface{ sExternal[k] };
+    isZFace = (bbS[5] - bbS[2] < eps);
+    If (bbS[4] >= H - eps && isZFace == 0)
+        sHeated[] += sExternal[k];
+    EndIf
 EndFor
 
 sAdiabatic[] = sExternal[];
@@ -297,7 +256,7 @@ sAdiabatic[] -= sInlet[];
 sAdiabatic[] -= sOutlet[];
 sAdiabatic[] -= sHeated[];
 
-If (#sInlet[] != nCh || #sOutlet[] != nCh || #sHeated[] != 5)
+If (#sInlet[] != nCh || #sOutlet[] != nCh || #sHeated[] < 3)
     Error("Boundary identification failed: inlets %g, outlets %g (expected %g), heated %g",
           #sInlet[], #sOutlet[], nCh, #sHeated[]);
     Abort;
@@ -308,42 +267,40 @@ Physical Surface("outlet", 520)         = {sOutlet[]};
 Physical Surface("heat_flux", 532)      = {sHeated[]};
 Physical Surface("adiabatic_wall", 530) = {sAdiabatic[]};
 
-// FLUID-SOLID INTERFACE (MESH SIZING ONLY).
 sInterface[] = Abs(Boundary { Volume{vFluid[]}; });
 sInterface[] -= sInlet[];
 sInterface[] -= sOutlet[];
 
 //==============================================================================
-// 8. MESH SIZES: FLUID AND SOLID GRADED SEPARATELY. SIZES ARE RATIOS OF THE
-//    SMALLEST CHANNEL WIDTH; SIZES AND GRADING DISTANCES SCALE WITH hScale.
+// 8. MESH SIZES (RATIOS OF THE SMALLEST CHANNEL WIDTH w4). FLUID AND SOLID
+//    ARE GRADED SEPARATELY; SIZES AND GRADING DISTANCES SCALE WITH hScale.
 //==============================================================================
 
 DefineConstant[
-    hScale  = {1.0,   Name "Mesh/0 global size factor (2 = coarser)"},
-    hWallR  = {0.025, Name "Mesh/1 interface size / smallest channel"},
-    hCoreR  = {0.070, Name "Mesh/2 fluid core size / smallest channel"},
-    hFrontR = {0.080, Name "Mesh/3 first wall + armour size / smallest channel"},
-    hSolidR = {0.400, Name "Mesh/4 solid bulk size / smallest channel"},
-    dWallR  = {0.015, Name "Mesh/5 keep interface size up to distance / smallest"},
-    dCoreR  = {0.300, Name "Mesh/6 fluid reaches core size at distance / smallest"},
-    dSolidR = {1.500, Name "Mesh/7 solid reaches bulk size at distance / smallest"}
+    hScale  = {1.0,  Name "Mesh/0 global size factor (2 = coarser)"},
+    hWallR  = {0.03, Name "Mesh/1 interface size / w4"},
+    hCoreR  = {0.08, Name "Mesh/2 fluid core size / w4"},
+    hFrontR = {0.12, Name "Mesh/3 first wall size / w4"},
+    hSolidR = {0.50, Name "Mesh/4 solid bulk size / w4"},
+    dWallR  = {0.02, Name "Mesh/5 keep interface size up to distance / w4"},
+    dCoreR  = {0.40, Name "Mesh/6 fluid reaches core size at distance / w4"},
+    dSolidR = {2.00, Name "Mesh/7 solid reaches bulk size at distance / w4"}
 ];
 
-wMin   = wCh[nCh - 1];
-hWall  = hScale * hWallR  * wMin;
-hCore  = hScale * hCoreR  * wMin;
-hFront = hScale * hFrontR * wMin;
-hSolid = hScale * hSolidR * wMin;
-dWall  = hScale * dWallR  * wMin;
-dCoreS = hScale * dCoreR  * wMin;
-dSolid = hScale * dSolidR * wMin;
+hWall  = hScale * hWallR  * w4;
+hCore  = hScale * hCoreR  * w4;
+hFront = hScale * hFrontR * w4;
+hSolid = hScale * hSolidR * w4;
+dWall  = hScale * dWallR  * w4;
+dCoreS = hScale * dCoreR  * w4;
+dSolid = hScale * dSolidR * w4;
+tFW    = H - yT1;                        // FIRST-WALL THICKNESS
 
-// F1-F3: FLUID, WALL -> CORE.
 Field[1] = Distance;
 Field[1].SurfacesList = {sInterface[]};
 Field[1].Sampling = 60;
 
-Field[2] = Threshold;
+Field[2] = Threshold;                    // FLUID: WALL -> CORE
 Field[2].InField = 1;
 Field[2].SizeMin = hWall;
 Field[2].SizeMax = hCore;
@@ -355,8 +312,7 @@ Field[3].InField = 2;
 Field[3].VolumesList = {vFluid[]};
 Field[3].IncludeBoundary = 1;
 
-// F4-F5: SOLIDS, WALL -> BULK.
-Field[4] = Threshold;
+Field[4] = Threshold;                    // SOLID: WALL -> BULK
 Field[4].InField = 1;
 Field[4].SizeMin = hWall;
 Field[4].SizeMax = hSolid;
@@ -365,11 +321,10 @@ Field[4].DistMax = dSolid;
 
 Field[5] = Restrict;
 Field[5].InField = 4;
-Field[5].VolumesList = {vStruct[], vArmour[]};
+Field[5].VolumesList = {vSolid[], vArmour[]};
 Field[5].IncludeBoundary = 1;
 
-// F6-F8: FIRST WALL AND ARMOUR HELD FINE FROM THE HEATED FRONT TO CHANNEL 1.
-Field[6] = Distance;
+Field[6] = Distance;                     // FIRST WALL: FINE THROUGH ITS THICKNESS
 Field[6].SurfacesList = {sHeated[]};
 Field[6].Sampling = 60;
 
@@ -377,12 +332,12 @@ Field[7] = Threshold;
 Field[7].InField = 6;
 Field[7].SizeMin = hFront;
 Field[7].SizeMax = hSolid;
-Field[7].DistMin = tArm + tFW;
-Field[7].DistMax = tArm + tFW + dSolid;
+Field[7].DistMin = tFW;
+Field[7].DistMax = tFW + dSolid;
 
 Field[8] = Restrict;
 Field[8].InField = 7;
-Field[8].VolumesList = {vStruct[], vArmour[]};
+Field[8].VolumesList = {vSolid[], vArmour[]};
 Field[8].IncludeBoundary = 1;
 
 Field[9] = Min;
@@ -415,15 +370,13 @@ Mesh.SaveAll = 0;
 //==============================================================================
 
 Printf("==============================================================");
-Printf("BLANKET SLICE: TAPERED PLATE, 4 NESTED U-CHANNELS, UNIFORM OFFSETS");
-Printf("back / front width, depth  = %.4e / %.4e / %.4e m", Wb, Wf, H);
-Printf("plate front fillet R0      = %.4e m", R0);
-Printf("slice thickness Tz         = %.4e m (z walls %.4e each side of channel 1)", Tz, tz);
-Printf("armour / first wall        = %.4e / %.4e m", tArm, tFW);
-Printf("gap between channels       = %.4e m; core cut-out %g at offset %.4e m (radius %.4e)",
-       g, coreCut, dCore, R0 - dCore);
-Printf("volumes fluid/struct/arm   = %g / %g / %g", #vFluid[], #vStruct[], #vArmour[]);
+Printf("BLANKET SLICE: PLATE %.4e (back) x %.4e (height) m, sides %g deg, R %.4e m",
+       Wb, H, angD, rP);
+Printf("front width = %.4e m, first wall = %.4e m, slice thickness Tz = %.4e m",
+       Wb - 2.0 * H / Tan(ang), tFW, Tz);
+Printf("volumes fluid / solid / armour = %g / %g / %g", #vFluid[], #vSolid[], #vArmour[]);
 Printf("faces: inlets %g, outlets %g, heated %g, adiabatic %g, interface %g",
        #sInlet[], #sOutlet[], #sHeated[], #sAdiabatic[], #sInterface[]);
-Printf("sizes: wall %.3e, core %.3e, front %.3e, solid %.3e m", hWall, hCore, hFront, hSolid);
+Printf("sizes: wall %.3e, core %.3e, first wall %.3e, solid %.3e m",
+       hWall, hCore, hFront, hSolid);
 Printf("==============================================================");
