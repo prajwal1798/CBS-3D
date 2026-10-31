@@ -7,6 +7,8 @@
 #   OUTLETS  : BC 520, 0 Pa GAUGE
 #   HEATING  : BC 532 (FRONT FACE + R6 FILLETS) 1.0e5 W/m2
 #   OUTPUT   : ONE .pvtu EVERY 50000 ITERATIONS (~0.3 GB EACH AT h5) AND AT THE STOP
+#   PSEUDO-TIME: LOCAL TIME STEPPING (ilots = 1): EVERY ELEMENT AT ITS OWN
+#              STABLE STEP; STEADY RESULT ONLY (THE TRANSIENT IS NOT PHYSICAL)
 #   STEADY   : STOPS WHEN RelU,V,W < l2norm_vel AND RelT < l2norm_temp
 #              (AFTER steady_min_iterations); CHECK THE ENERGY BALANCE AFTER.
 # LINES STARTING WITH # ARE COMMENTS.
@@ -24,7 +26,7 @@ ntime transient_on dtfixed dtfix iwrite
 csafm theta1
 0.50  1.00
 CBS3D timestep controls: cbs_scheme ilots htype step2_check rem_deltp beta_opt dtfix_end csafm2 epsilon1 deltr
-1  0  1  0  0  1  0  2.0  1.0e-6  1.0e20
+1  1  1  0  0  1  0  2.0  1.0e-6  1.0e20
 Re Pr Ra Ri
 1870.0  6.14  0.0  0.0
 Convection Type (1 - Natural, 0 - Mixed/Forced)
