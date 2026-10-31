@@ -83,7 +83,7 @@ newest_run() {
 progress() {
     # LAST "it=" PROGRESS LINE OF A solver.out, WITHOUT COLOURS
     sed 's/\x1b\[[0-9;]*m//g' "$1" 2>/dev/null | tr '\r' '\n' |
-        grep -oE "it=[0-9]+/[0-9]+.*" | tail -1 | cut -c1-170
+        grep -oE "(it=|Iteration )[0-9]+/[0-9]+.*" | tail -1 | cut -c1-170
 }
 
 case "$CMD" in
