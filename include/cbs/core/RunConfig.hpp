@@ -32,9 +32,27 @@
 
 #include <array>
 #include <string>
+#include <vector>
 
 namespace cbs
 {
+    //=========================================================================
+    // One depth-dependent volumetric heat-source profile (nuclear heating):
+    //
+    //     Q(x) = amplitude * exp(-d(x) / decay_length)      [W/m^3]
+    //
+    //     d(x) = max(0, (x - nuclear_origin) . n)            [m]
+    //
+    // where n is the unit normal pointing from the first-wall plane into
+    // the blanket.  One profile per material ID.
+    //=========================================================================
+    struct NuclearHeatingProfile
+    {
+        Int material_id = -1;
+        Real amplitude = 0.0;
+        Real decay_length = 0.0;
+    };
+
     struct RunConfig
     {
         // Base name of the current problem.
@@ -256,6 +274,21 @@ namespace cbs
 
         // Positive heat_flux_bc means heat entering BC 532.
         Real heat_flux_bc = 0.0;
+
+        // --------------------------------------------------------------------
+        // Depth-dependent volumetric heating (optional .par block)
+        // --------------------------------------------------------------------
+        // nuclear_heating_on:
+        //     0  off; Qvol_e keeps the constant .matprop value
+        //     1  Qvol_e(ie) = A_m exp(-d/lambda_m) at the element centroid
+        //        for every material listed in nuclear_profiles
+        //
+        // nuclear_origin: any point on the first-wall (plasma-facing) plane
+        // nuclear_normal: unit normal from that plane into the blanket
+        Int nuclear_heating_on = 0;
+        std::array<Real, 3> nuclear_origin = { 0.0, 0.0, 0.0 };
+        std::array<Real, 3> nuclear_normal = { 0.0, 0.0, 0.0 };
+        std::vector<NuclearHeatingProfile> nuclear_profiles;
 
 
         // --------------------------------------------------------------------

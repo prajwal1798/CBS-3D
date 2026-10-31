@@ -3,6 +3,8 @@
 # FILE      : cbs_case.sh
 # PURPOSE   : ONE COMMAND FROM A GMSH .geo FILE TO A READY CBS3D CASE.
 #               1. GMSH CLI       .geo  -> .msh (MSH 2.2)
+#                  (OR GIVE A READY .msh INSTEAD OF THE .geo: IT IS COPIED
+#                   AND NOT RE-MESHED; --clscale IS THEN IGNORED)
 #               2. gmsh_to_cbs.py .msh  -> .plt .bco .material .par .matprop
 #               3. mesh_summary.py      -> RESULT: PASS / FAIL
 #               4. (--parts N)          -> N RANK-LOCAL CASES FOR MPI
@@ -11,6 +13,7 @@
 # USAGE     : bash tools/cbs_case.sh GEO PAR MATPROP OUT_DIR [OPTIONS]
 #
 #   GEO       GMSH GEOMETRY WITH Physical Surface(...)/Physical Volume(...)
+#             OR A MESH (.msh, ANY GMSH FORMAT) MADE FROM SUCH A GEOMETRY
 #   PAR       SOLVER CONTROLS (COPIED UNCHANGED)
 #   MATPROP   MATERIAL TABLE (COPIED UNCHANGED)
 #   OUT_DIR   NEW CASE FOLDER. LAYOUT:
@@ -48,7 +51,9 @@ MATPROP="$(readlink -f "$3")"
 OUT="$4"
 shift 4
 
-NAME="$(basename "$GEO" .geo)"
+NAME="$(basename "$GEO")"
+NAME="${NAME%.geo}"
+NAME="${NAME%.msh}"
 PARTS=0
 CLSCALE=1
 THREADS="${OMP_NUM_THREADS:-1}"
@@ -103,10 +108,16 @@ OUT="$(readlink -f "$OUT")"
 # ================================
 # -3 MESHES THE VOLUME AND WRITES -o. (DO NOT ADD -save HERE: WITH A .geo IT
 # WRITES THE FILE BEFORE MESHING, GIVING AN EMPTY MESH.)
+if [[ "$GEO" == *.msh ]]; then
+    echo "== 1/4 GMSH  : READY MESH $GEO (NOT RE-MESHED)"
+    cp "$GEO" "$OUT/mesh/$NAME.msh"
+    : > "$OUT/mesh/gmsh.log"
+else
 echo "== 1/4 GMSH  : $GEO"
 "$GMSH" "$GEO" -3 -format msh2 -clscale "$CLSCALE" -nt "$THREADS" \
     -o "$OUT/mesh/$NAME.msh" > "$OUT/mesh/gmsh.log" 2>&1 || {
     tail -20 "$OUT/mesh/gmsh.log"; echo "ERROR: GMSH FAILED; SEE $OUT/mesh/gmsh.log" >&2; exit 1; }
+fi
 # GMSH CAN REPORT ERRORS (E.G. "No elements in volume") AND STILL EXIT 0.
 if grep -q "^Error" "$OUT/mesh/gmsh.log"; then
     grep "^Error" "$OUT/mesh/gmsh.log" | head -5

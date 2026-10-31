@@ -4,7 +4,9 @@
 //=============================================================================
 
 #include "cbs/io/MeshIO.hpp"
+#include "cbs/preprocess/NuclearHeating.hpp"
 
+#include <cctype>
 #include <cmath>
 #include <fstream>
 #include <iostream>
@@ -399,15 +401,10 @@ namespace cbs
         //     sa_min_wall_distance sa_min_stilde sa_nu_tilde_floor
         //     sa_use_stilde_limiter sa_implicit_destruction [sa_nu_tilde_ceiling_ratio]
         //-------------------------------------------------------------------------
-        void read_optional_spalart_allmaras_controls(std::istream& in, CBSStateSI& s)
+        void read_spalart_allmaras_controls_after_label(std::istream& in, CBSStateSI& s)
         {
             std::string label;
             std::string line;
-
-            if (!read_data_line(in, label))
-            {
-                return;
-            }
 
             if (!read_data_line(in, line))
             {
@@ -516,6 +513,156 @@ namespace cbs
                     }
 
                     s.cfg.sa_nu_tilde_ceiling_ratio = ceiling_ratio;
+                }
+            }
+        }
+
+        //-------------------------------------------------------------------------
+        // Lower-case copy of a label line, used to recognise optional blocks.
+        //-------------------------------------------------------------------------
+        std::string lower_label(const std::string& label)
+        {
+            std::string out = label;
+
+            for (char& c : out)
+            {
+                c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+            }
+
+            return out;
+        }
+
+        //-------------------------------------------------------------------------
+        // Reads the optional depth-dependent volumetric-heating block.
+        //
+        // The label line has already been read and contains "nuclear_heating".
+        // Layout (comment lines starting with # or ! are allowed anywhere):
+        //
+        //     Nuclear heating: nuclear_heating_on x0 y0 z0 nx ny nz nprofiles
+        //     1  0.0 0.28 0.0  0.0 -1.0 0.0  1
+        //     Nuclear heating profiles: material_id A_W_per_m3 lambda_m
+        //     1  1.6e6  0.15
+        //
+        // with one data line per profile.  (x0,y0,z0) is any point on the
+        // first-wall plane and (nx,ny,nz) points from it into the blanket.
+        //-------------------------------------------------------------------------
+        void read_nuclear_heating_controls_after_label(std::istream& in, CBSStateSI& s)
+        {
+            std::string label;
+            std::string line;
+
+            if (!read_data_line(in, line))
+            {
+                throw std::runtime_error(
+                    "MeshIO::readParameterFile - missing nuclear-heating data line");
+            }
+
+            Int nprofiles = 0;
+
+            {
+                std::istringstream iss(line);
+
+                if (!(iss >> s.cfg.nuclear_heating_on
+                    >> s.cfg.nuclear_origin[0]
+                    >> s.cfg.nuclear_origin[1]
+                    >> s.cfg.nuclear_origin[2]
+                    >> s.cfg.nuclear_normal[0]
+                    >> s.cfg.nuclear_normal[1]
+                    >> s.cfg.nuclear_normal[2]
+                    >> nprofiles))
+                {
+                    throw std::runtime_error(
+                        "MeshIO::readParameterFile - invalid nuclear-heating line; expected "
+                        "nuclear_heating_on x0 y0 z0 nx ny nz nprofiles");
+                }
+            }
+
+            if (s.cfg.nuclear_heating_on < 0 || s.cfg.nuclear_heating_on > 1)
+            {
+                throw std::runtime_error(
+                    "MeshIO::readParameterFile - nuclear_heating_on must be 0 or 1");
+            }
+
+            if (nprofiles < 0)
+            {
+                throw std::runtime_error(
+                    "MeshIO::readParameterFile - nuclear-heating nprofiles must be >= 0");
+            }
+
+            if (nprofiles > 0 && !read_data_line(in, label))
+            {
+                throw std::runtime_error(
+                    "MeshIO::readParameterFile - missing nuclear-heating profile label line");
+            }
+
+            s.cfg.nuclear_profiles.clear();
+
+            for (Int i = 1; i <= nprofiles; ++i)
+            {
+                if (!read_data_line(in, line))
+                {
+                    throw std::runtime_error(
+                        "MeshIO::readParameterFile - missing nuclear-heating profile "
+                        + std::to_string(i) + " of " + std::to_string(nprofiles));
+                }
+
+                std::istringstream iss(line);
+                NuclearHeatingProfile profile;
+
+                if (!(iss >> profile.material_id
+                    >> profile.amplitude
+                    >> profile.decay_length))
+                {
+                    throw std::runtime_error(
+                        "MeshIO::readParameterFile - invalid nuclear-heating profile line; "
+                        "expected material_id A_W_per_m3 lambda_m");
+                }
+
+                s.cfg.nuclear_profiles.push_back(profile);
+            }
+        }
+
+        //-------------------------------------------------------------------------
+        // Reads every optional block after the artificial-diffusion line.
+        //
+        // Recognised blocks, in any order, each at most once:
+        //
+        //     a label containing "nuclear_heating" -> volumetric heating profile
+        //     any other label                       -> Spalart-Allmaras controls
+        //
+        // A file that ends after art_diff keeps every default, so all older
+        // laminar, CHT and SA parameter files are read exactly as before.
+        //-------------------------------------------------------------------------
+        void read_optional_trailing_blocks(std::istream& in, CBSStateSI& s)
+        {
+            std::string label;
+            bool have_sa = false;
+            bool have_nuclear = false;
+
+            while (read_data_line(in, label))
+            {
+                if (lower_label(label).find("nuclear_heating") != std::string::npos)
+                {
+                    if (have_nuclear)
+                    {
+                        throw std::runtime_error(
+                            "MeshIO::readParameterFile - nuclear-heating block given twice");
+                    }
+
+                    read_nuclear_heating_controls_after_label(in, s);
+                    have_nuclear = true;
+                }
+                else
+                {
+                    if (have_sa)
+                    {
+                        throw std::runtime_error(
+                            "MeshIO::readParameterFile - unexpected line after the "
+                            "Spalart-Allmaras block: '" + label + "'");
+                    }
+
+                    read_spalart_allmaras_controls_after_label(in, s);
+                    have_sa = true;
                 }
             }
         }
@@ -749,6 +896,10 @@ namespace cbs
                 << "using default all-fluid material state "
                 << "(mat_elem=0) for all elements.\n";
         }
+
+        // Optional depth-dependent volumetric heating overwrites Qvol_e of
+        // the listed materials (needs coordinates and material IDs).
+        NuclearHeating::applyProfiles(s);
 
         initialiseFields(s);
     }
@@ -1371,7 +1522,7 @@ namespace cbs
         read_pressure_cg_controls(in, s);
         read_output_monitor_controls(in, s);
         read_artificial_diffusion_control(in, s);
-        read_optional_spalart_allmaras_controls(in, s);
+        read_optional_trailing_blocks(in, s);
 
         if (s.cfg.solver_opt < 1 || s.cfg.solver_opt > 3)
         {

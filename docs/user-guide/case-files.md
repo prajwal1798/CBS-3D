@@ -148,6 +148,44 @@ The parameter file controls the active numerical and physical modes, including:
 
 The parser is positional and historically compatible. Preserve labels, ordering and numeric blocks unless the reader is changed in the same commit.
 
+### Optional depth-dependent volumetric heating (nuclear heating)
+
+After the artificial-diffusion line (and before or after the optional
+Spalart–Allmaras block) a block whose label contains `nuclear_heating` sets a
+volumetric source that decays with depth from a plane, per material:
+
+```text
+Nuclear heating: nuclear_heating_on x0 y0 z0 nx ny nz nprofiles
+1  0.0  0.28  0.0  0.0  -1.0  0.0  1
+Nuclear heating profiles: material_id A_W_per_m3 lambda_m
+1  1.6e6  0.15
+```
+
+\[
+Q_e = A_m \exp\left(-\frac{d_e}{\lambda_m}\right), \qquad
+d_e = \max\left(0, (\mathbf{x}_{c,e} - \mathbf{x}_0)\cdot\hat{\mathbf{n}}\right)
+\]
+
+with $\mathbf{x}_0$ any point on the first-wall plane, $\hat{\mathbf{n}}$ the
+unit normal from that plane into the blanket and $\mathbf{x}_{c,e}$ the element
+centroid. One data line per material; the value is stored in `Qvol_e` before
+the time loop. A material with a profile must have `Qvol = 0` in the
+`.matprop`, and a solid profile requires `source_solid = 0`. Every run with the
+energy equation prints the whole-domain heat input, e.g.
+
+```text
+  HEAT INPUT (whole domain)
+    nuclear heating, material 1 : A = 1.600000e+06 W/m3, lambda = 1.500000e-01 m, volume = ... m3, Q = ... W
+    BC 532 surface flux : q = 1.000000e+05 W/m2, area = ... m2, Q = ... W
+    HEAT_INPUT_TOTAL_W = ...
+```
+
+which `tools/energy_balance.py` compares with the heat carried out by the
+coolant. Verified against the exact 1D solution in
+`cases/nuclear_heating_slab` (serial and MPI agree to round-off).
+
+Lines starting with `#` or `!` are comments anywhere in the `.par`.
+
 ### Required consistency
 
 - A PETSc pressure-solver option requires a PETSc-enabled executable.

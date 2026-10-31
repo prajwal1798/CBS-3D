@@ -26,6 +26,7 @@
 #include "cbs/parallel/Coloring.hpp"
 #include "cbs/parallel/HaloExchange.hpp"
 #include "cbs/parallel/PartitionMetadata.hpp"
+#include "cbs/preprocess/NuclearHeating.hpp"
 #include "cbs/preprocess/Preprocess.hpp"
 #include "cbs/solver/Convergence.hpp"
 #include "cbs/solver/Steps.hpp"
@@ -155,6 +156,9 @@ namespace cbs
         Preprocess::shapeFunctionDerivatives(s_);
         Preprocess::assignBoundaryFaceNumbers(s_);
         Preprocess::getNormals(s_);
+
+        // Whole-domain heat input (volumetric + BC 532), reduced over ranks.
+        NuclearHeating::reportHeatInput(s_);
 
         // The first numerically meaningful reverse-add and forward halo stage.
         Preprocess::massMatrix(s_);
@@ -578,6 +582,7 @@ namespace cbs
         Post::printStage("Boundary geometry", "face numbers and normals");
         Preprocess::assignBoundaryFaceNumbers(s_);
         Preprocess::getNormals(s_);
+        NuclearHeating::reportHeatInput(s_);
         Post::printStageDone("Boundary geometry", "normals ready");
 
         // Assemble the lumped nodal mass used by the momentum equation and the

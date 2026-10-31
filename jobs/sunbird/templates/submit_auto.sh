@@ -14,6 +14,9 @@
 #   --time T      SLURM TIME LIMIT          (DEFAULT 24:00:00)
 #   --max N       NEVER USE MORE THAN N RANKS
 #   --dry-run     ONLY SHOW THE DECISION
+#   --par F       ONE .par FOR EVERY RANK OF THIS RUN (EXPORTS CBS3D_PAR)
+#   --matprop F   ONE .matprop FOR EVERY RANK OF THIS RUN (EXPORTS CBS3D_MATPROP)
+#   --sets "A B"  ONLY CONSIDER THESE READY SETS (E.G. "40" FOR A SMOKE TEST)
 #
 # NOTES     : A SNAPSHOT: OTHER USERS MAY TAKE CORES BEFORE THE JOB STARTS;
 #             THEN IT WAITS IN THE QUEUE. A RESTART MUST USE THE SAME N AS THE
@@ -21,7 +24,7 @@
 # ================================
 
 set -euo pipefail
-[[ "$#" -ge 2 ]] || { sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'; exit 1; }
+[[ "$#" -ge 2 ]] || { sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//'; exit 1; }
 
 source "$HOME/cbs3d_env.sh"
 CASE_DIR="$(readlink -f "$1")"
@@ -30,11 +33,15 @@ shift 2
 TIME="24:00:00"
 MAX=0
 DRY=0
+ONLY_SETS=""
 while [[ "$#" -gt 0 ]]; do
     case "$1" in
         --time)    TIME="$2"; shift 2 ;;
         --max)     MAX="$2";  shift 2 ;;
         --dry-run) DRY=1;     shift ;;
+        --par)     CBS3D_PAR="$(readlink -f "$2")"; export CBS3D_PAR; shift 2 ;;
+        --matprop) CBS3D_MATPROP="$(readlink -f "$2")"; export CBS3D_MATPROP; shift 2 ;;
+        --sets)    ONLY_SETS="$2"; shift 2 ;;
         *) echo "ERROR: UNKNOWN OPTION $1" >&2; exit 1 ;;
     esac
 done
@@ -53,6 +60,7 @@ for d in "$CASE_DIR"/partitions_*; do
     [[ -d "$d" ]] || continue
     N="${d##*_}"
     [[ "$N" =~ ^[0-9]+$ ]] || continue
+    if [[ -n "$ONLY_SETS" && " $ONLY_SETS " != *" $N "* ]]; then continue; fi
     HAVE=$(find "$d" -maxdepth 1 -type d -name 'rank_[0-9][0-9][0-9][0-9]' | wc -l)
     [[ "$HAVE" -eq "$N" ]] && READY+=("$N")
 done
@@ -94,6 +102,11 @@ NODES=$(( (PICK + CORES_PER_NODE - 1) / CORES_PER_NODE ))
 # WHOLE NODES ONLY WHEN N FILLS THEM (N = k x 128) AND k NODES ARE IDLE;
 # OTHERWISE SCATTERED CORES, SO NO EXCLUSIVE NODE SITS HALF EMPTY.
 if [[ $(( PICK % CORES_PER_NODE )) -eq 0 && "$NODES" -le "$WHOLE" ]]; then MODE=nodes; else MODE=any; fi
+for f in "${CBS3D_PAR:-}" "${CBS3D_MATPROP:-}"; do
+    [[ -z "$f" || -s "$f" ]] || { echo "ERROR: $f IS MISSING OR EMPTY" >&2; exit 1; }
+done
+[[ -n "${CBS3D_PAR:-}" ]] && echo "PAR    : $CBS3D_PAR (ALL RANKS)"
+[[ -n "${CBS3D_MATPROP:-}" ]] && echo "MATPROP: $CBS3D_MATPROP (ALL RANKS)"
 echo "CHOICE : $PICK RANKS, MODE $MODE$( [[ $MODE == nodes ]] && echo " ($NODES WHOLE NODE(S))"), TIME $TIME"
 
 [[ "$DRY" -eq 1 ]] && { echo "DRY RUN: NOTHING SUBMITTED"; exit 0; }

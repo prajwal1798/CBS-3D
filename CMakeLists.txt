@@ -40,6 +40,7 @@ set(CBS3D_CORE_SOURCES
     src/io/RestartIO.cpp
 
     src/preprocess/Preprocess.cpp
+    src/preprocess/NuclearHeating.cpp
     src/boundary/Boundary.cpp
     src/timestep/TimeStep.cpp
 

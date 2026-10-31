@@ -20,6 +20,9 @@
 #             PUTS ONE RANK ON EACH PHYSICAL CORE.
 #             THE PARTITIONS ARE HARD-LINKED INTO THE RUN FOLDER, SO EDITING
 #             A .par FOR ONE RUN NEVER CHANGES THE MASTER COPY.
+#             ONE .par / .matprop FOR ALL RANKS: export CBS3D_PAR=FILE AND/OR
+#             CBS3D_MATPROP=FILE BEFORE sbatch; THE RUN COPIES IT INTO EVERY
+#             RANK OF ITS PRIVATE COPY (THE PARTITION SET IS NOT CHANGED).
 # ================================
 #SBATCH --job-name=cbs3d_mpi
 #SBATCH --account=scw7008
@@ -67,8 +70,23 @@ RUN_DIR="$SLURM_SUBMIT_DIR/run_${CASE}_${SLURM_JOB_ID}"
 mkdir -p "$RUN_DIR/partitions"
 cp -al "$PART_ROOT/." "$RUN_DIR/partitions/"
 # A .par EDITED LATER MUST NOT WRITE THROUGH THE HARD LINK: GIVE EACH RANK ITS OWN.
-for f in "$RUN_DIR"/partitions/rank_*/*.par; do
-    cp --remove-destination "$(readlink -f "$f")" "$f.tmp" && mv "$f.tmp" "$f"
+# CBS3D_PAR / CBS3D_MATPROP (OPTIONAL): ONE MASTER FILE COPIED TO EVERY RANK.
+for ext in par matprop; do
+    var="CBS3D_${ext^^}"
+    master="${!var:-}"
+    if [[ -n "$master" ]]; then
+        [[ -s "$master" ]] || { echo "FATAL: $var=$master IS MISSING OR EMPTY" >&2; exit 1; }
+        master="$(readlink -f "$master")"
+        for d in "$RUN_DIR"/partitions/rank_*; do
+            r="${d##*rank_}"
+            cp --remove-destination "$master" "$d/${CASE}_rank_$r.$ext"
+        done
+        echo "MASTER $ext : $master -> ALL $NRANK RANKS"
+    elif [[ "$ext" == par ]]; then
+        for f in "$RUN_DIR"/partitions/rank_*/*.par; do
+            cp --remove-destination "$(readlink -f "$f")" "$f.tmp" && mv "$f.tmp" "$f"
+        done
+    fi
 done
 
 {
@@ -79,7 +97,11 @@ done
     echo "exe       : $CBS3D_MPI_EXE"
     echo "checkpoint: every ${CBS3D_CHECKPOINT_EVERY:-0} iterations (0 = off; export CBS3D_CHECKPOINT_EVERY before sbatch)"
     echo "git commit: $(git -C "$CBS3D_CODE" rev-parse HEAD 2>/dev/null || echo unknown)"
-    sha256sum "$CBS3D_MPI_EXE" "$RUN_DIR/partitions/rank_0000/${CASE}_rank_0000.par"
+    echo "master par: ${CBS3D_PAR:-none (partition copies)}"
+    echo "master mat: ${CBS3D_MATPROP:-none (partition copies)}"
+    echo "temp. AFC : ${CBS3D_TEMPERATURE_AFC:-0} (CBS3D_TEMPERATURE_AFC)"
+    sha256sum "$CBS3D_MPI_EXE" "$RUN_DIR/partitions/rank_0000/${CASE}_rank_0000.par" \
+        "$RUN_DIR/partitions/rank_0000/${CASE}_rank_0000.matprop"
 } > "$RUN_DIR/run_record.txt"
 
 # ================================

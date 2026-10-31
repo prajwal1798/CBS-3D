@@ -324,6 +324,24 @@ rsync -av sunbird:/scratch/scw7008/<user>/cases/NAME/run_NAME_<jobid>/output/ ~/
 rank its own `.par`, records the git commit and checksums, and launches
 `srun --mpi=pmix ... cbs3d_parallel NAME <run>/partitions`.
 
+`CBS3D_PAR=FILE` / `CBS3D_MATPROP=FILE` (exported before `sbatch`, or
+`submit_auto.sh --par F --matprop F`) replace every rank's `.par` / `.matprop`
+in the run's private copy, so one master file drives any partition set.
+
+### 6.4a Self-check and the blanket chain
+
+```bash
+bash $T/selfcheck.sh            # executables newer than HEAD, ctest, then a 4-core job:
+                                # serial + 4 ranks vs an exact solution -> "SELF-CHECK PASS"
+bash $T/blanket.sh update P     # git am P, build, self-check (no P: git pull --ff-only)
+bash $T/blanket.sh setup MSH    # conversion job, then partitions 40 80 128 256 after it
+bash $T/blanket.sh smoke L1     # 300 iterations on 40 ranks
+bash $T/blanket.sh run L1       # largest ready set that fits the free cores
+bash $T/blanket.sh check        # mass/energy balance (tools/energy_balance.py) + residuals
+```
+
+See `cases/blanket_slice/README.md` for the stages and loads.
+
 ### 6.4 Pitfalls found on Sunbird2
 
 - `~/cbs3d_env.sh` starts with `module purge`; the venv Python needs the
