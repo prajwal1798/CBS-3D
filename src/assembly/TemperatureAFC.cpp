@@ -218,6 +218,20 @@ namespace cbs
                 const Real advection_factor =
                     s.rho_cp_e(ie) * s.detJ(ie) / 120.0;
 
+                // div(u_h): the Step-4 residual uses the conservative form
+                // div(rhoCp u (T - T_ref)) (EnergyAssembly.cpp). Its linear
+                // part adds - rhoCp div(u_h) int N_a N_b to the operator.
+                Real div_u = 0.0;
+
+                for (Int b = 1; b <= s.cfg.nep; ++b)
+                {
+                    const Int ip = s.intma(b, ie);
+                    div_u +=
+                        s.unkno(1, ip) * grad(s, ie, 1, b) +
+                        s.unkno(2, ip) * grad(s, ie, 2, b) +
+                        s.unkno(3, ip) * grad(s, ie, 3, b);
+                }
+
                 for (Int a = 1; a <= s.cfg.nep; ++a)
                 {
                     const Int ip = s.intma(a, ie);
@@ -232,7 +246,8 @@ namespace cbs
                             advection_factor *
                             (u_weight * grad(s, ie, 1, b) +
                              v_weight * grad(s, ie, 2, b) +
-                             w_weight * grad(s, ie, 3, b));
+                             w_weight * grad(s, ie, 3, b) +
+                             div_u * (a == b ? 2.0 : 1.0));
                     }
                 }
 
@@ -265,7 +280,9 @@ namespace cbs
                             vbar * grad(s, ie, 2, b) +
                             wbar * grad(s, ie, 3, b);
 
-                        operator_matrix[a][b] +=
+                        // Streamline (characteristic) diffusion: same sign as
+                        // conduction, - dt/2 rhoCp (u.gradN_a)(u.gradN_b).
+                        operator_matrix[a][b] -=
                             stabilisation_factor * u_grad_a * u_grad_b;
                     }
                 }

@@ -177,6 +177,40 @@ namespace cbs
 
 
         //=====================================================================
+        // Divergence of the P1 velocity in one element (constant):
+        //
+        //     div(u_h) = sum_b u_b . grad(N_b)
+        //
+        // The CBS velocity satisfies continuity only weakly, so div(u_h) is
+        // small but not zero. With the convective form alone the global heat
+        // balance carries an error int rhoCp (T - T_ref) div(u_h); with local
+        // time stepping (larger pressure stabilisation) this was 24 % of the
+        // heat input on the U-channel check case. Adding (T - T_ref) div(u_h)
+        // gives the conservative form div(rhoCp u (T - T_ref)), whose element
+        // sum is exactly the boundary enthalpy flux relative to the inlet
+        // temperature T_ref.
+        //=====================================================================
+        Real element_velocity_divergence(
+            const CBSStateSI& s,
+            Int ie)
+        {
+            Real div_u = 0.0;
+
+            for (Int b = 1; b <= s.cfg.nep; ++b)
+            {
+                const Int ip = s.intma(b, ie);
+
+                div_u +=
+                    s.unkno(1, ip) * grad(s, ie, 1, b) +
+                    s.unkno(2, ip) * grad(s, ie, 2, b) +
+                    s.unkno(3, ip) * grad(s, ie, 3, b);
+            }
+
+            return div_u;
+        }
+
+
+        //=====================================================================
         // Adds the Galerkin convection contribution for one fluid element.
         //
         // Strong thermal-advection term:
@@ -251,6 +285,22 @@ namespace cbs
                 w_sum += s.unkno(3, ip);
             }
 
+            // Conservative correction (see element_velocity_divergence):
+            //
+            //   - int_Omega N_a rhoCp (T - T_ref) div(u_h) dOmega
+            //
+            // so that the element sum of the advection term is the boundary
+            // flux of rhoCp u (T - T_ref) even though the discrete CBS velocity
+            // is only weakly divergence-free.
+            const Real div_u = element_velocity_divergence(s, ie);
+            const Real t_ref = s.cfg.inlet_temperature;
+            Real t_sum = 0.0;
+
+            for (Int b = 1; b <= s.cfg.nep; ++b)
+            {
+                t_sum += s.temperature1(s.intma(b, ie)) - t_ref;
+            }
+
             for (Int a = 1; a <= s.cfg.nep; ++a)
             {
                 const Int ip = s.intma(a, ie);
@@ -264,7 +314,10 @@ namespace cbs
                     v_weight * dTdy +
                     w_weight * dTdz;
 
-                lrhs[a] -= adv_factor * advT;
+                const Real theta_weight =
+                    t_sum + (s.temperature1(ip) - t_ref);
+
+                lrhs[a] -= adv_factor * (advT + div_u * theta_weight);
             }
         }
 
@@ -352,7 +405,7 @@ namespace cbs
                     vbar * grad(s, ie, 2, a) +
                     wbar * grad(s, ie, 3, a);
 
-                lrhs[a] += tau_factor * u_gradNa * advT;
+                lrhs[a] -= tau_factor * u_gradNa * advT;
             }
         }
 
