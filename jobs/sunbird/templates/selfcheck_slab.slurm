@@ -21,6 +21,7 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks=4
 #SBATCH --cpus-per-task=1
+#SBATCH --hint=nomultithread
 #SBATCH --mem-per-cpu=2G
 #SBATCH --time=01:00:00
 #SBATCH --output=cbs3d_selfcheck_%j.out
@@ -56,7 +57,11 @@ python3 "$CBS3D_CODE/tools/export_rank_local_cbs.py" serial/slab --parts 4 \
 # ================================
 ( cd serial && "$CBS3D_SERIAL_EXE" slab > solver.out 2>&1 ) || fail "serial run (see $WORK/serial/solver.out)"
 mkdir -p mpi4
-( cd mpi4 && srun --mpi="$CBS3D_SRUN_MPI" --ntasks=4 "$CBS3D_MPI_EXE" slab "$WORK/p4" \
+# ONE RANK PER PHYSICAL CORE. WITHOUT --hint/--cpu-bind THE 4 RANKS WERE
+# BOUND TO 2 HYPERTHREADS AND RAN ~1000 TIMES SLOWER (BUSY-POLLING MPI).
+( cd mpi4 && srun --mpi="$CBS3D_SRUN_MPI" --ntasks=4 --cpus-per-task=1 \
+    --hint=nomultithread --cpu-bind=cores --distribution=block:block \
+    "$CBS3D_MPI_EXE" slab "$WORK/p4" \
     > solver.out 2>&1 ) || fail "4-rank run (see $WORK/mpi4/solver.out)"
 
 # ================================
