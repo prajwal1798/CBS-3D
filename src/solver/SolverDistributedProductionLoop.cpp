@@ -1336,13 +1336,13 @@ namespace cbs
 
             if (!energy.converged)
             {
-                throw std::runtime_error(
-                    "Implicit steady energy did not converge: AFC iterations=" +
-                    std::to_string(energy.afc_iterations) +
-                    ", last max|dT|=" + std::to_string(energy.afc_change) +
-                    " K, nonlinear relative residual=" +
-                    std::to_string(energy.residual_check) +
-                    ", total Krylov iterations=" + std::to_string(energy.iterations));
+                std::ostringstream message;
+                message << "Implicit steady energy did not converge: AFC iterations="
+                        << energy.afc_iterations
+                        << ", last max|dT|=" << energy.afc_change
+                        << " K, nonlinear relative residual=" << energy.residual_check
+                        << ", total Krylov iterations=" << energy.iterations;
+                throw std::runtime_error(message.str());
             }
 
             DistributedPost::writeSolution(s_, case_name_, 1);
