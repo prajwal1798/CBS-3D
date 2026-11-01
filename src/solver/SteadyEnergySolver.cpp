@@ -577,6 +577,13 @@ namespace cbs
             check_petsc(KSPGetConvergedReason(ksp, &reason), "KSPGetConvergedReason");
             check_petsc(KSPGetIterationNumber(ksp, &iterations), "KSPGetIterationNumber");
             total_krylov += static_cast<Int>(iterations);
+            if (reason <= 0)
+            {
+                throw std::runtime_error(
+                    "Implicit energy PETSc KSP failed at AFC iteration " +
+                    std::to_string(it) + ", reason " +
+                    std::to_string(static_cast<int>(reason)));
+            }
             all_converged = all_converged && reason > 0;
 
             nodes_from_vec(solved, s, dof, x);
