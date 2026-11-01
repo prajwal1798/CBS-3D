@@ -55,6 +55,7 @@ for variable in \
     CBS3D_STEADY_ENERGY CBS3D_STEADY_ENERGY_MAXIT \
     CBS3D_STEADY_ENERGY_RELAX CBS3D_STEADY_ENERGY_TOL \
     CBS3D_STEADY_ENERGY_RESIDUAL_TOL \
+    CBS3D_STEADY_ENERGY_ANDERSON_M \
     CBS3D_VERBOSE CBS3D_WALL_B CBS3D_WALL_KAPPA
 do
     unset "$variable"
@@ -111,6 +112,7 @@ mkdir -p mpi4
 # ================================
 mkdir -p mpi4_implicit
 ( cd mpi4_implicit && CBS3D_TEMPERATURE_AFC=1 CBS3D_STEADY_ENERGY=1 \
+    CBS3D_STEADY_ENERGY_ANDERSON_M=4 \
     srun --mpi="$CBS3D_SRUN_MPI" --ntasks=4 --cpus-per-task=1 \
     --hint=nomultithread --cpu-bind=cores --distribution=block:block \
     "$CBS3D_MPI_EXE" slab "$WORK/p4" \
