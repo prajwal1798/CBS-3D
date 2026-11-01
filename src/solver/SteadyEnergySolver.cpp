@@ -766,7 +766,7 @@ namespace cbs
 
             if (n_mix > 0 &&
                 (global_values[2] != 0.0 ||
-                 global_values[0] > 5.0 * std::max(global_values[1], 1.0e-12)))
+                 global_values[0] > 100.0 * std::max(global_values[1], 1.0e-12)))
             {
                 // RESTART THE HISTORY AND USE THE ORIGINAL BOUNDED STEP.
                 anderson_x.clear();
@@ -794,7 +794,12 @@ namespace cbs
             if (afc && s.mpi_rank == 0 && (it <= 5 || it % 10 == 0))
             {
                 std::cout << "  [AFC] iteration " << it << ": max |dT| = " << last_change
-                          << " K, Krylov " << iterations << "\n" << std::flush;
+                          << " K, Krylov " << iterations;
+                if (anderson_m > 0)
+                {
+                    std::cout << ", Anderson history " << n_mix;
+                }
+                std::cout << "\n" << std::flush;
             }
             if (afc && last_change < afc_tol)
             {
