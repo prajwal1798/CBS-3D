@@ -200,6 +200,23 @@ namespace cbs
         // UNDER-RELAXATION OF THE DEFECT CORRECTION (THE ZALESAK LIMITER IS
         // NOT SMOOTH; 0.5 CONVERGED WHERE 1.0 CYCLED). NO AFC: ONE EXACT SOLVE.
         const Real afc_relax = afc ? env_real("CBS3D_STEADY_ENERGY_RELAX", 0.5) : 1.0;
+        // Positive diagonal shift represents transient heat-capacity / delta t:
+        // (A_low + gamma * C/dt) delta T = R_AFC(T). gamma=0 recovers the
+        // unshifted steady preconditioner that amplified the U-channel defect.
+        const Real pseudotime_shift =
+            afc ? env_real("CBS3D_STEADY_ENERGY_PSEUDOTIME_SHIFT", 1.0) : 0.0;
+        if (!std::isfinite(pseudotime_shift) || pseudotime_shift < 0.0)
+        {
+            throw std::runtime_error(
+                "CBS3D_STEADY_ENERGY_PSEUDOTIME_SHIFT must be finite and nonnegative");
+        }
+        const Real armijo_c1 =
+            afc ? env_real("CBS3D_STEADY_ENERGY_ARMIJO_C1", 1.0e-5) : 1.0e-4;
+        if (!std::isfinite(armijo_c1) || armijo_c1 < 0.0 || armijo_c1 >= 1.0)
+        {
+            throw std::runtime_error(
+                "CBS3D_STEADY_ENERGY_ARMIJO_C1 must be finite and in [0,1)");
+        }
 
         // ================================
         // 1. DOF MAP: ONE ROW PER GLOBAL NODE, OWNED NODES CONTIGUOUS
@@ -247,7 +264,9 @@ namespace cbs
         s.temperature = saved_temperature;
 
         // ================================
-        // 3. MATRIX  A = -(M + D)  (FREE ROWS), IDENTITY (DIRICHLET ROWS).
+        // 3. MATRIX  A = -(M + D) + gamma * diag(1/elcoe2p) (FREE ROWS),
+        //    IDENTITY (DIRICHLET ROWS). gamma=0 is the original steady form.
+        //    Positive gamma adds implicit pseudo-transient heat capacity.
         //    D = GRAPH VISCOSITY OF THE FLUID ELEMENTS WHEN AFC IS ON
         //    (d_ab = max(0, -M_ab, -M_ba), AS IN TemperatureAFC.cpp), WHICH
         //    MAKES THE LOW-ORDER OFF-DIAGONALS l_ab = M_ab + d_ab >= 0.
@@ -323,11 +342,29 @@ namespace cbs
 
         for (const Int ip : s.owned_nodes)
         {
+            const PetscInt row = static_cast<PetscInt>(dof(ip));
             if (fixed(ip) != 0)
             {
-                const PetscInt row = static_cast<PetscInt>(dof(ip));
                 check_petsc(MatSetValue(A, row, row, 1.0, ADD_VALUES),
                             "MatSetValue(Dirichlet)");
+            }
+            else if (pseudotime_shift > 0.0)
+            {
+                const Real inv_ctimestep = 1.0 / s.elcoe2p(ip);
+                if (!(inv_ctimestep > 0.0) || !std::isfinite(inv_ctimestep))
+                {
+                    throw std::runtime_error(
+                        "SteadyEnergySolver: invalid pseudo-time thermal diagonal");
+                }
+                const Real mass_shift = pseudotime_shift * inv_ctimestep;
+                if (!std::isfinite(mass_shift))
+                {
+                    throw std::runtime_error(
+                        "SteadyEnergySolver: non-finite pseudo-time shift");
+                }
+                check_petsc(
+                    MatSetValue(A, row, row, mass_shift, ADD_VALUES),
+                    "MatSetValue(pseudo-time thermal diagonal)");
             }
         }
 
@@ -723,7 +760,7 @@ namespace cbs
                 // Evaluate it AND the stable explicit pseudo-time direction,
                 // then retain the strongest residual reduction. Never accept
                 // an infinitesimal PETSc step merely because it was tried first.
-                const Real sufficient_decrease = 1.0e-4;
+                const Real sufficient_decrease = armijo_c1;
                 const Real max_rate_growth = 1.25;
                 Array1D<Real> trial = temperature;
                 Array1D<Real> best_trial = temperature;
