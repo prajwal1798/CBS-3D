@@ -21,6 +21,8 @@ Measured (lc = 5 mm, 544 tets, steady stop at 89 434 iterations):
 |---|---|---|
 | serial | 0.21 K (4.2e-4 of T(L)) | 16.916 W (1e-4) |
 | 2 MPI ranks | same field to 2.3e-13 K | 16.916 W |
+| 2 MPI ranks, `CBS3D_TEMPERATURE_AFC=1` | same field to 2.3e-13 K (AFC limits fluid elements only) | 16.916 W |
+| 2 MPI ranks, AFC on solids too (`CBS3D_AFC_SOLID=1`, the behaviour before 2026-11-01) | 3.3 K off serial, stops at 88 597 | 16.916 W |
 
 `jobs/sunbird/templates/selfcheck_slab.slurm` repeats this (serial and 4
 ranks) and prints `SELF-CHECK PASS`; `tools/check_nuclear_slab.py` does the

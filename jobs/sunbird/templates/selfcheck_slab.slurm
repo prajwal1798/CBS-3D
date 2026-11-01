@@ -6,6 +6,7 @@
 #               1. MESH slab.geo, CONVERT TO A SERIAL CBS CASE
 #               2. SERIAL RUN    (CBS3D_SERIAL_EXE)
 #               3. 4-RANK MPI RUN (CBS3D_MPI_EXE ON 4 PARTITIONS)
+#                  (WITH CBS3D_TEMPERATURE_AFC=1, AS IN PRODUCTION)
 #               4. BOTH AGAINST THE EXACT 1D TEMPERATURE (tools/check_nuclear_slab.py),
 #                  AND THE MPI FIELD AGAINST THE SERIAL FIELD, NODE BY NODE
 #               5. THE PRINTED HEAT INPUT AGAINST ITS EXACT VALUE (16.92 W)
@@ -59,7 +60,11 @@ python3 "$CBS3D_CODE/tools/export_rank_local_cbs.py" serial/slab --parts 4 \
 mkdir -p mpi4
 # ONE RANK PER PHYSICAL CORE. WITHOUT --hint/--cpu-bind THE 4 RANKS WERE
 # BOUND TO 2 HYPERTHREADS AND RAN ~1000 TIMES SLOWER (BUSY-POLLING MPI).
-( cd mpi4 && srun --mpi="$CBS3D_SRUN_MPI" --ntasks=4 --cpus-per-task=1 \
+# THE MPI RUN USES THE PRODUCTION SETTINGS OF blanket.sh (TEMPERATURE AFC,
+# MONOTONE LTS). AFC LIMITS FLUID ELEMENTS ONLY, SO THE SOLID BAR MUST STILL
+# EQUAL THE SERIAL GALERKIN FIELD TO ROUND-OFF.
+( cd mpi4 && CBS3D_TEMPERATURE_AFC=1 CBS3D_LTS_MONOTONE=1 \
+    srun --mpi="$CBS3D_SRUN_MPI" --ntasks=4 --cpus-per-task=1 \
     --hint=nomultithread --cpu-bind=cores --distribution=block:block \
     "$CBS3D_MPI_EXE" slab "$WORK/p4" \
     > solver.out 2>&1 ) || fail "4-rank run (see $WORK/mpi4/solver.out)"

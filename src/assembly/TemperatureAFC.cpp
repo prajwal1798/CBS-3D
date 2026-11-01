@@ -545,8 +545,23 @@ namespace cbs
         // pair a,b, d_ab=max(0,-A_ab,-A_ba) makes both low-order off-diagonal
         // coefficients non-negative.  The equal-and-opposite raw flux stored
         // below removes this added diffusion when alpha_ab=1.
+        //
+        // ONLY FLUID ELEMENTS ARE LIMITED: THE OVER/UNDERSHOOTS COME FROM
+        // ADVECTION AT HIGH CELL PECLET NUMBER. IN A SOLID THE GALERKIN
+        // CONDUCTION IS THE ACCURATE SCHEME; LIMITING IT THERE (GRAPH
+        // VISCOSITY ON EVERY OBTUSE PAIR, CLIPPED AT THE EXTREMA) GAVE A
+        // 3.3 K ERROR ON THE 514 K CONDUCTION SLAB (SERIAL: 0.21 K).
+        // CBS3D_AFC_SOLID=1 RESTORES THE OLD BEHAVIOUR (ALL ELEMENTS).
+        const bool limit_solid =
+            environment_flag_enabled("CBS3D_AFC_SOLID");
+
         for (Int ie = 1; ie <= s.cfg.nelem; ++ie)
         {
+            if (!limit_solid && !is_fluid_element(s, ie))
+            {
+                continue;
+            }
+
             Real element_operator[5][5]{};
             build_element_operator(s, ie, element_operator);
 
