@@ -410,9 +410,16 @@ namespace cbs
 
         std::vector<Array1D<Real>> anderson_x;
         std::vector<Array1D<Real>> anderson_f;
+        bool linear_system_solved = false;
+        Real accepted_rate = 0.0;
+        Real accepted_scale = 0.0;
+        std::string accepted_method = "none";
 
         for (Int it = 1; it <= outer_max; ++it)
         {
+            Real initial_rate = 0.0;
+            Real initial_raw_residual = 0.0;
+            Array1D<Real> initial_residual(s.cfg.npoin);
             if (afc)
             {
                 // Compute EXACTLY the same nonlinear residual and Zalesak
@@ -421,10 +428,48 @@ namespace cbs
                 // A_low * deltaT = R_explicit_AFC(T), with Dirichlet deltaT=0.
                 s.temperature = temperature;
                 explicit_residual(s, heat_flux_load, true);
+                Real local_rate = 0.0;
+                Real local_raw = 0.0;
                 for (const Int ip : s.owned_nodes)
                 {
                     rhs_nodal(ip) = fixed(ip) != 0 ? 0.0 : s.rhs1(ip);
+                    if (fixed(ip) == 0)
+                    {
+                        local_rate = std::max(
+                            local_rate,
+                            std::abs(s.rhs1(ip) * s.elcoe2p(ip)));
+                        local_raw = std::max(local_raw, std::abs(s.rhs1(ip)));
+                    }
                 }
+                initial_rate = global_max(local_rate);
+                initial_raw_residual = global_max(local_raw);
+                initial_residual = s.rhs1;
+
+                // A tiny physical pseudo-time update AND a small raw defect
+                // certify the loaded iterate without a potentially unstable
+                // PETSc correction. Do not confuse a small update with an
+                // acceptable nonlinear residual by itself.
+                const Real normalised_raw =
+                    rhs_max > 0.0 ? initial_raw_residual / rhs_max
+                                  : initial_raw_residual;
+                if (initial_rate < afc_tol &&
+                    normalised_raw < residual_tol)
+                {
+                    last_change = 0.0;
+                    afc_iterations = it - 1;
+                    accepted_rate = initial_rate;
+                    accepted_scale = 0.0;
+                    accepted_method = "already converged";
+                    if (s.mpi_rank == 0)
+                    {
+                        std::cout << "  [AFC] initial stationary residual pass"
+                                  << "  update_est=" << initial_rate
+                                  << " K, raw_rel=" << normalised_raw
+                                  << "\n" << std::flush;
+                    }
+                    break;
+                }
+
                 vec_from_nodes(b, s, dof, rhs_nodal);
                 check_petsc(VecSet(x, 0.0), "VecSet(delta T)");
             }
@@ -439,6 +484,7 @@ namespace cbs
                 vec_from_nodes(x, s, dof, temperature);
             }
             check_petsc(KSPSolve(ksp, b, x), "KSPSolve");
+            linear_system_solved = true;
 
             KSPConvergedReason reason;
             PetscInt iterations = 0;
@@ -649,21 +695,168 @@ namespace cbs
                 n_mix = 0;
             }
 
-            local_change = 0.0;
-            for (const Int ip : s.owned_nodes)
+            if (afc)
             {
-                if (fixed(ip) != 0)
+                // The frozen low-order matrix is only a preconditioner for
+                // the nonlinear explicit AFC equation. Its inverse is not
+                // guaranteed to be a descent direction: globalize every step
+                // by testing the TRUE production Step-4 AFC residual.
+                //
+                // Merit function: max_i |C_i^-1 R_AFC,i(T)| over free nodes.
+                // The same C_i^-1 is used in the production explicit update.
+                // A rejected PETSc direction falls back to the safe, damped
+                // explicit AFC direction rather than silently diverging.
+                Array1D<Real> trial = temperature;
+                Real accepted_norm = initial_rate;
+                Real selected_scale = 0.0;
+                bool step_accepted = false;
+                const Real sufficient_decrease = 1.0e-4;
+                std::string method;
+
+                auto attempt_direction = [&](const Array1D<Real>& direction,
+                                             const Real starting_scale,
+                                             const char* direction_name)
                 {
-                    continue;
+                    if (step_accepted)
+                    {
+                        return;
+                    }
+                    Real alpha = starting_scale;
+                    for (Int ls = 0; ls < 24; ++ls)
+                    {
+                        bool local_finite = true;
+                        for (const Int ip : s.owned_nodes)
+                        {
+                            if (fixed(ip) == 0)
+                            {
+                                trial(ip) = temperature(ip) + alpha * direction(ip);
+                                local_finite =
+                                    local_finite && std::isfinite(trial(ip));
+                            }
+                        }
+                        const Real nonfinite = global_max(local_finite ? 0.0 : 1.0);
+                        if (nonfinite != 0.0)
+                        {
+                            alpha *= 0.5;
+                            continue;
+                        }
+                        HaloExchange::broadcastOwnedToGhosts(
+                            trial, s.partition_metadata, MPI_COMM_WORLD);
+                        s.temperature = trial;
+                        explicit_residual(s, heat_flux_load, true);
+                        Real local_trial = 0.0;
+                        for (const Int ip : s.owned_nodes)
+                        {
+                            if (fixed(ip) == 0)
+                            {
+                                local_trial = std::max(
+                                    local_trial,
+                                    std::abs(s.rhs1(ip) * s.elcoe2p(ip)));
+                            }
+                        }
+                        const Real trial_norm = global_max(local_trial);
+                        if (std::isfinite(trial_norm) &&
+                            trial_norm < initial_rate *
+                                (1.0 - sufficient_decrease * alpha))
+                        {
+                            accepted_norm = trial_norm;
+                            selected_scale = alpha;
+                            method = direction_name;
+                            step_accepted = true;
+                            break;
+                        }
+                        alpha *= 0.5;
+                    }
+                };
+
+                // First: Anderson-accelerated PETSc defect correction.
+                Array1D<Real> direction = candidate;
+                for (const Int ip : s.owned_nodes)
+                {
+                    if (fixed(ip) == 0)
+                    {
+                        direction(ip) -= temperature(ip);
+                    }
                 }
-                const Real updated = n_mix > 0 ? candidate(ip) :
-                    temperature(ip) + afc_relax * fixed_point(ip);
-                local_change = std::max(local_change, std::abs(updated - temperature(ip)));
-                temperature(ip) = updated;
+                attempt_direction(direction, 1.0,
+                                  n_mix > 0 ? "Anderson" : "PETSc defect");
+
+                // Second: unaccelerated PETSc direction.
+                if (!step_accepted && n_mix > 0)
+                {
+                    anderson_x.clear();
+                    anderson_f.clear();
+                    direction.fill(0.0);
+                    for (const Int ip : s.owned_nodes)
+                    {
+                        if (fixed(ip) == 0)
+                        {
+                            direction(ip) = afc_relax * fixed_point(ip);
+                        }
+                    }
+                    attempt_direction(direction, 1.0, "PETSc fallback");
+                }
+
+                // Third: explicit stable pseudo-time preconditioner.
+                if (!step_accepted)
+                {
+                    anderson_x.clear();
+                    anderson_f.clear();
+                    direction.fill(0.0);
+                    for (const Int ip : s.owned_nodes)
+                    {
+                        if (fixed(ip) == 0)
+                        {
+                            direction(ip) =
+                                initial_residual(ip) * s.elcoe2p(ip);
+                        }
+                    }
+                    attempt_direction(direction, 1.0, "explicit fallback");
+                }
+                if (!step_accepted)
+                {
+                    throw std::runtime_error(
+                        "SteadyEnergySolver: line search could not reduce "
+                        "the explicit AFC pseudo-time residual; initial norm="
+                        + std::to_string(initial_rate)
+                        + " K. Check CFL, fixed-temperature mask, limiter "
+                        "and current nonlinear root.");
+                }
+
+                local_change = 0.0;
+                for (const Int ip : s.owned_nodes)
+                {
+                    if (fixed(ip) == 0)
+                    {
+                        local_change = std::max(
+                            local_change, std::abs(trial(ip) - temperature(ip)));
+                    }
+                }
+                temperature = trial;
+                last_change = global_max(local_change);
+                accepted_rate = accepted_norm;
+                accepted_scale = selected_scale;
+                accepted_method = method;
             }
-            HaloExchange::broadcastOwnedToGhosts(temperature, s.partition_metadata,
-                                                 MPI_COMM_WORLD);
-            last_change = global_max(local_change);
+            else
+            {
+                local_change = 0.0;
+                for (const Int ip : s.owned_nodes)
+                {
+                    if (fixed(ip) != 0)
+                    {
+                        continue;
+                    }
+                    const Real updated = n_mix > 0 ? candidate(ip) :
+                        temperature(ip) + afc_relax * fixed_point(ip);
+                    local_change = std::max(
+                        local_change, std::abs(updated - temperature(ip)));
+                    temperature(ip) = updated;
+                }
+                HaloExchange::broadcastOwnedToGhosts(
+                    temperature, s.partition_metadata, MPI_COMM_WORLD);
+                last_change = global_max(local_change);
+            }
             afc_iterations = it;
 
             if (afc && s.mpi_rank == 0 && (it <= 5 || it % 10 == 0))
@@ -674,7 +867,11 @@ namespace cbs
                 {
                     std::cout << ", Anderson history " << n_mix;
                 }
-                std::cout << "\n" << std::flush;
+                std::cout
+                    << ", rate=" << accepted_rate
+                    << " K, alpha=" << accepted_scale
+                    << ", method=" << accepted_method
+                    << "\n" << std::flush;
             }
             if (afc && last_change < afc_tol)
             {
@@ -682,10 +879,11 @@ namespace cbs
             }
         }
 
-        // TRUE RELATIVE RESIDUAL OF THE LAST LINEAR SYSTEM
+        // TRUE RELATIVE RESIDUAL OF THE LAST LINEAR SYSTEM.
+        // An already-converged restart needs no PETSc solve.
+        if (linear_system_solved)
         {
             // x holds the last PETSc solution: deltaT for AFC, T for Galerkin.
-            // Do not overwrite deltaT with T before checking the linear residual.
             check_petsc(MatMult(A, x, r), "MatMult");
             check_petsc(VecAYPX(r, -1.0, b), "VecAYPX");
             PetscReal rn = 0.0;
