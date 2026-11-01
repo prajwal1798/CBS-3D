@@ -10,6 +10,7 @@ latest .pvtu. The metrics include duplicated MPI ghost nodes; max norms
 are unaffected by duplicates.
 """
 import argparse
+import re
 import sys
 
 import numpy as np
@@ -25,6 +26,9 @@ def main():
                    help="Maximum allowed nodal |T_exp - T_imp| in K")
     p.add_argument("--velocity-tol", type=float, default=1e-12,
                    help="Maximum allowed nodal velocity error in m/s")
+    p.add_argument("--allow-same-step", action="store_true",
+                   help="Allow comparison at identical output iteration numbers. "
+                        "By default reject a copied/imported restart snapshot.")
     a = p.parse_args()
 
     if a.tol_k < 0 or a.velocity_tol < 0:
@@ -34,6 +38,16 @@ def main():
     imp, path_i = read_result(a.implicit)
     print("EXPLICIT:", path_e)
     print("IMPLICIT:", path_i)
+
+    step_e = re.search(r"_step_(\\d+)\\.pvtu$", path_e)
+    step_i = re.search(r"_step_(\\d+)\\.pvtu$", path_i)
+    if (not a.allow_same_step and step_e and step_i and
+            int(step_i.group(1)) <= int(step_e.group(1))):
+        raise ValueError(
+            "Candidate iteration does not advance beyond the reference "
+            "iteration. This may be a copied restart field, not a completed "
+            "implicit solve. Use --allow-same-step ONLY for independently "
+            "computed same-iteration snapshots.")
 
     if len(exp) != len(imp):
         raise ValueError("Partition-piece counts differ; compare identical meshes")
