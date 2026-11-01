@@ -76,6 +76,14 @@ namespace cbs
             return global;
         }
 
+        Real global_sum(Real local)
+        {
+            Real global = 0.0;
+            check_mpi(MPI_Allreduce(&local, &global, 1, MPI_DOUBLE, MPI_SUM,
+                                    MPI_COMM_WORLD), "Allreduce sum");
+            return global;
+        }
+
         // ================================
         // FULL EXPLICIT RESIDUAL R(T) = M T + c + q ON THE OWNERS, ASSEMBLED
         // WITH THE ORIGINAL STEP-4 CODE (HEAT FLUX ADDED FROM THE NODAL LOAD,
@@ -412,12 +420,16 @@ namespace cbs
         std::vector<Array1D<Real>> anderson_f;
         bool linear_system_solved = false;
         Real accepted_rate = 0.0;
+        Real accepted_merit = 0.0;
+        Real accepted_relative_residual = 0.0;
         Real accepted_scale = 0.0;
         std::string accepted_method = "none";
 
         for (Int it = 1; it <= outer_max; ++it)
         {
             Real initial_rate = 0.0;
+            Real initial_merit = 0.0;
+            Real initial_relative_residual = 0.0;
             Real initial_raw_residual = 0.0;
             Array1D<Real> initial_residual(s.cfg.npoin);
             if (afc)
@@ -429,19 +441,21 @@ namespace cbs
                 s.temperature = temperature;
                 explicit_residual(s, heat_flux_load, true);
                 Real local_rate = 0.0;
+                Real local_merit_squared = 0.0;
                 Real local_raw = 0.0;
                 for (const Int ip : s.owned_nodes)
                 {
                     rhs_nodal(ip) = fixed(ip) != 0 ? 0.0 : s.rhs1(ip);
                     if (fixed(ip) == 0)
                     {
-                        local_rate = std::max(
-                            local_rate,
-                            std::abs(s.rhs1(ip) * s.elcoe2p(ip)));
+                        const Real scaled = s.rhs1(ip) * s.elcoe2p(ip);
+                        local_rate = std::max(local_rate, std::abs(scaled));
+                        local_merit_squared += scaled * scaled;
                         local_raw = std::max(local_raw, std::abs(s.rhs1(ip)));
                     }
                 }
                 initial_rate = global_max(local_rate);
+                initial_merit = std::sqrt(global_sum(local_merit_squared));
                 initial_raw_residual = global_max(local_raw);
                 initial_residual = s.rhs1;
 
@@ -452,12 +466,15 @@ namespace cbs
                 const Real normalised_raw =
                     rhs_max > 0.0 ? initial_raw_residual / rhs_max
                                   : initial_raw_residual;
+                initial_relative_residual = normalised_raw;
                 if (initial_rate < afc_tol &&
                     normalised_raw < residual_tol)
                 {
                     last_change = 0.0;
                     afc_iterations = it - 1;
                     accepted_rate = initial_rate;
+                    accepted_merit = initial_merit;
+                    accepted_relative_residual = normalised_raw;
                     accepted_scale = 0.0;
                     accepted_method = "already converged";
                     if (s.mpi_rank == 0)
@@ -697,32 +714,32 @@ namespace cbs
 
             if (afc)
             {
-                // The frozen low-order matrix is only a preconditioner for
-                // the nonlinear explicit AFC equation. Its inverse is not
-                // guaranteed to be a descent direction: globalize every step
-                // by testing the TRUE production Step-4 AFC residual.
+                // Globalize using the L2 norm of the EXACT production AFC
+                // pseudo-time residual C_i^-1 R_i(T). Max-norm line searches
+                // stall at limiter-switching nodes: a small step may reduce the
+                // largest component without making useful global progress.
                 //
-                // Merit function: max_i |C_i^-1 R_AFC,i(T)| over free nodes.
-                // The same C_i^-1 is used in the production explicit update.
-                // A rejected PETSc direction falls back to the safe, damped
-                // explicit AFC direction rather than silently diverging.
-                Array1D<Real> trial = temperature;
-                Real accepted_norm = initial_rate;
-                Real selected_scale = 0.0;
-                bool step_accepted = false;
+                // The PETSc defect direction is only a preconditioned trial.
+                // Evaluate it AND the stable explicit pseudo-time direction,
+                // then retain the strongest residual reduction. Never accept
+                // an infinitesimal PETSc step merely because it was tried first.
                 const Real sufficient_decrease = 1.0e-4;
-                std::string method;
+                const Real max_rate_growth = 1.25;
+                Array1D<Real> trial = temperature;
+                Array1D<Real> best_trial = temperature;
+                Real best_merit = initial_merit;
+                Real best_rate = initial_rate;
+                Real best_relative_residual = initial_relative_residual;
+                Real best_scale = 0.0;
+                std::string best_method = "none";
+                bool step_accepted = false;
 
-                auto attempt_direction = [&](const Array1D<Real>& direction,
-                                             const Real starting_scale,
-                                             const char* direction_name)
+                auto search_direction = [&](const Array1D<Real>& direction,
+                                            const char* direction_name,
+                                            const Int search_depth)
                 {
-                    if (step_accepted)
-                    {
-                        return;
-                    }
-                    Real alpha = starting_scale;
-                    for (Int ls = 0; ls < 24; ++ls)
+                    Real alpha = 1.0;
+                    for (Int ls = 0; ls < search_depth; ++ls, alpha *= 0.5)
                     {
                         bool local_finite = true;
                         for (const Int ip : s.owned_nodes)
@@ -734,42 +751,64 @@ namespace cbs
                                     local_finite && std::isfinite(trial(ip));
                             }
                         }
-                        const Real nonfinite = global_max(local_finite ? 0.0 : 1.0);
-                        if (nonfinite != 0.0)
+
+                        if (global_max(local_finite ? 0.0 : 1.0) != 0.0)
                         {
-                            alpha *= 0.5;
                             continue;
                         }
+
                         HaloExchange::broadcastOwnedToGhosts(
                             trial, s.partition_metadata, MPI_COMM_WORLD);
                         s.temperature = trial;
                         explicit_residual(s, heat_flux_load, true);
-                        Real local_trial = 0.0;
+
+                        Real local_merit_squared = 0.0;
+                        Real local_rate = 0.0;
+                        Real local_raw = 0.0;
                         for (const Int ip : s.owned_nodes)
                         {
                             if (fixed(ip) == 0)
                             {
-                                local_trial = std::max(
-                                    local_trial,
-                                    std::abs(s.rhs1(ip) * s.elcoe2p(ip)));
+                                const Real scaled =
+                                    s.rhs1(ip) * s.elcoe2p(ip);
+                                local_merit_squared += scaled * scaled;
+                                local_rate = std::max(
+                                    local_rate, std::abs(scaled));
+                                local_raw = std::max(
+                                    local_raw, std::abs(s.rhs1(ip)));
                             }
                         }
-                        const Real trial_norm = global_max(local_trial);
-                        if (std::isfinite(trial_norm) &&
-                            trial_norm < initial_rate *
-                                (1.0 - sufficient_decrease * alpha))
+
+                        const Real trial_merit =
+                            std::sqrt(global_sum(local_merit_squared));
+                        const Real trial_rate = global_max(local_rate);
+                        const Real trial_raw = global_max(local_raw);
+                        const Real trial_relative_residual =
+                            rhs_max > 0.0 ? trial_raw / rhs_max : trial_raw;
+
+                        if (!std::isfinite(trial_merit) ||
+                            !std::isfinite(trial_rate) ||
+                            !std::isfinite(trial_relative_residual) ||
+                            trial_rate > max_rate_growth * initial_rate)
                         {
-                            accepted_norm = trial_norm;
-                            selected_scale = alpha;
-                            method = direction_name;
-                            step_accepted = true;
-                            break;
+                            continue;
                         }
-                        alpha *= 0.5;
+
+                        if (trial_merit < best_merit &&
+                            trial_merit <
+                                initial_merit * (1.0 - sufficient_decrease * alpha))
+                        {
+                            best_trial = trial;
+                            best_merit = trial_merit;
+                            best_rate = trial_rate;
+                            best_relative_residual = trial_relative_residual;
+                            best_scale = alpha;
+                            best_method = direction_name;
+                            step_accepted = true;
+                        }
                     }
                 };
 
-                // First: Anderson-accelerated PETSc defect correction.
                 Array1D<Real> direction = candidate;
                 for (const Int ip : s.owned_nodes)
                 {
@@ -778,14 +817,11 @@ namespace cbs
                         direction(ip) -= temperature(ip);
                     }
                 }
-                attempt_direction(direction, 1.0,
-                                  n_mix > 0 ? "Anderson" : "PETSc defect");
+                search_direction(direction,
+                                 n_mix > 0 ? "Anderson" : "PETSc defect", 14);
 
-                // Second: unaccelerated PETSc direction.
-                if (!step_accepted && n_mix > 0)
+                if (n_mix > 0)
                 {
-                    anderson_x.clear();
-                    anderson_f.clear();
                     direction.fill(0.0);
                     for (const Int ip : s.owned_nodes)
                     {
@@ -794,33 +830,35 @@ namespace cbs
                             direction(ip) = afc_relax * fixed_point(ip);
                         }
                     }
-                    attempt_direction(direction, 1.0, "PETSc fallback");
+                    search_direction(direction, "PETSc fallback", 14);
                 }
 
-                // Third: explicit stable pseudo-time preconditioner.
-                if (!step_accepted)
+                direction.fill(0.0);
+                for (const Int ip : s.owned_nodes)
                 {
-                    anderson_x.clear();
-                    anderson_f.clear();
-                    direction.fill(0.0);
-                    for (const Int ip : s.owned_nodes)
+                    if (fixed(ip) == 0)
                     {
-                        if (fixed(ip) == 0)
-                        {
-                            direction(ip) =
-                                initial_residual(ip) * s.elcoe2p(ip);
-                        }
+                        direction(ip) =
+                            initial_residual(ip) * s.elcoe2p(ip);
                     }
-                    attempt_direction(direction, 1.0, "explicit fallback");
                 }
+                search_direction(direction, "explicit fallback", 8);
+
                 if (!step_accepted)
                 {
                     throw std::runtime_error(
-                        "SteadyEnergySolver: line search could not reduce "
-                        "the explicit AFC pseudo-time residual; initial norm="
-                        + std::to_string(initial_rate)
-                        + " K. Check CFL, fixed-temperature mask, limiter "
-                        "and current nonlinear root.");
+                        "SteadyEnergySolver: neither PETSc nor explicit AFC "
+                        "could reduce the L2 pseudo-time residual. "
+                        "Initial merit=" + std::to_string(initial_merit)
+                        + ", max update=" + std::to_string(initial_rate)
+                        + ", relative raw residual="
+                        + std::to_string(initial_relative_residual));
+                }
+
+                if (n_mix > 0 && best_method != "Anderson")
+                {
+                    anderson_x.clear();
+                    anderson_f.clear();
                 }
 
                 local_change = 0.0;
@@ -829,14 +867,17 @@ namespace cbs
                     if (fixed(ip) == 0)
                     {
                         local_change = std::max(
-                            local_change, std::abs(trial(ip) - temperature(ip)));
+                            local_change,
+                            std::abs(best_trial(ip) - temperature(ip)));
                     }
                 }
-                temperature = trial;
+                temperature = best_trial;
                 last_change = global_max(local_change);
-                accepted_rate = accepted_norm;
-                accepted_scale = selected_scale;
-                accepted_method = method;
+                accepted_rate = best_rate;
+                accepted_merit = best_merit;
+                accepted_relative_residual = best_relative_residual;
+                accepted_scale = best_scale;
+                accepted_method = best_method;
             }
             else
             {
@@ -869,12 +910,21 @@ namespace cbs
                 }
                 std::cout
                     << ", rate=" << accepted_rate
-                    << " K, alpha=" << accepted_scale
+                    << " K, L2=" << accepted_merit
+                    << " K, raw_rel=" << accepted_relative_residual
+                    << ", alpha=" << accepted_scale
                     << ", method=" << accepted_method
                     << "\n" << std::flush;
             }
-            if (afc && last_change < afc_tol)
+            // A small step can result solely from aggressive backtracking.
+            // Accept stationary convergence only when BOTH independent
+            // residual checks pass. Do not mistake line-search stagnation
+            // for convergence.
+            if (afc &&
+                accepted_rate < afc_tol &&
+                accepted_relative_residual < residual_tol)
             {
+                last_change = 0.0;
                 break;
             }
         }
