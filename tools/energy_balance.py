@@ -16,7 +16,10 @@
 #
 # USAGE     : python3 tools/energy_balance.py RESULT [--log solver.out]
 #                 [--plane y=0] [--rho 997] [--cp 4182] [--qin W] [--tol 0.02]
-#                 [--mean]
+#                 [--storage W] [--mean]
+#             --storage IS THE SOLID STORAGE RATE dE_s/dt (POSITIVE WHEN THE
+#             SOLID IS WARMING); THE TRANSIENT BALANCE IS THEN
+#             Q_out = Q_in - storage. MEASURE IT WITH tools/solid_energy.py.
 #             --mean USES THE TIME-AVERAGED FIELDS mean_velocity AND
 #             mean_temperature OF A TRANSIENT RUN (CBS3D_AVERAGE_START_*).
 #             WHEN THE FILE ALSO HAS covariance_velocity_temperature, IT
@@ -187,6 +190,8 @@ def main():
                     help="REFERENCE T [K] (DEFAULT: MIXED-MEAN INLET T)")
     ap.add_argument("--tol", type=float, default=0.02,
                     help="PASS WHEN |Q_out/Q_in - 1| <= tol")
+    ap.add_argument("--storage", type=float, default=0.0,
+                    help="SOLID STORAGE RATE dE_s/dt [W]; Q_out = Q_in - storage")
     ap.add_argument("--mean", action="store_true",
                     help="USE THE TIME-AVERAGED FIELDS (mean_velocity, mean_temperature)")
     args = ap.parse_args()
@@ -298,13 +303,21 @@ def main():
     if q_in is None:
         print("Q_in    : UNKNOWN (GIVE --log solver.out OR --qin)")
         return 2
-    ratio = q_out / q_in if q_in != 0.0 else float("nan")
-    print("Q_in    : %.6e W   Q_out / Q_in = %.5f" % (q_in, ratio))
+    q_in_eff = q_in - args.storage
+    ratio = q_out / q_in_eff if q_in_eff != 0.0 else float("nan")
+    if args.storage != 0.0:
+        print("Q_IN    : %.6e W   storage %.6e W   effective %.6e W"
+              % (q_in, args.storage, q_in_eff))
+        print("Q_EFF   : %.6e W   Q_out / Q_eff = %.5f" % (q_in_eff, ratio))
+    else:
+        print("Q_in    : %.6e W   Q_out / Q_in = %.5f" % (q_in_eff, ratio))
     m_err = abs(m_out - m_in) / max(m_in, 1e-300)
     e_ok = abs(ratio - 1.0) <= args.tol
     m_ok = m_err <= args.tol
-    print("ENERGY  : %s (|Q_out/Q_in - 1| = %.3g, limit %.3g)"
-          % ("BALANCED" if e_ok else "NOT BALANCED YET", abs(ratio - 1.0), args.tol))
+    print("ENERGY  : %s (|Q_out/%s - 1| = %.3g, limit %.3g)"
+          % ("BALANCED" if e_ok else "NOT BALANCED YET",
+             "Q_eff" if args.storage != 0.0 else "Q_in",
+             abs(ratio - 1.0), args.tol))
     print("MASS    : %s (|imbalance| = %.3g, limit %.3g)%s"
           % ("BALANCED" if m_ok else "NOT BALANCED", m_err, args.tol,
              "" if m_ok else "; IF IT STAYS CONSTANT IT IS THE DISCRETE "
