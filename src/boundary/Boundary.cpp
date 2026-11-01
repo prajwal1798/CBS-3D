@@ -232,6 +232,9 @@ namespace cbs
     //
     // Only owner copies are modified. The solver performs the subsequent
     // owner-to-ghost broadcast after all local owner updates are complete.
+    //
+    // Free pressure-outlet nodes also receive the outlet backflow control
+    // (inward normal velocity removed), matching the serial boundary package.
     //=========================================================================
     void Boundary::applyOwnedVelocityConstraints(CBSStateSI& s)
     {
@@ -254,6 +257,28 @@ namespace cbs
 
             if (boundary_type == CBSStateSI::velocity_bc_free)
             {
+                // OUTLET BACKFLOW CONTROL, AS IN THE SERIAL PATH
+                // (applyOutletBackflowControl): REMOVE AN INWARD NORMAL
+                // COMPONENT AT A FREE PRESSURE-OUTLET NODE. THE NODAL NORMAL
+                // IS RECONCILED OVER ALL RANKS, SO THE RESULT DOES NOT DEPEND
+                // ON THE PARTITION.
+                if (s.node_pressure_outlet(ip) != 0)
+                {
+                    const Real nx = s.node_outlet_normal(1, ip);
+                    const Real ny = s.node_outlet_normal(2, ip);
+                    const Real nz = s.node_outlet_normal(3, ip);
+                    const Real un =
+                        s.unkno(1, ip) * nx +
+                        s.unkno(2, ip) * ny +
+                        s.unkno(3, ip) * nz;
+
+                    if (un < 0.0)
+                    {
+                        s.unkno(1, ip) -= un * nx;
+                        s.unkno(2, ip) -= un * ny;
+                        s.unkno(3, ip) -= un * nz;
+                    }
+                }
                 continue;
             }
 

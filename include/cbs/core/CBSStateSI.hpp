@@ -146,6 +146,12 @@ namespace cbs
         Array1D<Int> node_pressure_outlet;
         Array1D<Int> node_symmetry;
 
+        // Outward unit nodal normal of the pressure-outlet boundary, from the
+        // area-weighted sum of all incident outlet faces (reconciled across
+        // MPI ranks). Zero at nodes that are not on an outlet. Used by the
+        // distributed outlet backflow control.
+        Array2D<Real> node_outlet_normal;
+
 
 
 
@@ -628,6 +634,7 @@ namespace cbs
             node_massflow_profile_active.resize(cfg.npoin);
             node_pressure_outlet.resize(cfg.npoin);
             node_symmetry.resize(cfg.npoin);
+            node_outlet_normal.resize(cfg.ndim, cfg.npoin);
 
             // Element geometry and coefficients.
             dNkdx.resize(cfg.ndim * cfg.nep * cfg.nelem);
@@ -739,6 +746,7 @@ namespace cbs
             node_massflow_profile_active.fill(0);
             node_pressure_outlet.fill(0);
             node_symmetry.fill(0);
+            node_outlet_normal.fill(0.0);
 
             rho_e.fill(1.0);
             cp_e.fill(1.0);

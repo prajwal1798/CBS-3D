@@ -1809,6 +1809,7 @@ namespace cbs
         s.node_massflow_profile_active.fill(0);
         s.node_pressure_outlet.fill(0);
         s.node_symmetry.fill(0);
+        s.node_outlet_normal.fill(0.0);
 
         // -------------------------------------------------------------
         // Rank-local physical-boundary contributions.
@@ -1895,6 +1896,15 @@ namespace cbs
 
                 candidate_mask(ip) |= boundary_bit;
 
+                if (bc == s.cfg.bc_pressure_outlet)
+                {
+                    // AREA-WEIGHTED OUTWARD OUTLET NORMAL, A_f n_f
+                    for (Int d = 1; d <= s.cfg.ndim; ++d)
+                    {
+                        s.node_outlet_normal(d, ip) += s.face_norm(d, ib);
+                    }
+                }
+
                 if (massflow_face)
                 {
                     // face_norm(1:3,ib) already stores A_f n_f.
@@ -1929,6 +1939,16 @@ namespace cbs
 
             HaloExchange::broadcastOwnedToGhosts(
                 s.node_inlet_normal_sum,
+                s.partition_metadata);
+
+            // Reconcile the outlet normal: an outlet node may border outlet
+            // faces carried by several ranks.
+            HaloExchange::sumGhostContributionsToOwners(
+                s.node_outlet_normal,
+                s.partition_metadata);
+
+            HaloExchange::broadcastOwnedToGhosts(
+                s.node_outlet_normal,
                 s.partition_metadata);
         }
 #else
@@ -2009,6 +2029,31 @@ namespace cbs
 
             s.node_symmetry(ip) =
                 has_symmetry ? 1 : 0;
+
+            // Unit outward outlet normal (zero away from outlets).
+            {
+                Real mag2 = 0.0;
+                for (Int d = 1; d <= s.cfg.ndim; ++d)
+                {
+                    mag2 += s.node_outlet_normal(d, ip) *
+                            s.node_outlet_normal(d, ip);
+                }
+                const Real mag = std::sqrt(mag2);
+                if (has_pressure_outlet && mag > 0.0 && std::isfinite(mag))
+                {
+                    for (Int d = 1; d <= s.cfg.ndim; ++d)
+                    {
+                        s.node_outlet_normal(d, ip) /= mag;
+                    }
+                }
+                else
+                {
+                    for (Int d = 1; d <= s.cfg.ndim; ++d)
+                    {
+                        s.node_outlet_normal(d, ip) = 0.0;
+                    }
+                }
+            }
 
             // ---------------------------------------------------------
             // Normalise the globally assembled BC 511 nodal normal.
