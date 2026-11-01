@@ -54,6 +54,7 @@ for variable in \
     CBS3D_RESTART_VELOCITY_ARRAY CBS3D_SA_WALL_TREATMENT \
     CBS3D_STEADY_ENERGY CBS3D_STEADY_ENERGY_MAXIT \
     CBS3D_STEADY_ENERGY_RELAX CBS3D_STEADY_ENERGY_TOL \
+    CBS3D_STEADY_ENERGY_RESIDUAL_TOL \
     CBS3D_VERBOSE CBS3D_WALL_B CBS3D_WALL_KAPPA
 do
     unset "$variable"
@@ -103,9 +104,29 @@ mkdir -p mpi4
     > solver.out 2>&1 ) || fail "4-rank run (see $WORK/mpi4/solver.out)"
 
 # ================================
-# STEP 4-5: COMPARE WITH THE EXACT SOLUTION
+# STEP 4: IMPLICIT MPI ENERGY REGRESSION (EXACT HEATED SOLID SLAB).
+#          EXERCISES THE SAME AFC NONLINEAR RESIDUAL CHECK AS PRODUCTION.
+#          THE SLAB HAS NO ADVECTING FLUID; THE U-CHANNEL IS STILL NEEDED
+#          FOR A NONTRIVIAL FLUID AFC VERIFICATION.
 # ================================
-for run in serial mpi4; do
+mkdir -p mpi4_implicit
+( cd mpi4_implicit && CBS3D_TEMPERATURE_AFC=1 CBS3D_STEADY_ENERGY=1 \
+    srun --mpi="$CBS3D_SRUN_MPI" --ntasks=4 --cpus-per-task=1 \
+    --hint=nomultithread --cpu-bind=cores --distribution=block:block \
+    "$CBS3D_MPI_EXE" slab "$WORK/p4" \
+    > solver.out 2>&1 ) || fail "implicit 4-rank energy (see $WORK/mpi4_implicit/solver.out)"
+
+if [[ -f mpi4_implicit/solver.out ]]; then
+    grep -q "NONLINEAR CHECK PASS" mpi4_implicit/solver.out ||
+        fail "implicit energy nonlinear residual check"
+    grep -q "stop reason   : steady energy solved" mpi4_implicit/solver.out ||
+        fail "implicit energy did not report a successful solve"
+fi
+
+# ================================
+# STEP 5-6: COMPARE WITH THE EXACT SOLUTION
+# ================================
+for run in serial mpi4 mpi4_implicit; do
     echo "---- $run ----"
     CMP=()
     [[ "$run" == mpi4 ]] && CMP=(--compare serial/output)     # MPI MUST EQUAL SERIAL
