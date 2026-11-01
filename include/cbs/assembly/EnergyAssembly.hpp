@@ -59,5 +59,14 @@ namespace cbs
 
         // Reserved hook for future real-time or BDF thermal-history terms.
         static void applyRealTimeEnergyTerm(CBSStateSI& s);
+
+        // ================================
+        // LINEAR PART OF THE ELEMENT RESIDUAL OF assembleStep4Rhs:
+        //     lrhs_a = SUM_b M[a][b] T_b + (TERMS INDEPENDENT OF T)
+        // (CONVECTION, ITS div(u) CORRECTION, STABILISATION AND CONDUCTION,
+        // FOR THE CURRENT unkno AND delte). INDICES 1..4. USED BY THE
+        // IMPLICIT STEADY ENERGY SOLVER.
+        // ================================
+        static void elementOperator(const CBSStateSI& s, Int ie, Real M[5][5]);
     };
 }

@@ -753,6 +753,98 @@ namespace cbs
     }
 
 
+    // ================================
+    // LINEAR ELEMENT OPERATOR OF THE STEP-4 RESIDUAL (SEE THE HEADER).
+    // EACH BLOCK MIRRORS THE FUNCTION ABOVE THAT ASSEMBLES IT:
+    //   add_fluid_convection            -a_f [w_a . gradN_b + div_u (1 + d_ab)]
+    //   add_fluid_convection_stabilisation  -tau (u_bar.gradN_a)(u_bar.gradN_b)
+    //   add_thermal_diffusion           -k V gradN_a . gradN_b
+    // THE T_ref SHIFT AND THE SOURCES ARE CONSTANT AND STAY IN THE RHS.
+    // ================================
+    void EnergyAssembly::elementOperator(const CBSStateSI& s, Int ie, Real M[5][5])
+    {
+        for (Int a = 0; a <= 4; ++a)
+        {
+            for (Int b = 0; b <= 4; ++b)
+            {
+                M[a][b] = 0.0;
+            }
+        }
+
+        const Real volume = s.detJ(ie) / 6.0;
+
+        if (is_fluid_element(s, ie))
+        {
+            const Real adv_factor = s.rho_cp_e(ie) * s.detJ(ie) / 120.0;
+            const Real div_u = element_velocity_divergence(s, ie);
+
+            Real u_sum = 0.0;
+            Real v_sum = 0.0;
+            Real w_sum = 0.0;
+            for (Int b = 1; b <= s.cfg.nep; ++b)
+            {
+                const Int ip = s.intma(b, ie);
+                u_sum += s.unkno(1, ip);
+                v_sum += s.unkno(2, ip);
+                w_sum += s.unkno(3, ip);
+            }
+
+            const Real tau_factor = 0.5 * s.delte(ie) * s.rho_cp_e(ie) * volume;
+            const Real ubar = u_sum / static_cast<Real>(s.cfg.nep);
+            const Real vbar = v_sum / static_cast<Real>(s.cfg.nep);
+            const Real wbar = w_sum / static_cast<Real>(s.cfg.nep);
+
+            for (Int a = 1; a <= s.cfg.nep; ++a)
+            {
+                const Int ip = s.intma(a, ie);
+                const Real u_weight = u_sum + s.unkno(1, ip);
+                const Real v_weight = v_sum + s.unkno(2, ip);
+                const Real w_weight = w_sum + s.unkno(3, ip);
+
+                const Real u_gradNa =
+                    ubar * grad(s, ie, 1, a) +
+                    vbar * grad(s, ie, 2, a) +
+                    wbar * grad(s, ie, 3, a);
+
+                for (Int b = 1; b <= s.cfg.nep; ++b)
+                {
+                    const Real u_gradNb =
+                        ubar * grad(s, ie, 1, b) +
+                        vbar * grad(s, ie, 2, b) +
+                        wbar * grad(s, ie, 3, b);
+
+                    M[a][b] -= adv_factor *
+                        (u_weight * grad(s, ie, 1, b) +
+                         v_weight * grad(s, ie, 2, b) +
+                         w_weight * grad(s, ie, 3, b) +
+                         div_u * (a == b ? 2.0 : 1.0));
+
+                    M[a][b] -= tau_factor * u_gradNa * u_gradNb;
+                }
+            }
+        }
+
+        Real k = s.k_e(ie);
+        if (s.cfg.turbulence_on > 0 &&
+            s.cfg.turbulent_thermal_diffusivity_on > 0 &&
+            is_fluid_element(s, ie))
+        {
+            k = s.k_eff_e(ie);
+        }
+
+        for (Int a = 1; a <= s.cfg.nep; ++a)
+        {
+            for (Int b = 1; b <= s.cfg.nep; ++b)
+            {
+                M[a][b] -= k * volume *
+                    (grad(s, ie, 1, a) * grad(s, ie, 1, b) +
+                     grad(s, ie, 2, a) * grad(s, ie, 2, b) +
+                     grad(s, ie, 3, a) * grad(s, ie, 3, b));
+            }
+        }
+    }
+
+
     //=========================================================================
     // Reserved hook for real-time or BDF thermal-history contributions.
     //

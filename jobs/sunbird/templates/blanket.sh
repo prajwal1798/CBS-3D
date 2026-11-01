@@ -17,6 +17,9 @@
 #                       HEATING), L1T (L1 IN PHYSICAL TIME, FOR TIME AVERAGES).
 #                       PICKS THE LARGEST READY SET THAT FITS THE FREE CORES
 #                       (submit_auto.sh). OPTS: --time T --max N --sets N --dry-run
+#   energy RUN_DIR [L1|L2]  IMPLICIT STEADY ENERGY (WATER + STEEL, ONE PETSc
+#                       SOLVE, SteadyEnergySolver) ON THE LAST FLOW FIELD OF
+#                       RUN_DIR (ITS mean_velocity WHEN IT HAS ONE), SAME RANKS
 #   check [RUN_DIR]     MASS + ENERGY BALANCE AND RESIDUAL PLOT OF A RUN
 #                       (DEFAULT: THE NEWEST RUN)
 #   status              YOUR JOBS AND THE LATEST PROGRESS LINE OF EACH RUN
@@ -45,7 +48,7 @@
 # ================================
 
 set -euo pipefail
-usage() { sed -n '2,41p' "$0" | sed 's/^# \{0,1\}//'; exit 1; }
+usage() { sed -n '2,48p' "$0" | sed 's/^# \{0,1\}//'; exit 1; }
 [[ "$#" -ge 1 ]] || usage
 
 source "$HOME/cbs3d_env.sh"
@@ -198,6 +201,30 @@ run)
         echo "         THE RUN MUST USE THE SAME RANK COUNT (PASS --sets N)"
     fi
     bash "$T/submit_auto.sh" "$DIR" "$CASE" --time 24:00:00 "$@" --par "$PAR" --matprop "$MAT"
+    ;;
+
+# ================================
+# IMPLICIT STEADY ENERGY ON THE FLOW OF AN EARLIER RUN
+# ================================
+energy)
+    RUN="$(readlink -f "${1:?USAGE: blanket.sh energy RUN_DIR [L1|L2] [OPTS]}")"
+    STAGE="${2:-L1}"
+    shift; [[ "$#" -gt 0 ]] && shift
+    LAST="$(ls -1 "$RUN"/output/"$CASE"/"$CASE"_step_*.pvtu 2>/dev/null | sort | tail -1)"
+    [[ -n "$LAST" ]] || { echo "ERROR: NO .pvtu IN $RUN/output/$CASE" >&2; exit 1; }
+    ITER="$(basename "$LAST" .pvtu | sed 's/.*_step_0*//')"
+    ARR=velocity
+    grep -q 'Name="mean_velocity"' "$LAST" && ARR=mean_velocity
+    NR=$(ls -d "$RUN"/partitions/rank_* | wc -l)
+    export CBS3D_STEADY_ENERGY=1 CBS3D_RESTART=1 CBS3D_RESTART_FORMAT=legacy_vtu
+    export CBS3D_RESTART_ROOT="$RUN/output/$CASE" CBS3D_RESTART_ITERATION="$ITER"
+    export CBS3D_RESTART_VELOCITY_ARRAY="$ARR"
+    unset CBS3D_AVERAGE_START_TIME CBS3D_AVERAGE_START_ITERATION
+    echo "FLOW   : $LAST ($ARR, ITERATION $ITER, $NR RANKS)"
+    echo "STAGE  : $STAGE  ($(stage_par "$STAGE")); AFC $CBS3D_TEMPERATURE_AFC"
+    bash "$T/submit_auto.sh" "$DIR" "$CASE" --sets "$NR" --time 01:00:00 "$@" \
+        --par "$(stage_par "$STAGE")" --matprop "$(run_matprop)"
+    echo "THEN   : bash $T/blanket.sh status ; bash $T/blanket.sh check"
     ;;
 
 # ================================

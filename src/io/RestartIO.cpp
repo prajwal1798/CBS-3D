@@ -782,11 +782,16 @@ namespace cbs
                 }
             }
 
+            // THE VELOCITY ARRAY TO IMPORT: "velocity" (DEFAULT) OR, E.G.,
+            // "mean_velocity" OF A TIME-AVERAGED TRANSIENT RUN
+            const std::string velocity_name =
+                environment_value("CBS3D_RESTART_VELOCITY_ARRAY", "velocity");
+
             const std::vector<Real> velocity =
                 parse_real_array(
-                    data_array_payload(xml, "velocity"),
+                    data_array_payload(xml, velocity_name),
                     3U * npoin,
-                    "velocity");
+                    velocity_name);
 
             const std::vector<Real> pressure =
                 parse_real_array(

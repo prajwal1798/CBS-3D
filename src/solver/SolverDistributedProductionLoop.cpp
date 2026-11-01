@@ -27,6 +27,7 @@
 #include "cbs/boundary/DistributedSymmetry.hpp"
 #include "cbs/io/DistributedPost.hpp"
 #include "cbs/io/TimeAverage.hpp"
+#include "cbs/solver/SteadyEnergySolver.hpp"
 #include "cbs/linalg/PetscPersistentDistributedPressureSystem.hpp"
 #include "cbs/parallel/Coloring.hpp"
 #include "cbs/parallel/HaloExchange.hpp"
@@ -1312,6 +1313,61 @@ namespace cbs
         TimeAverage::initialise(s_);
 
         DistributedPost::initialise(s_, case_name_);
+
+        // ================================
+        // IMPLICIT STEADY ENERGY FOR THE CURRENT (FROZEN) VELOCITY INSTEAD OF
+        // THE ITERATION LOOP: CBS3D_STEADY_ENERGY=1 (SteadyEnergySolver.hpp).
+        // WRITES ONE VTU AT ITERATION (RESTART + 1) AND RETURNS.
+        // ================================
+        if (environment_flag_enabled("CBS3D_STEADY_ENERGY"))
+        {
+            if (s_.cfg.temp_calc < 1)
+            {
+                throw std::runtime_error(
+                    "CBS3D_STEADY_ENERGY needs the energy equation (temp_calc = 1)");
+            }
+
+            const SteadyEnergySolver::Result energy =
+                SteadyEnergySolver::solve(
+                    s_,
+                    thermal_boundary.fixed,
+                    thermal_boundary.value,
+                    thermal_boundary.heat_flux_load);
+
+            DistributedPost::writeSolution(s_, case_name_, 1);
+
+            if (s_.mpi_rank == 0)
+            {
+                std::cout
+                    << "Steady energy (implicit, frozen velocity)\n"
+                    << "  Krylov iterations : " << energy.iterations
+                    << (energy.converged ? " (converged)" : " (NOT CONVERGED)") << "\n"
+                    << "  ||b - A T|| / ||b||: " << energy.ksp_relative_residual << "\n"
+                    << "  AFC               : "
+                    << (energy.afc ? "ON, " + std::to_string(energy.afc_iterations)
+                                     + " defect-correction iterations, last max|dT| = "
+                                     + std::to_string(energy.afc_change) + " K"
+                                   : std::string("OFF")) << "\n"
+                    << "  explicit residual : ";
+                if (energy.afc)
+                {
+                    std::cout << "n/a with AFC (limited fluxes)\n";
+                }
+                else
+                {
+                    std::cout << "max|R(T)| / max|c + q| = " << energy.residual_check
+                              << (energy.residual_check < 1.0e-6 ? "  (MATRIX CHECK PASS)\n"
+                                                                 : "  (MATRIX CHECK FAIL)\n");
+                }
+                std::cout
+                    << "  temperature range : " << energy.t_min << " .. "
+                    << energy.t_max << " K\n"
+                    << "  solve time        : " << energy.seconds << " s\n"
+                    << "Run complete\n"
+                    << "  stop reason   : steady energy solved\n";
+            }
+            return;
+        }
 
         const double loop_start = MPI_Wtime();
 
