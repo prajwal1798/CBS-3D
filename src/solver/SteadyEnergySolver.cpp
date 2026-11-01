@@ -245,7 +245,7 @@ namespace cbs
         //    D = GRAPH VISCOSITY OF THE FLUID ELEMENTS WHEN AFC IS ON
         //    (d_ab = max(0, -M_ab, -M_ba), AS IN TemperatureAFC.cpp), WHICH
         //    MAKES THE LOW-ORDER OFF-DIAGONALS l_ab = M_ab + d_ab >= 0.
-        //    q_i = SUM_b max(0, l_ib) IS KEPT FOR THE LIMITER.
+        //    The matrix is used only as a fixed defect-correction preconditioner.
         // ================================
         Mat A = nullptr;
         check_petsc(MatCreateAIJ(MPI_COMM_WORLD,
@@ -370,7 +370,8 @@ namespace cbs
         }
         check_petsc(KSPSetFromOptions(ksp), "KSPSetFromOptions");
 
-        // RIGHT-HAND SIDE WITHOUT ANTIDIFFUSION: c + q (FREE), T_D (DIRICHLET)
+        // UNLIMITED GALERKIN RHS: c + q (FREE), T_D (DIRICHLET).
+        // AFC INSTEAD USES THE SHARED EXPLICIT LIMITED RESIDUAL.
         Array1D<Real> base_rhs(s.cfg.npoin);
         base_rhs.fill(0.0);
         Real local_rhs_max = 0.0;
