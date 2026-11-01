@@ -53,7 +53,7 @@ namespace cbs
         {
             Int iterations = 0;
             Real ksp_relative_residual = 0.0;
-            Real residual_check = 0.0;     // max |R(T)| / max |c + q| OVER FREE NODES (NO AFC)
+            Real residual_check = 0.0;     // max |R_AFC(T)| / max |c + q| OVER FREE NODES (AFC OR UNLIMITED)
             Real seconds = 0.0;
             bool converged = false;
             Real t_min = 0.0;
