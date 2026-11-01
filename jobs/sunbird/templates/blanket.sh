@@ -14,8 +14,9 @@
 #   smoke [STAGE]       300 ITERATIONS ON THE SMALLEST SET (30 MIN LIMIT):
 #                       START-UP, HEAT INPUT, TIME STEP, NO CRASH
 #   run STAGE [OPTS]    STAGE = L0 (FLOW ONLY), L1 (+ WALL FLUX), L2 (+ NUCLEAR
-#                       HEATING). PICKS THE LARGEST READY SET THAT FITS THE
-#                       FREE CORES (submit_auto.sh). OPTS: --time T --max N --dry-run
+#                       HEATING), L1T (L1 IN PHYSICAL TIME, FOR TIME AVERAGES).
+#                       PICKS THE LARGEST READY SET THAT FITS THE FREE CORES
+#                       (submit_auto.sh). OPTS: --time T --max N --sets N --dry-run
 #   check [RUN_DIR]     MASS + ENERGY BALANCE AND RESIDUAL PLOT OF A RUN
 #                       (DEFAULT: THE NEWEST RUN)
 #   status              YOUR JOBS AND THE LATEST PROGRESS LINE OF EACH RUN
@@ -30,6 +31,9 @@
 #   CBS3D_LTS_MONOTONE     [1] LOCAL TIME STEPS MAY ONLY DECREASE ON A REFRESH
 #                 (OTHERWISE THE 3.2 M-TET RUN REFRESHED EVERY ~2.5 ITERATIONS
 #                 AND CYCLED INSTEAD OF CONVERGING)
+#   CBS3D_AVERAGE_START_TIME  [OFF] TRANSIENT STAGE L1T: TIME AVERAGES FROM
+#                 THIS PHYSICAL TIME [s] (TimeAverage.hpp); check THEN ALSO
+#                 BALANCES THE MEAN FIELDS
 #   CBS3D_TEMPERATURE_AFC  [1] ALGEBRAIC FLUX CORRECTION OF THE TEMPERATURE
 #                 (NO UNDER/OVERSHOOT AT HIGH CELL PECLET NUMBER); 0 = OFF
 #
@@ -64,7 +68,7 @@ shift
 # ================================
 stage_par() {
     local f="$SRC/blanket_$1.par"
-    [[ -s "$f" ]] || { echo "ERROR: UNKNOWN STAGE '$1' (NO $f); USE L0, L1 OR L2" >&2; exit 1; }
+    [[ -s "$f" ]] || { echo "ERROR: UNKNOWN STAGE '$1' (NO $f); USE L0, L1, L1T OR L2" >&2; exit 1; }
     echo "$f"
 }
 
@@ -188,6 +192,11 @@ run)
     echo "STAGE  : $STAGE  ($PAR)"
     echo "SOLID  : c_p divided by $CP_SCALE  ($MAT)"
     echo "AFC    : CBS3D_TEMPERATURE_AFC=$CBS3D_TEMPERATURE_AFC   LTS: CBS3D_LTS_MONOTONE=$CBS3D_LTS_MONOTONE"
+    echo "AVERAGE: start time ${CBS3D_AVERAGE_START_TIME:-off} s, start iteration ${CBS3D_AVERAGE_START_ITERATION:-off}"
+    if [[ "${CBS3D_RESTART:-0}" != 0 ]]; then
+        echo "RESTART: ${CBS3D_RESTART_FORMAT:-native} FROM ${CBS3D_RESTART_ROOT:-?} (ITERATION ${CBS3D_RESTART_ITERATION:-from manifest}); AS INITIAL CONDITION: ${CBS3D_RESTART_AS_INITIAL_CONDITION:-0}"
+        echo "         THE RUN MUST USE THE SAME RANK COUNT (PASS --sets N)"
+    fi
     bash "$T/submit_auto.sh" "$DIR" "$CASE" --time 24:00:00 "$@" --par "$PAR" --matprop "$MAT"
     ;;
 
@@ -204,6 +213,14 @@ check)
     if ls "$RUN"/output/"$CASE"/*.pvtu > /dev/null 2>&1; then
         python3 "$CBS3D_CODE/tools/energy_balance.py" "$RUN/output/$CASE" \
             --log "$RUN/solver.out" --plane y=0 --rho 997 --cp 4182 || true
+        # TRANSIENT RUN WITH TIME AVERAGES: ALSO THE BALANCE OF THE MEAN FIELDS
+        LAST="$(ls -1t "$RUN"/output/"$CASE"/*.pvtu | head -1)"
+        if grep -q 'Name="mean_velocity"' "$LAST"; then
+            echo "---- TIME-AVERAGED FIELDS ----"
+            sed 's/\x1b\[[0-9;]*m//g' "$RUN/solver.out" | grep "\[AVG\]" | tail -1 || true
+            python3 "$CBS3D_CODE/tools/energy_balance.py" "$LAST" --mean \
+                --log "$RUN/solver.out" --plane y=0 --rho 997 --cp 4182 || true
+        fi
     else
         echo "NOTE   : NO .pvtu YET (FIRST ONE AT THE vtu_output_every_iterations STEP)"
     fi

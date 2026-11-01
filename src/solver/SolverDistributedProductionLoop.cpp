@@ -26,6 +26,7 @@
 #include "cbs/boundary/Boundary.hpp"
 #include "cbs/boundary/DistributedSymmetry.hpp"
 #include "cbs/io/DistributedPost.hpp"
+#include "cbs/io/TimeAverage.hpp"
 #include "cbs/linalg/PetscPersistentDistributedPressureSystem.hpp"
 #include "cbs/parallel/Coloring.hpp"
 #include "cbs/parallel/HaloExchange.hpp"
@@ -1306,6 +1307,10 @@ namespace cbs
                 << "  setup time : " << global_setup_seconds << " s\n";
         }
 
+        // TIME AVERAGES (OFF UNLESS CBS3D_AVERAGE_START_* IS SET); BEFORE
+        // THE FIRST VTU SO THAT A RESTARTED WINDOW IS ALREADY LOADED.
+        TimeAverage::initialise(s_);
+
         DistributedPost::initialise(s_, case_name_);
 
         const double loop_start = MPI_Wtime();
@@ -1532,6 +1537,10 @@ namespace cbs
             }
 
             updateVelocityMagnitude();
+
+            // ADD THIS STEP TO THE TIME AVERAGES (BEFORE THE CHECKPOINT AND
+            // VTU OF THIS ITERATION). ALL LOCAL NODES ARE CURRENT HERE.
+            TimeAverage::accumulate(s_, global_iteration, global_dt);
 
             const IterationMetrics metrics =
                 evaluate_global_convergence(

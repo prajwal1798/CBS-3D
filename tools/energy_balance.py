@@ -16,6 +16,11 @@
 #
 # USAGE     : python3 tools/energy_balance.py RESULT [--log solver.out]
 #                 [--plane y=0] [--rho 997] [--cp 4182] [--qin W] [--tol 0.02]
+#                 [--mean]
+#             --mean USES THE TIME-AVERAGED FIELDS mean_velocity AND
+#             mean_temperature OF A TRANSIENT RUN (CBS3D_AVERAGE_START_*).
+#             IT THEN NEGLECTS THE CORRELATION <u'T'> AT THE PORTS, WHICH IS
+#             SMALL WHEN THE OUTLET FLOW IS STEADY (CHECK rms_velocity THERE).
 #             RESULT = .pvtu / .vtu / FOLDER (LATEST FILE UNDER IT)
 #
 # OUTPUT    : TABLE OF PORTS (MASS FLOW, MIXED-MEAN T), TOTALS, VERDICT.
@@ -49,7 +54,7 @@ def _array(text, name):
     return np.array(m.group(1).split(), dtype=float)
 
 
-def read_piece(path):
+def read_piece(path, velocity_name="velocity", temperature_name="temperature"):
     with open(path) as handle:
         text = handle.read()
     m = re.search(r"<Points>\s*<DataArray[^>]*>(.*?)</DataArray>", text, re.S)
@@ -59,8 +64,8 @@ def read_piece(path):
     types = _array(text, "types").astype(np.int64)
     tet = types == 10
     tets = conn[(offsets[tet] - 4)[:, None] + np.arange(4)[None, :]]
-    velocity = _array(text, "velocity").reshape(-1, 3)
-    temperature = _array(text, "temperature")
+    velocity = _array(text, velocity_name).reshape(-1, 3)
+    temperature = _array(text, temperature_name)
     return points, tets, velocity, temperature
 
 
@@ -79,14 +84,15 @@ def latest(path):
     return max(found)[1]
 
 
-def read_result(path):
+def read_result(path, mean=False):
     path = latest(path)
+    names = ("mean_velocity", "mean_temperature") if mean else ("velocity", "temperature")
     if path.endswith(".pvtu"):
         with open(path) as handle:
             sources = re.findall(r'<Piece\s+Source="([^"]+)"', handle.read())
         base = os.path.dirname(path)
-        return [read_piece(os.path.join(base, s)) for s in sources], path
-    return [read_piece(path)], path
+        return [read_piece(os.path.join(base, s), *names) for s in sources], path
+    return [read_piece(path, *names)], path
 
 
 def heat_input_from_log(log):
@@ -162,14 +168,24 @@ def main():
                     help="REFERENCE T [K] (DEFAULT: MIXED-MEAN INLET T)")
     ap.add_argument("--tol", type=float, default=0.02,
                     help="PASS WHEN |Q_out/Q_in - 1| <= tol")
+    ap.add_argument("--mean", action="store_true",
+                    help="USE THE TIME-AVERAGED FIELDS (mean_velocity, mean_temperature)")
     args = ap.parse_args()
 
     name, val = args.plane.split("=")
     axis = AXES[name.strip().lower()]
     value = float(val)
 
-    pieces, path = read_result(args.result)
-    print("READ    : %s (%d piece(s))" % (path, len(pieces)))
+    try:
+        pieces, path = read_result(args.result, mean=args.mean)
+    except ValueError as error:
+        if args.mean:
+            print("ERROR   : %s; THIS FILE HAS NO TIME AVERAGES (CBS3D_AVERAGE_START_* "
+                  "NOT SET, OR THE WINDOW HAD NOT STARTED)" % error)
+            return 2
+        raise
+    print("READ    : %s (%d piece(s))%s" % (path, len(pieces),
+                                         ", TIME-AVERAGED FIELDS" if args.mean else ""))
 
     allpts = np.vstack([p[0] for p in pieces])
     extent = allpts.max(axis=0) - allpts.min(axis=0)

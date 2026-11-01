@@ -342,6 +342,35 @@ bash $T/blanket.sh check        # mass/energy balance (tools/energy_balance.py) 
 
 See `cases/blanket_slice/README.md` for the stages and loads.
 
+### 6.4b Unsteady flow: transient run with time averages
+
+When a steady run plateaus because the flow itself is unsteady (separation
+behind a bend), run the same case in physical time and average it.
+`blanket_L1T.par` is L1 with `transient_on = 1`, one global time step and a
+60 s end time. Averaging is switched on from the environment:
+
+```bash
+export CBS3D_AVERAGE_START_TIME=20        # seconds; or CBS3D_AVERAGE_START_ITERATION=n
+export CBS3D_CHECKPOINT_EVERY=20000       # the averages are saved with every checkpoint
+# OPTIONAL: START FROM THE LAST FIELD OF AN L1 RUN (SAME RANK COUNT), SO THE
+# SOLID IS ALREADY NEAR ITS QUASI-STEADY TEMPERATURE. A VTU HAS NO TIME
+# HISTORY, SO IT ENTERS AS THE INITIAL CONDITION AT t = 0:
+export CBS3D_RESTART=1 CBS3D_RESTART_FORMAT=legacy_vtu CBS3D_RESTART_AS_INITIAL_CONDITION=1
+export CBS3D_RESTART_ROOT=$CBS3D_SCRATCH/cases/blanket_slice/run_blanket_JOBID/output/blanket
+export CBS3D_RESTART_ITERATION=100000
+bash $T/blanket.sh run L1T --sets 256 --time 24:00:00
+bash $T/blanket.sh check                  # instantaneous AND time-averaged balance
+```
+
+Every VTU written after the start time carries `mean_velocity`,
+`rms_velocity`, `mean_pressure`, `mean_temperature`, `rms_temperature` and
+`max_temperature` (time-weighted, from the start time to that step). A native
+restart (`CBS3D_RESTART=1`, `CBS3D_RESTART_ROOT=.../restart/step_N`) continues
+the same averaging window. Local time stepping has no common time, so the
+solver refuses averaging there. Judge convergence by the averaged quantities
+(outlet mixed temperatures, Q_out/Q_in of the mean fields, peak wall
+temperature) settling, not by the per-step residuals.
+
 ### 6.4 Pitfalls found on Sunbird2
 
 - `~/cbs3d_env.sh` starts with `module purge`; the venv Python needs the

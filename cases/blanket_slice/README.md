@@ -32,6 +32,7 @@ fillet radius above is reproduced exactly; fluid 2.809e-4 m3, solid
 | `blanket_L0.par` | flow only (energy off) |
 | `blanket_L1.par` | flow + energy, first-wall flux 1.0e5 W/m2 on BC 532 |
 | `blanket_L2.par` | L1 + nuclear heating in the EUROFER, 1.6e6 exp(-d/0.15 m) W/m3, d = 0.28 m - y |
+| `blanket_L1T.par` | L1 in physical time (global step, 60 s) for an unsteady flow; time averages via `CBS3D_AVERAGE_START_TIME` (runbook 6.4b) |
 | `blanket.matprop` | 0 water at 298 K (997, 4182, 0.606, 8.9e-4), 1 EUROFER97 (7850, 500, 28.3) |
 
 All stages: dimensional SI, mass-flow inlet BC 511 with 0.050 kg/s in total

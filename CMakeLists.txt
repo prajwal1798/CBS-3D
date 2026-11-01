@@ -38,6 +38,7 @@ set(CBS3D_CORE_SOURCES
     src/io/Post.cpp
     src/io/DistributedPost.cpp
     src/io/RestartIO.cpp
+    src/io/TimeAverage.cpp
 
     src/preprocess/Preprocess.cpp
     src/preprocess/NuclearHeating.cpp

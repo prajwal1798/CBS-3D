@@ -6,6 +6,7 @@
 //=============================================================================
 
 #include "cbs/io/RestartIO.hpp"
+#include "cbs/io/TimeAverage.hpp"
 
 #include <array>
 #include <cctype>
@@ -737,11 +738,18 @@ namespace cbs
             const fs::path& legacy_directory,
             const Int completed_iteration)
         {
-            if (s.cfg.transient_on > 0)
+            // A VTU HOLDS NO TRANSIENT HISTORY (TIME, PREVIOUS LEVELS). IT MAY
+            // STILL SERVE AS THE INITIAL CONDITION OF A NEW TRANSIENT RUN
+            // (t = 0, ALL HISTORY LEVELS = THE IMPORTED FIELD) WHEN THE USER
+            // SAYS SO EXPLICITLY.
+            if (s.cfg.transient_on > 0 &&
+                !environment_flag_enabled("CBS3D_RESTART_AS_INITIAL_CONDITION"))
             {
                 throw std::runtime_error(
                     "RestartIO legacy VTU import is allowed only for the current "
-                    "steady pseudo-time calculation; transient history is absent");
+                    "steady pseudo-time calculation; transient history is absent. "
+                    "To start a NEW transient run from this field (t = 0), set "
+                    "CBS3D_RESTART_AS_INITIAL_CONDITION=1");
             }
 
             const std::string case_name =
@@ -1022,6 +1030,9 @@ namespace cbs
                 s,
                 temporary_rank_path,
                 completed_iteration);
+
+            // RUNNING TIME AVERAGES (NO FILE WHEN AVERAGING IS OFF)
+            TimeAverage::writeRankFile(s, checkpoint_directory);
         }
         catch (const std::exception& error)
         {

@@ -5,12 +5,14 @@
 //=============================================================================
 
 #include "cbs/io/DistributedPost.hpp"
+#include "cbs/io/TimeAverage.hpp"
 
 #include <algorithm>
 #include <cmath>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
+#include <iostream>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -370,6 +372,81 @@ namespace cbs
             }
             output << "        </DataArray>\n";
 
+            // RUNNING TIME AVERAGES (TimeAverage.hpp), ONCE THE WINDOW HAS
+            // STARTED. THE .pvtu HEADER USES THE SAME TEST.
+            if (TimeAverage::hasSamples())
+            {
+                output << "        <DataArray type=\"Float64\" Name=\"mean_velocity\" NumberOfComponents=\"3\" format=\"ascii\">\n";
+                for (Int ip = 1; ip <= s.cfg.npoin; ++ip)
+                {
+                    if (velocity_active(s, ip))
+                    {
+                        output << "          "
+                               << safe_value(TimeAverage::meanVelocity(1, ip)) << ' '
+                               << safe_value(TimeAverage::meanVelocity(2, ip)) << ' '
+                               << safe_value(TimeAverage::meanVelocity(3, ip)) << '\n';
+                    }
+                    else
+                    {
+                        output << "          0 0 0\n";
+                    }
+                }
+                output << "        </DataArray>\n";
+
+                output << "        <DataArray type=\"Float64\" Name=\"rms_velocity\" NumberOfComponents=\"3\" format=\"ascii\">\n";
+                for (Int ip = 1; ip <= s.cfg.npoin; ++ip)
+                {
+                    if (velocity_active(s, ip))
+                    {
+                        output << "          "
+                               << safe_value(TimeAverage::rmsVelocity(1, ip)) << ' '
+                               << safe_value(TimeAverage::rmsVelocity(2, ip)) << ' '
+                               << safe_value(TimeAverage::rmsVelocity(3, ip)) << '\n';
+                    }
+                    else
+                    {
+                        output << "          0 0 0\n";
+                    }
+                }
+                output << "        </DataArray>\n";
+
+                output << "        <DataArray type=\"Float64\" Name=\"mean_pressure\" NumberOfComponents=\"1\" format=\"ascii\">\n";
+                for (Int ip = 1; ip <= s.cfg.npoin; ++ip)
+                {
+                    output << "          "
+                           << (touches_fluid(s, ip)
+                               ? safe_value(TimeAverage::meanPressure(ip))
+                               : 0.0)
+                           << '\n';
+                }
+                output << "        </DataArray>\n";
+
+                if (s.cfg.temp_calc > 0)
+                {
+                    const struct
+                    {
+                        const char* name;
+                        Real (*value)(Int);
+                    } fields[] =
+                    {
+                        { "mean_temperature", &TimeAverage::meanTemperature },
+                        { "rms_temperature",  &TimeAverage::rmsTemperature },
+                        { "max_temperature",  &TimeAverage::maxTemperature }
+                    };
+                    for (const auto& field : fields)
+                    {
+                        output << "        <DataArray type=\"Float64\" Name=\""
+                               << field.name
+                               << "\" NumberOfComponents=\"1\" format=\"ascii\">\n";
+                        for (Int ip = 1; ip <= s.cfg.npoin; ++ip)
+                        {
+                            output << "          " << safe_value(field.value(ip)) << '\n';
+                        }
+                        output << "        </DataArray>\n";
+                    }
+                }
+            }
+
             // Spalart-Allmaras nodal fields.
             //
             // These are written whenever turbulence is enabled so that the
@@ -664,6 +741,18 @@ namespace cbs
             output << "      <PDataArray type=\"Float64\" Name=\"temperature\" NumberOfComponents=\"1\"/>\n";
             output << "      <PDataArray type=\"Float64\" Name=\"velocity\" NumberOfComponents=\"3\"/>\n";
             output << "      <PDataArray type=\"Float64\" Name=\"velocity_magnitude\" NumberOfComponents=\"1\"/>\n";
+            if (TimeAverage::hasSamples())
+            {
+                output << "      <PDataArray type=\"Float64\" Name=\"mean_velocity\" NumberOfComponents=\"3\"/>\n";
+                output << "      <PDataArray type=\"Float64\" Name=\"rms_velocity\" NumberOfComponents=\"3\"/>\n";
+                output << "      <PDataArray type=\"Float64\" Name=\"mean_pressure\" NumberOfComponents=\"1\"/>\n";
+                if (s.cfg.temp_calc > 0)
+                {
+                    output << "      <PDataArray type=\"Float64\" Name=\"mean_temperature\" NumberOfComponents=\"1\"/>\n";
+                    output << "      <PDataArray type=\"Float64\" Name=\"rms_temperature\" NumberOfComponents=\"1\"/>\n";
+                    output << "      <PDataArray type=\"Float64\" Name=\"max_temperature\" NumberOfComponents=\"1\"/>\n";
+                }
+            }
             // The SA declarations must match the piece files exactly, or a
             // reader silently drops the arrays it cannot find in every piece.
             if (s.cfg.turbulence_on > 0)
@@ -905,6 +994,14 @@ namespace cbs
         {
             write_parallel_descriptor(s, case_name, iteration);
             write_pvd(s, case_name);
+
+            if (TimeAverage::hasSamples())
+            {
+                std::cout << "  [AVG] iteration " << iteration
+                          << ": averaging window " << TimeAverage::window()
+                          << " s over " << TimeAverage::samples()
+                          << " steps written with the VTU\n";
+            }
         }
 
         check_mpi(
