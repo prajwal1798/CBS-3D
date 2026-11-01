@@ -26,7 +26,10 @@ namespace cbs
     namespace
     {
         constexpr char average_magic[8] = {'C', 'B', 'S', '3', 'D', 'A', 'V', 'G'};
-        constexpr std::uint32_t average_version = 1U;
+        // VERSION 2 ADDS sum_ut_ (THE u_i T COVARIANCE ACCUMULATOR).
+        // A VERSION 1 RANK FILE CANNOT SUPPLY <u'T'> FOR THE WHOLE WINDOW
+        // AND IS REJECTED; START A NEW WINDOW WITH THIS BUILD.
+        constexpr std::uint32_t average_version = 2U;
 
         std::string env_text(const char* name)
         {
@@ -172,6 +175,7 @@ namespace cbs
         npoin_ = s.cfg.npoin;
         sum_u_.resize(3, npoin_);
         sum_uu_.resize(3, npoin_);
+        sum_ut_.resize(3, npoin_);
         sum_p_.resize(npoin_);
         sum_t_.resize(npoin_);
         sum_tt_.resize(npoin_);
@@ -179,6 +183,7 @@ namespace cbs
         ref_t_.resize(npoin_);
         sum_u_.fill(0.0);
         sum_uu_.fill(0.0);
+        sum_ut_.fill(0.0);
         sum_p_.fill(0.0);
         sum_t_.fill(0.0);
         sum_tt_.fill(0.0);
@@ -205,7 +210,17 @@ namespace cbs
                 }
                 const auto version = get<std::uint32_t>(in);
                 const auto npoin = get<Int>(in);
-                if (version != average_version || npoin != npoin_)
+                if (version != average_version)
+                {
+                    throw std::runtime_error(
+                        "TimeAverage: RANK FILE " + file.string() +
+                        " HAS AVERAGE VERSION " + std::to_string(version) +
+                        "; THIS BUILD WRITES VERSION " +
+                        std::to_string(average_version) +
+                        " AND NEEDS <u'T'> FOR THE WHOLE WINDOW. "
+                        "START A NEW WINDOW (CBS3D_AVERAGE_START_TIME)");
+                }
+                if (npoin != npoin_)
                 {
                     throw std::runtime_error(
                         "TimeAverage: RANK FILE " + file.string() +
@@ -220,6 +235,7 @@ namespace cbs
                 get_raw(in, sum_tt_.raw());
                 get_raw(in, max_t_.raw());
                 get_raw(in, ref_t_.raw());
+                get_raw(in, sum_ut_.raw());
                 loaded = true;
             }
         }
@@ -238,7 +254,8 @@ namespace cbs
                                  : "new window")
                       << "\n"
                       << "  output     : mean_velocity rms_velocity mean_pressure "
-                         "mean_temperature rms_temperature max_temperature\n";
+                         "mean_temperature rms_temperature max_temperature "
+                         "covariance_velocity_temperature\n";
         }
     }
 
@@ -287,6 +304,11 @@ namespace cbs
                 const Real dtheta = t - ref_t_(ip);
                 sum_t_(ip) += dtheta * dt;
                 sum_tt_(ip) += dtheta * dtheta * dt;
+                for (Int d = 1; d <= 3; ++d)
+                {
+                    // <u_i T> - <u_i><T> = <u_i theta> - <u_i><theta>
+                    sum_ut_(d, ip) += s.unkno(d, ip) * dtheta * dt;
+                }
                 max_t_(ip) = std::max(max_t_(ip), t);
             }
         }
@@ -330,6 +352,15 @@ namespace cbs
         return max_t_(ip);
     }
 
+    Real TimeAverage::covarianceVelocityTemperature(const Int dim, const Int ip)
+    {
+        // THE SHIFT CANCELS: <u theta> - <u><theta> = <u T> - <u><T>,
+        // WITH theta = T - T_FIRST.
+        const Real mu = sum_u_(dim, ip) / window_;
+        const Real mt = sum_t_(ip) / window_;
+        return sum_ut_(dim, ip) / window_ - mu * mt;
+    }
+
     //=========================================================================
     // CHECKPOINT RANK FILE
     //=========================================================================
@@ -366,6 +397,7 @@ namespace cbs
             put_raw(out, sum_tt_.raw());
             put_raw(out, max_t_.raw());
             put_raw(out, ref_t_.raw());
+            put_raw(out, sum_ut_.raw());
             out.flush();
             if (!out)
             {

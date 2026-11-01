@@ -7,7 +7,8 @@
 // PURPOSE   : RUNNING TIME AVERAGES OF A TRANSIENT (GLOBAL TIME STEP) MPI RUN.
 //             FOR EVERY LOCAL NODE THE TIME INTEGRALS
 //
-//                 INT u dt,  INT u_i^2 dt,  INT p dt,  INT T' dt,  INT T'^2 dt
+//                 INT u dt,  INT u_i^2 dt,  INT u_i T' dt,
+//                 INT p dt,  INT T' dt,  INT T'^2 dt
 //
 //             (T' = T - T AT THE FIRST SAMPLE, AGAINST ROUND-OFF IN THE VARIANCE)
 //
@@ -15,9 +16,14 @@
 //             (RECTANGLE RULE: f^{n+1} dt^n). THE VTU THEN CARRIES
 //
 //                 mean_velocity, rms_velocity (PER COMPONENT), mean_pressure,
-//                 mean_temperature, rms_temperature, max_temperature
+//                 mean_temperature, rms_temperature, max_temperature,
+//                 covariance_velocity_temperature (PER COMPONENT)
 //
-//             WITH mean = INT f dt / T_w AND rms = sqrt(INT f^2 dt / T_w - mean^2).
+//             WITH mean = INT f dt / T_w, rms = sqrt(INT f^2 dt / T_w - mean^2)
+//             AND cov(u_i,T) = INT u_i T dt / T_w - mean(u_i) mean(T).
+//             THE COVARIANCE IS REQUIRED FOR A TIME-AVERAGED ENERGY BALANCE:
+//             THE MEAN ENTHALPY FLUX IS INT <u.n T> dA, NOT
+//             INT <u.n><T> dA; THE DIFFERENCE IS THE TURBULENT CORRELATION.
 //
 // CONTROLS  : ENVIRONMENT (AVERAGING IS OFF WHEN NEITHER IS SET)
 //   CBS3D_AVERAGE_START_TIME=t0       START AT PHYSICAL TIME t0 [s]
@@ -67,6 +73,10 @@ namespace cbs
         [[nodiscard]] static Real rmsTemperature(Int ip);
         [[nodiscard]] static Real maxTemperature(Int ip);
 
+        // cov(u_i,T) = <u_i T> - <u_i><T>: THE TERM THAT MAKES THE
+        // TIME-AVERAGED ENTHALPY FLUX <u.n T> DIFFER FROM <u.n><T>.
+        [[nodiscard]] static Real covarianceVelocityTemperature(Int dim, Int ip);
+
         // RANK FILE IN A CHECKPOINT DIRECTORY (WRITTEN THROUGH A .tmp + RENAME).
         static void writeRankFile(const CBSStateSI& s,
                                   const std::filesystem::path& directory);
@@ -85,6 +95,7 @@ namespace cbs
 
         inline static Array2D<Real> sum_u_;
         inline static Array2D<Real> sum_uu_;
+        inline static Array2D<Real> sum_ut_;
         inline static Array1D<Real> sum_p_;
         inline static Array1D<Real> sum_t_;
         inline static Array1D<Real> sum_tt_;

@@ -19,8 +19,10 @@
 #                 [--mean]
 #             --mean USES THE TIME-AVERAGED FIELDS mean_velocity AND
 #             mean_temperature OF A TRANSIENT RUN (CBS3D_AVERAGE_START_*).
-#             IT THEN NEGLECTS THE CORRELATION <u'T'> AT THE PORTS, WHICH IS
-#             SMALL WHEN THE OUTLET FLOW IS STEADY (CHECK rms_velocity THERE).
+#             WHEN THE FILE ALSO HAS covariance_velocity_temperature, IT
+#             EVALUATES THE TRUE MEAN FLUX <u.n T> = <u.n><T> + <u.n'T'>.
+#             WITHOUT THAT FIELD IT FALLS BACK TO <u.n><T>, WHICH OMITS THE
+#             TURBULENT CORRELATION AND UNDERSTATES AN UNSTEADY OUTLET.
 #             RESULT = .pvtu / .vtu / FOLDER (LATEST FILE UNDER IT)
 #
 # OUTPUT    : TABLE OF PORTS (MASS FLOW, MIXED-MEAN T), TOTALS, VERDICT.
@@ -54,7 +56,8 @@ def _array(text, name):
     return np.array(m.group(1).split(), dtype=float)
 
 
-def read_piece(path, velocity_name="velocity", temperature_name="temperature"):
+def read_piece(path, velocity_name="velocity", temperature_name="temperature",
+               covariance_name=None):
     with open(path) as handle:
         text = handle.read()
     m = re.search(r"<Points>\s*<DataArray[^>]*>(.*?)</DataArray>", text, re.S)
@@ -66,7 +69,13 @@ def read_piece(path, velocity_name="velocity", temperature_name="temperature"):
     tets = conn[(offsets[tet] - 4)[:, None] + np.arange(4)[None, :]]
     velocity = _array(text, velocity_name).reshape(-1, 3)
     temperature = _array(text, temperature_name)
-    return points, tets, velocity, temperature
+    covariance = None
+    if covariance_name is not None:
+        try:
+            covariance = _array(text, covariance_name).reshape(-1, 3)
+        except ValueError:
+            covariance = None       # OLDER OUTPUT: PRODUCT <u><T> ONLY
+    return points, tets, velocity, temperature, covariance
 
 
 def latest(path):
@@ -86,13 +95,19 @@ def latest(path):
 
 def read_result(path, mean=False):
     path = latest(path)
-    names = ("mean_velocity", "mean_temperature") if mean else ("velocity", "temperature")
+    if mean:
+        names = ("mean_velocity", "mean_temperature")
+        covariance_name = "covariance_velocity_temperature"
+    else:
+        names = ("velocity", "temperature")
+        covariance_name = None
     if path.endswith(".pvtu"):
         with open(path) as handle:
             sources = re.findall(r'<Piece\s+Source="([^"]+)"', handle.read())
         base = os.path.dirname(path)
-        return [read_piece(os.path.join(base, s), *names) for s in sources], path
-    return [read_piece(path, *names)], path
+        return [read_piece(os.path.join(base, s), *names,
+                           covariance_name=covariance_name) for s in sources], path
+    return [read_piece(path, *names, covariance_name=covariance_name)], path
 
 
 def heat_input_from_log(log):
@@ -109,9 +124,10 @@ def heat_input_from_log(log):
 # FACES ON THE PORT PLANE
 # ================================
 def plane_faces(pieces, axis, value, tol):
-    """AREA, u.e_axis AND T AT THE 3 NODES, CENTROID, NODE KEYS (PIECE, NODE)."""
-    areas, un, temp, cent, keys = [], [], [], [], []
-    for ip, (points, tets, vel, t) in enumerate(pieces):
+    """AREA, u.e_axis, T, cov(u_axis,T), CENTROID, NODE KEYS."""
+    areas, un, temp, cov, cent, keys = [], [], [], [], [], []
+    use_cov = all(piece[4] is not None for piece in pieces)
+    for ip, (points, tets, vel, t, piece_cov) in enumerate(pieces):
         on = np.abs(points[:, axis] - value) <= tol
         for f in FACES:
             tri = tets[:, f]
@@ -123,12 +139,15 @@ def plane_faces(pieces, axis, value, tol):
             areas.append(0.5 * np.linalg.norm(np.cross(p1 - p0, p2 - p0), axis=1))
             un.append(vel[tri][:, :, axis])
             temp.append(t[tri])
+            if use_cov:
+                cov.append(piece_cov[tri][:, :, axis])
             cent.append((p0 + p1 + p2) / 3.0)
             # NODES ARE MATCHED ACROSS PIECES BY THEIR ROUNDED COORDINATES
             keys.append(np.round(points[tri], 9).reshape(-1, 9))
     if not areas:
         raise ValueError("NO TETRAHEDRON FACE LIES ON THE PLANE")
     return (np.concatenate(areas), np.vstack(un), np.vstack(temp),
+            np.vstack(cov) if use_cov else None,
             np.vstack(cent), np.vstack(keys))
 
 
@@ -193,19 +212,41 @@ def main():
     lo, hi = allpts[:, axis].min(), allpts[:, axis].max()
     sign = -1.0 if abs(value - lo) <= abs(value - hi) else 1.0   # OUTWARD
 
-    area, un, temp, cent, keys = plane_faces(pieces, axis, value, tol)
+    area, un, temp, cov, cent, keys = plane_faces(pieces, axis, value, tol)
     un = sign * un                                                  # u.n_out
+    if cov is not None:
+        cov = sign * cov                                            # cov(u.n,T)
     def enthalpy(t_shift):
         tt = temp - t_shift
         return args.rho * args.cp * area / 12.0 * (
             un.sum(axis=1) * tt.sum(axis=1) + (un * tt).sum(axis=1))
 
+    def enthalpy_with_covariance(t_shift):
+        # INT u.n (T - T_ref) = A/12[(sum u)(sum T) + sum <uT>]
+        #                      - T_ref A/3 sum u,   <uT> = <u><T> + cov
+        nodal_ut = un * temp + cov
+        return args.rho * args.cp * (
+            area / 12.0 * (un.sum(axis=1) * temp.sum(axis=1) +
+                           nodal_ut.sum(axis=1)) -
+            t_shift * area / 3.0 * un.sum(axis=1))
+
+    flux = enthalpy_with_covariance if cov is not None else enthalpy
+
     mass = args.rho * area / 3.0 * un.sum(axis=1)
     inflow = mass < 0.0
-    t_in = enthalpy(0.0)[inflow].sum() / (args.cp * mass[inflow].sum()) \
+    t_in = flux(0.0)[inflow].sum() / (args.cp * mass[inflow].sum()) \
         if inflow.any() else 0.0
     t_ref = args.tref if args.tref is not None else t_in
-    enth = enthalpy(t_ref)
+    enth = flux(t_ref)
+    q_cov = enth.sum() - enthalpy(t_ref).sum() if cov is not None else 0.0
+
+    if args.mean:
+        if cov is None:
+            print("FLUX    : rho cp INT <u.n><T> dA; covariance_velocity_temperature "
+                  "IS ABSENT")
+        else:
+            print("FLUX    : rho cp INT <u.n T> dA = <u.n><T> + <u.n'T'> "
+                  "(covariance field present)")
 
     # PORTS: CONNECTED GROUPS OF WETTED FACES, LISTED ALONG THE IN-PLANE
     # DIRECTION OF LARGEST EXTENT
@@ -242,6 +283,12 @@ def main():
           % (m_in, m_out, (m_out - m_in) / max(m_in, 1e-300)))
     print("HEAT    : carried away by the coolant Q_out = %.6e W"
           "  (sum of mdot cp (T - T_ref))" % q_out)
+    if args.mean and cov is not None:
+        print("COVARIANCE: <u.n'T'> term = %+.6e W (%.2f%% of Q_out)"
+              % (q_cov, 100.0 * q_cov / q_out if q_out != 0.0 else float("nan")))
+    elif args.mean:
+        print("NOTE    : THE PRODUCT <u.n><T> OMITS <u.n'T'>; AN UNSTEADY OUTLET "
+              "CAN SHOW A SPURIOUS DEFICIT")
     t_all = np.concatenate([p[3] for p in pieces])
     print("T RANGE : %.4f .. %.4f K (all nodes)" % (t_all.min(), t_all.max()))
 
@@ -266,6 +313,9 @@ def main():
         print("RESULT  : STEADY")
         return 0
     print("RESULT  : NOT STEADY / NOT BALANCED")
+    if args.mean and cov is None:
+        print("CAVEAT  : THIS MEAN FIELD HAS NO <u'T'> DATA; THE DEFICIT ABOVE "
+              "IS NOT A SOLVER BALANCE")
     return 1
 
 

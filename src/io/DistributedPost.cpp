@@ -444,6 +444,25 @@ namespace cbs
                         }
                         output << "        </DataArray>\n";
                     }
+
+                    // THE TIME-AVERAGED ENERGY FLUX NEEDS <u_i T>, NOT
+                    // <u_i><T>. THIS ARRAY HOLDS THE DIFFERENCE.
+                    output << "        <DataArray type=\"Float64\" Name=\"covariance_velocity_temperature\" NumberOfComponents=\"3\" format=\"ascii\">\n";
+                    for (Int ip = 1; ip <= s.cfg.npoin; ++ip)
+                    {
+                        if (velocity_active(s, ip))
+                        {
+                            output << "          "
+                                   << safe_value(TimeAverage::covarianceVelocityTemperature(1, ip)) << ' '
+                                   << safe_value(TimeAverage::covarianceVelocityTemperature(2, ip)) << ' '
+                                   << safe_value(TimeAverage::covarianceVelocityTemperature(3, ip)) << '\n';
+                        }
+                        else
+                        {
+                            output << "          0 0 0\n";
+                        }
+                    }
+                    output << "        </DataArray>\n";
                 }
             }
 
@@ -751,6 +770,7 @@ namespace cbs
                     output << "      <PDataArray type=\"Float64\" Name=\"mean_temperature\" NumberOfComponents=\"1\"/>\n";
                     output << "      <PDataArray type=\"Float64\" Name=\"rms_temperature\" NumberOfComponents=\"1\"/>\n";
                     output << "      <PDataArray type=\"Float64\" Name=\"max_temperature\" NumberOfComponents=\"1\"/>\n";
+                    output << "      <PDataArray type=\"Float64\" Name=\"covariance_velocity_temperature\" NumberOfComponents=\"3\"/>\n";
                 }
             }
             // The SA declarations must match the piece files exactly, or a
