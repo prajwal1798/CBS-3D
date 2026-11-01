@@ -27,6 +27,9 @@
 #   CP_SCALE      DIVIDE THE SOLID c_p BY THIS FACTOR [1]. THE STEADY RESULT
 #                 DOES NOT DEPEND ON THE SOLID c_p; A FACTOR > 1 SHORTENS THE
 #                 SOLID'S THERMAL TIME CONSTANT (TRANSIENT IS THEN NOT PHYSICAL)
+#   CBS3D_LTS_MONOTONE     [1] LOCAL TIME STEPS MAY ONLY DECREASE ON A REFRESH
+#                 (OTHERWISE THE 3.2 M-TET RUN REFRESHED EVERY ~2.5 ITERATIONS
+#                 AND CYCLED INSTEAD OF CONVERGING)
 #   CBS3D_TEMPERATURE_AFC  [1] ALGEBRAIC FLUX CORRECTION OF THE TEMPERATURE
 #                 (NO UNDER/OVERSHOOT AT HIGH CELL PECLET NUMBER); 0 = OFF
 #
@@ -38,7 +41,7 @@
 # ================================
 
 set -euo pipefail
-usage() { sed -n '2,38p' "$0" | sed 's/^# \{0,1\}//'; exit 1; }
+usage() { sed -n '2,41p' "$0" | sed 's/^# \{0,1\}//'; exit 1; }
 [[ "$#" -ge 1 ]] || usage
 
 source "$HOME/cbs3d_env.sh"
@@ -51,6 +54,7 @@ CP_SCALE="${CP_SCALE:-1}"
 # WATER AT Pr ~ 6 GIVES CELL PECLET NUMBERS OF SEVERAL HUNDRED: WITHOUT THE
 # LIMITER THE TEMPERATURE UNDERSHOOTS THE INLET VALUE BY TENS OF KELVIN.
 export CBS3D_TEMPERATURE_AFC="${CBS3D_TEMPERATURE_AFC:-1}"
+export CBS3D_LTS_MONOTONE="${CBS3D_LTS_MONOTONE:-1}"
 
 CMD="$1"
 shift
@@ -183,7 +187,7 @@ run)
     MAT="$(run_matprop)"
     echo "STAGE  : $STAGE  ($PAR)"
     echo "SOLID  : c_p divided by $CP_SCALE  ($MAT)"
-    echo "AFC    : CBS3D_TEMPERATURE_AFC=$CBS3D_TEMPERATURE_AFC"
+    echo "AFC    : CBS3D_TEMPERATURE_AFC=$CBS3D_TEMPERATURE_AFC   LTS: CBS3D_LTS_MONOTONE=$CBS3D_LTS_MONOTONE"
     bash "$T/submit_auto.sh" "$DIR" "$CASE" --time 24:00:00 "$@" --par "$PAR" --matprop "$MAT"
     ;;
 

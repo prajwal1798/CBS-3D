@@ -100,6 +100,7 @@ done
     echo "master par: ${CBS3D_PAR:-none (partition copies)}"
     echo "master mat: ${CBS3D_MATPROP:-none (partition copies)}"
     echo "temp. AFC : ${CBS3D_TEMPERATURE_AFC:-0} (CBS3D_TEMPERATURE_AFC)"
+    echo "LTS       : monotone ${CBS3D_LTS_MONOTONE:-0}, margin ${CBS3D_LTS_REFRESH_MARGIN:-0.8}"
     sha256sum "$CBS3D_MPI_EXE" "$RUN_DIR/partitions/rank_0000/${CASE}_rank_0000.par" \
         "$RUN_DIR/partitions/rank_0000/${CASE}_rank_0000.matprop"
 } > "$RUN_DIR/run_record.txt"

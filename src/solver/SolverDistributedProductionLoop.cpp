@@ -465,7 +465,30 @@ namespace cbs
                     s.partition_metadata,
                     MPI_COMM_WORLD);
 
-                const Real margin = s.cfg.lts_refresh_margin;
+                Real margin = s.cfg.lts_refresh_margin;
+
+                // Optional override of the safety reserve, e.g. 0.6.
+                if (const char* text = std::getenv("CBS3D_LTS_REFRESH_MARGIN"))
+                {
+                    if (text[0] != '\0')
+                    {
+                        margin = std::stod(text);
+                    }
+                }
+
+                // CBS3D_LTS_MONOTONE=1: a refresh may only lower an element's
+                // (or node's) frozen step, never raise it. With the default
+                // full refresh every element is reset to margin x its current
+                // stable step, so on a large mesh one fluctuating element
+                // re-triggers a refresh every few iterations (blanket slice,
+                // 3.2 M tets: 11 446 refreshes in 28 614 iterations, each one a
+                // new pseudo-time operator and pressure-matrix rebuild) and the
+                // iteration cycles instead of converging. Monotone refreshes
+                // let the step field settle; any positive stable step field
+                // has the same steady solution up to the dt-dependent CBS
+                // stabilisation.
+                const bool monotone =
+                    environment_flag_enabled("CBS3D_LTS_MONOTONE");
 
                 if (!(margin > 0.0) ||
                     margin > 1.0 ||
@@ -518,15 +541,29 @@ namespace cbs
 
                 if (global_refresh != 0)
                 {
+                    const bool keep_lower =
+                        monotone && s.lts_frozen_valid;
+
                     for (Int ie = 1; ie <= s.cfg.nelem; ++ie)
                     {
-                        s.lts_delte_frozen(ie) = margin * s.delte(ie);
+                        const Real candidate = margin * s.delte(ie);
+
+                        s.lts_delte_frozen(ie) = keep_lower
+                            ? std::min(s.lts_delte_frozen(ie), candidate)
+                            : candidate;
                     }
 
                     for (Int ip = 1; ip <= s.cfg.npoin; ++ip)
                     {
-                        s.lts_deltp_frozen(ip) = margin * s.deltp(ip);
-                        s.lts_deltp2_frozen(ip) = margin * s.deltp2(ip);
+                        const Real candidate = margin * s.deltp(ip);
+                        const Real candidate2 = margin * s.deltp2(ip);
+
+                        s.lts_deltp_frozen(ip) = keep_lower
+                            ? std::min(s.lts_deltp_frozen(ip), candidate)
+                            : candidate;
+                        s.lts_deltp2_frozen(ip) = keep_lower
+                            ? std::min(s.lts_deltp2_frozen(ip), candidate2)
+                            : candidate2;
                     }
 
                     s.lts_frozen_valid = true;
