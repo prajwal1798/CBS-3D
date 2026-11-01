@@ -159,6 +159,11 @@ namespace cbs
         // LOW-ORDER MATRIX + LIMITED ANTIDIFFUSION BY DEFECT CORRECTION
         const bool afc = env_flag("CBS3D_TEMPERATURE_AFC");
         const Real afc_tol = env_real("CBS3D_STEADY_ENERGY_TOL", 1.0e-6);
+        const Real residual_tol = env_real("CBS3D_STEADY_ENERGY_RESIDUAL_TOL", 1.0e-6);
+        if (!(residual_tol > 0.0) || !std::isfinite(residual_tol))
+        {
+            throw std::runtime_error("CBS3D_STEADY_ENERGY_RESIDUAL_TOL must be positive and finite");
+        }
         const Int afc_maxit = static_cast<Int>(env_real("CBS3D_STEADY_ENERGY_MAXIT", 300.0));
         // UNDER-RELAXATION OF THE DEFECT CORRECTION (THE ZALESAK LIMITER IS
         // NOT SMOOTH; 0.5 CONVERGED WHERE 1.0 CYCLED). NO AFC: ONE EXACT SOLVE.
@@ -406,13 +411,10 @@ namespace cbs
         bool all_converged = true;
         const Int outer_max = afc ? afc_maxit : 1;
 
-        for (Int it = 1; it <= outer_max; ++it)
+        // USE THE SAME LIMITER FOR EACH DEFECT CORRECTION AND FOR THE
+        // INDEPENDENT NONLINEAR RESIDUAL CHECK AT THE FINAL TEMPERATURE.
+        auto assemble_afc_correction = [&]()
         {
-            // ================================
-            // 5. LIMITED ANTIDIFFUSIVE FLUXES FROM THE CURRENT ITERATE
-            //    f_ab = d_ab (T_a - T_b) INTO a; ZALESAK LIMITER WITH THE
-            //    STEADY BOUNDS Q_i = q_i (T_i^max/min - T_i)
-            // ================================
             correction.fill(0.0);
             if (afc)
             {
@@ -532,6 +534,17 @@ namespace cbs
                                                             MPI_COMM_WORLD);
             }
 
+        };
+
+        for (Int it = 1; it <= outer_max; ++it)
+        {
+            // ================================
+            // 5. LIMITED ANTIDIFFUSIVE FLUXES FROM THE CURRENT ITERATE
+            //    f_ab = d_ab (T_a - T_b) INTO a; ZALESAK LIMITER WITH THE
+            //    STEADY BOUNDS Q_i = q_i (T_i^max/min - T_i)
+            // ================================
+            assemble_afc_correction();
+
             // ================================
             // 6. SOLVE  A T* = b + g
             // ================================
@@ -597,16 +610,47 @@ namespace cbs
         result.afc_iterations = afc_iterations;
         result.afc_change = last_change;
         result.afc = afc;
-        result.converged = all_converged && (!afc || last_change < afc_tol);
-
         s.temperature = temperature;
 
         // ================================
-        // 7. INDEPENDENT CHECK: THE ORIGINAL EXPLICIT RESIDUAL AT THE SOLUTION.
-        //    WITHOUT AFC IT MUST VANISH (MATRIX CHECK). WITH AFC THE EXPLICIT
-        //    (UNLIMITED) RESIDUAL EQUALS THE REMOVED ANTIDIFFUSION, SO THE
-        //    CHECK IS  R(T) - SUM (1 - alpha) f = 0, I.E. R(T) - (F - G).
+        // 7. INDEPENDENT CHECK AT THE FINAL TEMPERATURE.
+        //    HIGH-ORDER RESIDUAL: R_HIGH(T).
+        //    FULL GRAPH FLUX:     F_i = SUM_j d_ij (T_i - T_j).
+        //    LIMITED GRAPH FLUX:  G_i = SUM_j alpha_ij F_ij.
+        //    LOW-ORDER AFC EQUATION: R_HIGH(T) - F(T) + G(T) = 0.
+        //    THE FINAL LIMITER MUST BE RECOMPUTED: THE LAST LINEAR RHS
+        //    USED THE PREVIOUS (POSSIBLY UNDER-RELAXED) ITERATE.
         // ================================
+        Array1D<Real> full_antidiffusion(s.cfg.npoin);
+        full_antidiffusion.fill(0.0);
+        if (afc)
+        {
+            assemble_afc_correction();
+            for (Int ie = 1; ie <= s.cfg.nelem; ++ie)
+            {
+                if (s.mat_elem(ie) != 0)
+                {
+                    continue;
+                }
+                for (Int k = 0; k < 6; ++k)
+                {
+                    const Real d = graph[static_cast<std::size_t>(ie - 1) * 6U +
+                                         static_cast<std::size_t>(k)];
+                    if (d <= 0.0)
+                    {
+                        continue;
+                    }
+                    const Int i = s.intma(pair_a[k], ie);
+                    const Int j = s.intma(pair_b[k], ie);
+                    const Real f = d * (temperature(i) - temperature(j));
+                    full_antidiffusion(i) += f;
+                    full_antidiffusion(j) -= f;
+                }
+            }
+            HaloExchange::sumGhostContributionsToOwners(
+                full_antidiffusion, s.partition_metadata, MPI_COMM_WORLD);
+        }
+
         explicit_residual(s, heat_flux_load);
 
         Real local_res = 0.0;
@@ -614,9 +658,14 @@ namespace cbs
         Real local_tmax = -std::numeric_limits<Real>::max();
         for (const Int ip : s.owned_nodes)
         {
-            if (fixed(ip) == 0 && !afc)
+            if (fixed(ip) == 0)
             {
-                local_res = std::max(local_res, std::abs(s.rhs1(ip)));
+                Real residual = s.rhs1(ip);
+                if (afc)
+                {
+                    residual -= full_antidiffusion(ip) - correction(ip);
+                }
+                local_res = std::max(local_res, std::abs(residual));
             }
             local_tmin = std::min(local_tmin, s.temperature(ip));
             local_tmax = std::max(local_tmax, s.temperature(ip));
@@ -626,8 +675,12 @@ namespace cbs
         check_mpi(MPI_Allreduce(&local_tmax, &result.t_max, 1, MPI_DOUBLE, MPI_MAX,
                                 MPI_COMM_WORLD), "T max");
         const Real global_res = global_max(local_res);
-        result.residual_check = afc ? -1.0
-                                    : (rhs_max > 0.0 ? global_res / rhs_max : global_res);
+        result.residual_check = rhs_max > 0.0 ? global_res / rhs_max : global_res;
+        result.converged =
+            all_converged &&
+            (!afc || last_change < afc_tol) &&
+            std::isfinite(result.residual_check) &&
+            result.residual_check < residual_tol;
 
         s.temperature1 = s.temperature;
         result.seconds = MPI_Wtime() - start;
