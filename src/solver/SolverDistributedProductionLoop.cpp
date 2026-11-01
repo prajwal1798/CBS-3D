@@ -18,6 +18,7 @@
 #include "cbs/solver/Solver.hpp"
 
 #include "cbs/assembly/EnergyAssembly.hpp"
+#include "cbs/assembly/TemperatureAFC.hpp"
 #include "cbs/solver/Steps.hpp"
 #include "cbs/turbulence/TurbulencePreprocess.hpp"
 #include "cbs/assembly/MomentumAssembly.hpp"
@@ -1327,6 +1328,10 @@ namespace cbs
                     "CBS3D_STEADY_ENERGY needs the energy equation (temp_calc = 1)");
             }
 
+            // The explicit AFC limiter requires C_i^-1 = elcoe2p, using
+            // exactly the same pseudo-time thermal diagonal as Step 4.
+            build_distributed_time_diagonals(s_);
+
             const SteadyEnergySolver::Result energy =
                 SteadyEnergySolver::solve(
                     s_,
@@ -1576,6 +1581,14 @@ namespace cbs
                 {
                     ScopedHeatFluxSuppression suppress_heat_flux(s_);
                     EnergyAssembly::assembleStep4Rhs(s_);
+                }
+
+                // Shared production AFC residual. This routine already
+                // reverse-adds the element contributions and leaves the
+                // assembled result only on owner nodes.
+                if (TemperatureAFC::enabled())
+                {
+                    TemperatureAFC::limitDistributedResidual(s_);
                 }
 
                 HaloExchange::sumGhostContributionsToOwners(
