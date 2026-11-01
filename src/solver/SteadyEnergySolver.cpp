@@ -12,6 +12,7 @@
 #if defined(CBS3D_USE_MPI) && defined(CBS3D_USE_PETSC)
 
 #include "cbs/assembly/EnergyAssembly.hpp"
+#include "cbs/assembly/TemperatureAFC.hpp"
 #include "cbs/parallel/HaloExchange.hpp"
 
 #include <mpi.h>
@@ -80,7 +81,8 @@ namespace cbs
         // WITH THE ORIGINAL STEP-4 CODE (HEAT FLUX ADDED FROM THE NODAL LOAD,
         // AS IN THE PRODUCTION LOOP). T IS TAKEN FROM s.temperature.
         // ================================
-        void explicit_residual(CBSStateSI& s, const Array1D<Real>& heat_flux_load)
+        void explicit_residual(CBSStateSI& s, const Array1D<Real>& heat_flux_load,
+                               const bool apply_afc = false)
         {
             s.temperature1 = s.temperature;
 
@@ -97,12 +99,24 @@ namespace cbs
             }
             s.cfg.heat_flux_bc = saved_flux;
 
-            HaloExchange::sumGhostContributionsToOwners(
-                s.rhs1, s.partition_metadata, MPI_COMM_WORLD);
-
-            for (const Int ip : s.owned_nodes)
+            if (apply_afc)
             {
-                s.rhs1(ip) += heat_flux_load(ip);
+                // TemperatureAFC performs its own reverse-add, flux limiting and
+                // owner residual assembly. Add the face load once beforehand.
+                for (const Int ip : s.owned_nodes)
+                {
+                    s.rhs1(ip) += heat_flux_load(ip);
+                }
+                TemperatureAFC::limitDistributedResidual(s);
+            }
+            else
+            {
+                HaloExchange::sumGhostContributionsToOwners(
+                    s.rhs1, s.partition_metadata, MPI_COMM_WORLD);
+                for (const Int ip : s.owned_nodes)
+                {
+                    s.rhs1(ip) += heat_flux_load(ip);
+                }
             }
         }
 
@@ -155,8 +169,9 @@ namespace cbs
         const double start = MPI_Wtime();
         Result result;
 
-        // ALGEBRAIC FLUX CORRECTION (SAME SWITCH AS THE EXPLICIT SOLVER):
-        // LOW-ORDER MATRIX + LIMITED ANTIDIFFUSION BY DEFECT CORRECTION
+        // AFC: solve the production explicit Step-4 limited residual R(T)=0
+        // using a frozen low-order PETSc matrix as defect-correction
+        // preconditioner. The limiter itself is NOT independently reimplemented.
         const bool afc = env_flag("CBS3D_TEMPERATURE_AFC");
         const Real afc_tol = env_real("CBS3D_STEADY_ENERGY_TOL", 1.0e-6);
         const Real residual_tol = env_real("CBS3D_STEADY_ENERGY_RESIDUAL_TOL", 1.0e-6);
@@ -165,7 +180,7 @@ namespace cbs
             throw std::runtime_error("CBS3D_STEADY_ENERGY_RESIDUAL_TOL must be positive and finite");
         }
         const Int afc_maxit = static_cast<Int>(env_real("CBS3D_STEADY_ENERGY_MAXIT", 300.0));
-        // OPTIONAL ANDERSON ACCELERATION OF THE BOUNDED AFC FIXED-POINT MAP.
+        // OPTIONAL ANDERSON ACCELERATION OF THE AFC DEFECT-CORRECTION MAP.
         // ZERO RETAINS THE PREVIOUS DEFECT-CORRECTION ALGORITHM.
         const Real anderson_input =
             env_real("CBS3D_STEADY_ENERGY_ANDERSON_M", 0.0);
@@ -232,10 +247,6 @@ namespace cbs
         //    MAKES THE LOW-ORDER OFF-DIAGONALS l_ab = M_ab + d_ab >= 0.
         //    q_i = SUM_b max(0, l_ib) IS KEPT FOR THE LIMITER.
         // ================================
-        std::vector<Real> graph(afc ? static_cast<std::size_t>(s.cfg.nelem) * 6U : 0U, 0.0);
-        Array1D<Real> q_low(s.cfg.npoin);
-        q_low.fill(0.0);
-
         Mat A = nullptr;
         check_petsc(MatCreateAIJ(MPI_COMM_WORLD,
                                  static_cast<PetscInt>(local_count),
@@ -258,22 +269,10 @@ namespace cbs
                     const Int a = pair_a[k];
                     const Int b = pair_b[k];
                     const Real d = std::max({0.0, -M[a][b], -M[b][a]});
-                    graph[static_cast<std::size_t>(ie - 1) * 6U + static_cast<std::size_t>(k)] = d;
                     M[a][b] += d;
                     M[b][a] += d;
                     M[a][a] -= d;
                     M[b][b] -= d;
-                }
-            }
-
-            for (Int a = 1; a <= 4; ++a)
-            {
-                for (Int b = 1; b <= 4; ++b)
-                {
-                    if (a != b)
-                    {
-                        q_low(s.intma(a, ie)) += std::max(0.0, M[a][b]);
-                    }
                 }
             }
 
@@ -328,11 +327,6 @@ namespace cbs
 
         check_petsc(MatAssemblyBegin(A, MAT_FINAL_ASSEMBLY), "MatAssemblyBegin");
         check_petsc(MatAssemblyEnd(A, MAT_FINAL_ASSEMBLY), "MatAssemblyEnd");
-
-        HaloExchange::sumGhostContributionsToOwners(q_low, s.partition_metadata,
-                                                    MPI_COMM_WORLD);
-        HaloExchange::broadcastOwnedToGhosts(q_low, s.partition_metadata,
-                                             MPI_COMM_WORLD);
 
         // ================================
         // 4. KRYLOV SOLVER: GMRES + ASM/ILU(1) BY DEFAULT (ROBUST FOR THE
@@ -408,13 +402,6 @@ namespace cbs
 
         Array1D<Real> rhs_nodal(s.cfg.npoin);
         Array1D<Real> solved(s.cfg.npoin);
-        Array1D<Real> t_lo(s.cfg.npoin);
-        Array1D<Real> t_hi(s.cfg.npoin);
-        Array1D<Real> p_plus(s.cfg.npoin);
-        Array1D<Real> p_minus(s.cfg.npoin);
-        Array1D<Real> r_plus(s.cfg.npoin);
-        Array1D<Real> r_minus(s.cfg.npoin);
-        Array1D<Real> correction(s.cfg.npoin);
 
         Int total_krylov = 0;
         Int afc_iterations = 0;
@@ -422,154 +409,36 @@ namespace cbs
         bool all_converged = true;
         const Int outer_max = afc ? afc_maxit : 1;
 
-        // HISTORY STORES ONLY A FEW DISTRIBUTED ITERATES. SCALAR PRODUCTS ARE
-        // COMPUTED OVER OWNED NODES AND MPI-REDUCED ONCE PER ANDERSON STEP.
         std::vector<Array1D<Real>> anderson_x;
         std::vector<Array1D<Real>> anderson_f;
 
-        // USE THE SAME LIMITER FOR EACH DEFECT CORRECTION AND FOR THE
-        // INDEPENDENT NONLINEAR RESIDUAL CHECK AT THE FINAL TEMPERATURE.
-        auto assemble_afc_correction = [&]()
-        {
-            correction.fill(0.0);
-            if (afc)
-            {
-                t_lo = temperature;
-                t_hi = temperature;
-                for (Int ie = 1; ie <= s.cfg.nelem; ++ie)
-                {
-                    Real emin = std::numeric_limits<Real>::max();
-                    Real emax = -std::numeric_limits<Real>::max();
-                    for (Int a = 1; a <= 4; ++a)
-                    {
-                        const Real t = temperature(s.intma(a, ie));
-                        emin = std::min(emin, t);
-                        emax = std::max(emax, t);
-                    }
-                    for (Int a = 1; a <= 4; ++a)
-                    {
-                        const Int ip = s.intma(a, ie);
-                        t_lo(ip) = std::min(t_lo(ip), emin);
-                        t_hi(ip) = std::max(t_hi(ip), emax);
-                    }
-                }
-                // MAXIMUM AS MINIMUM OF -T
-                for (Int ip = 1; ip <= s.cfg.npoin; ++ip)
-                {
-                    t_hi(ip) = -t_hi(ip);
-                }
-                HaloExchange::minGhostContributionsToOwners(t_lo, s.partition_metadata,
-                                                            MPI_COMM_WORLD);
-                HaloExchange::minGhostContributionsToOwners(t_hi, s.partition_metadata,
-                                                            MPI_COMM_WORLD);
-                HaloExchange::broadcastOwnedToGhosts(t_lo, s.partition_metadata,
-                                                     MPI_COMM_WORLD);
-                HaloExchange::broadcastOwnedToGhosts(t_hi, s.partition_metadata,
-                                                     MPI_COMM_WORLD);
-                for (Int ip = 1; ip <= s.cfg.npoin; ++ip)
-                {
-                    t_hi(ip) = -t_hi(ip);
-                }
-
-                p_plus.fill(0.0);
-                p_minus.fill(0.0);
-                for (Int ie = 1; ie <= s.cfg.nelem; ++ie)
-                {
-                    if (s.mat_elem(ie) != 0)
-                    {
-                        continue;
-                    }
-                    for (Int k = 0; k < 6; ++k)
-                    {
-                        const Real d = graph[static_cast<std::size_t>(ie - 1) * 6U + static_cast<std::size_t>(k)];
-                        if (d <= 0.0)
-                        {
-                            continue;
-                        }
-                        const Int i = s.intma(pair_a[k], ie);
-                        const Int j = s.intma(pair_b[k], ie);
-                        const Real f = d * (temperature(i) - temperature(j));
-                        if (f >= 0.0)
-                        {
-                            p_plus(i) += f;
-                            p_minus(j) -= f;
-                        }
-                        else
-                        {
-                            p_minus(i) += f;
-                            p_plus(j) -= f;
-                        }
-                    }
-                }
-                HaloExchange::sumGhostContributionsToOwners(p_plus, s.partition_metadata,
-                                                            MPI_COMM_WORLD);
-                HaloExchange::sumGhostContributionsToOwners(p_minus, s.partition_metadata,
-                                                            MPI_COMM_WORLD);
-
-                for (const Int ip : s.owned_nodes)
-                {
-                    const Real qp = q_low(ip) * (t_hi(ip) - temperature(ip));
-                    const Real qm = q_low(ip) * (t_lo(ip) - temperature(ip));
-                    r_plus(ip) = p_plus(ip) > 0.0 ? std::min(1.0, qp / p_plus(ip)) : 1.0;
-                    r_minus(ip) = p_minus(ip) < 0.0 ? std::min(1.0, qm / p_minus(ip)) : 1.0;
-                    if (fixed(ip) != 0)
-                    {
-                        r_plus(ip) = 1.0;
-                        r_minus(ip) = 1.0;
-                    }
-                }
-                HaloExchange::broadcastOwnedToGhosts(r_plus, s.partition_metadata,
-                                                     MPI_COMM_WORLD);
-                HaloExchange::broadcastOwnedToGhosts(r_minus, s.partition_metadata,
-                                                     MPI_COMM_WORLD);
-
-                for (Int ie = 1; ie <= s.cfg.nelem; ++ie)
-                {
-                    if (s.mat_elem(ie) != 0)
-                    {
-                        continue;
-                    }
-                    for (Int k = 0; k < 6; ++k)
-                    {
-                        const Real d = graph[static_cast<std::size_t>(ie - 1) * 6U + static_cast<std::size_t>(k)];
-                        if (d <= 0.0)
-                        {
-                            continue;
-                        }
-                        const Int i = s.intma(pair_a[k], ie);
-                        const Int j = s.intma(pair_b[k], ie);
-                        const Real f = d * (temperature(i) - temperature(j));
-                        const Real alpha = f >= 0.0
-                            ? std::min(r_plus(i), r_minus(j))
-                            : std::min(r_minus(i), r_plus(j));
-                        correction(i) += alpha * f;
-                        correction(j) -= alpha * f;
-                    }
-                }
-                HaloExchange::sumGhostContributionsToOwners(correction, s.partition_metadata,
-                                                            MPI_COMM_WORLD);
-            }
-
-        };
-
         for (Int it = 1; it <= outer_max; ++it)
         {
-            // ================================
-            // 5. LIMITED ANTIDIFFUSIVE FLUXES FROM THE CURRENT ITERATE
-            //    f_ab = d_ab (T_a - T_b) INTO a; ZALESAK LIMITER WITH THE
-            //    STEADY BOUNDS Q_i = q_i (T_i^max/min - T_i)
-            // ================================
-            assemble_afc_correction();
-
-            // ================================
-            // 6. SOLVE  A T* = b + g
-            // ================================
-            for (const Int ip : s.owned_nodes)
+            if (afc)
             {
-                rhs_nodal(ip) = base_rhs(ip) + (fixed(ip) != 0 ? 0.0 : correction(ip));
+                // Compute EXACTLY the same nonlinear residual and Zalesak
+                // limiter as explicit Step 4, including its low-order predictor.
+                // This changes the nonlinear target, not the PETSc matrix:
+                // A_low * deltaT = R_explicit_AFC(T), with Dirichlet deltaT=0.
+                s.temperature = temperature;
+                explicit_residual(s, heat_flux_load, true);
+                for (const Int ip : s.owned_nodes)
+                {
+                    rhs_nodal(ip) = fixed(ip) != 0 ? 0.0 : s.rhs1(ip);
+                }
+                vec_from_nodes(b, s, dof, rhs_nodal);
+                check_petsc(VecSet(x, 0.0), "VecSet(delta T)");
             }
-            vec_from_nodes(b, s, dof, rhs_nodal);
-            vec_from_nodes(x, s, dof, temperature);
+            else
+            {
+                // Original direct, un-limited Galerkin solve is unchanged.
+                for (const Int ip : s.owned_nodes)
+                {
+                    rhs_nodal(ip) = base_rhs(ip);
+                }
+                vec_from_nodes(b, s, dof, rhs_nodal);
+                vec_from_nodes(x, s, dof, temperature);
+            }
             check_petsc(KSPSolve(ksp, b, x), "KSPSolve");
 
             KSPConvergedReason reason;
@@ -591,7 +460,7 @@ namespace cbs
             // ================================
             // OPTIONAL ANDERSON MIXING OF THE AFC DEFECT-CORRECTION MAP.
             //
-            // F_K = G(T_K) - T_K,  G(T) = A_LOW^-1 (B + LIMITED_FLUX(T)).
+            // F_K = G(T_K) - T_K = A_LOW^-1 R_EXPLICIT_AFC(T_K).
             // MINIMISE ||F_K - DELTA_F * GAMMA||_2 AND UPDATE
             // T_NEXT = T_K + BETA F_K - (DELTA_T + BETA DELTA_F) GAMMA.
             //
@@ -604,7 +473,7 @@ namespace cbs
             {
                 if (fixed(ip) == 0)
                 {
-                    fixed_point(ip) = solved(ip) - temperature(ip);
+                    fixed_point(ip) = afc ? solved(ip) : solved(ip) - temperature(ip);
                 }
             }
 
@@ -816,7 +685,8 @@ namespace cbs
 
         // TRUE RELATIVE RESIDUAL OF THE LAST LINEAR SYSTEM
         {
-            vec_from_nodes(x, s, dof, temperature);
+            // x holds the last PETSc solution: deltaT for AFC, T for Galerkin.
+            // Do not overwrite deltaT with T before checking the linear residual.
             check_petsc(MatMult(A, x, r), "MatMult");
             check_petsc(VecAYPX(r, -1.0, b), "VecAYPX");
             PetscReal rn = 0.0;
@@ -838,46 +708,10 @@ namespace cbs
         result.afc = afc;
         s.temperature = temperature;
 
-        // ================================
-        // 7. INDEPENDENT CHECK AT THE FINAL TEMPERATURE.
-        //    HIGH-ORDER RESIDUAL: R_HIGH(T).
-        //    FULL GRAPH FLUX:     F_i = SUM_j d_ij (T_i - T_j).
-        //    LIMITED GRAPH FLUX:  G_i = SUM_j alpha_ij F_ij.
-        //    LOW-ORDER AFC EQUATION: R_HIGH(T) - F(T) + G(T) = 0.
-        //    THE FINAL LIMITER MUST BE RECOMPUTED: THE LAST LINEAR RHS
-        //    USED THE PREVIOUS (POSSIBLY UNDER-RELAXED) ITERATE.
-        // ================================
-        Array1D<Real> full_antidiffusion(s.cfg.npoin);
-        full_antidiffusion.fill(0.0);
-        if (afc)
-        {
-            assemble_afc_correction();
-            for (Int ie = 1; ie <= s.cfg.nelem; ++ie)
-            {
-                if (s.mat_elem(ie) != 0)
-                {
-                    continue;
-                }
-                for (Int k = 0; k < 6; ++k)
-                {
-                    const Real d = graph[static_cast<std::size_t>(ie - 1) * 6U +
-                                         static_cast<std::size_t>(k)];
-                    if (d <= 0.0)
-                    {
-                        continue;
-                    }
-                    const Int i = s.intma(pair_a[k], ie);
-                    const Int j = s.intma(pair_b[k], ie);
-                    const Real f = d * (temperature(i) - temperature(j));
-                    full_antidiffusion(i) += f;
-                    full_antidiffusion(j) -= f;
-                }
-            }
-            HaloExchange::sumGhostContributionsToOwners(
-                full_antidiffusion, s.partition_metadata, MPI_COMM_WORLD);
-        }
-
-        explicit_residual(s, heat_flux_load);
+        // Independent final nonlinear check: reevaluate the production
+        // Step-4 residual at the final candidate, not at the previous iterate.
+        // The explicit and steady solvers now share the AFC evaluator.
+        explicit_residual(s, heat_flux_load, afc);
 
         Real local_res = 0.0;
         Real local_tmin = std::numeric_limits<Real>::max();
@@ -886,12 +720,7 @@ namespace cbs
         {
             if (fixed(ip) == 0)
             {
-                Real residual = s.rhs1(ip);
-                if (afc)
-                {
-                    residual -= full_antidiffusion(ip) - correction(ip);
-                }
-                local_res = std::max(local_res, std::abs(residual));
+                local_res = std::max(local_res, std::abs(s.rhs1(ip)));
             }
             local_tmin = std::min(local_tmin, s.temperature(ip));
             local_tmax = std::max(local_tmax, s.temperature(ip));
