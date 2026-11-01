@@ -165,6 +165,17 @@ namespace cbs
             throw std::runtime_error("CBS3D_STEADY_ENERGY_RESIDUAL_TOL must be positive and finite");
         }
         const Int afc_maxit = static_cast<Int>(env_real("CBS3D_STEADY_ENERGY_MAXIT", 300.0));
+        // OPTIONAL ANDERSON ACCELERATION OF THE BOUNDED AFC FIXED-POINT MAP.
+        // ZERO RETAINS THE PREVIOUS DEFECT-CORRECTION ALGORITHM.
+        const Real anderson_input =
+            env_real("CBS3D_STEADY_ENERGY_ANDERSON_M", 0.0);
+        if (!std::isfinite(anderson_input) || anderson_input < 0.0 ||
+            anderson_input > 5.0 || std::floor(anderson_input) != anderson_input)
+        {
+            throw std::runtime_error(
+                "CBS3D_STEADY_ENERGY_ANDERSON_M must be an integer in [0,5]");
+        }
+        const Int anderson_m = afc ? static_cast<Int>(anderson_input) : 0;
         // UNDER-RELAXATION OF THE DEFECT CORRECTION (THE ZALESAK LIMITER IS
         // NOT SMOOTH; 0.5 CONVERGED WHERE 1.0 CYCLED). NO AFC: ONE EXACT SOLVE.
         const Real afc_relax = afc ? env_real("CBS3D_STEADY_ENERGY_RELAX", 0.5) : 1.0;
@@ -411,6 +422,11 @@ namespace cbs
         bool all_converged = true;
         const Int outer_max = afc ? afc_maxit : 1;
 
+        // HISTORY STORES ONLY A FEW DISTRIBUTED ITERATES. SCALAR PRODUCTS ARE
+        // COMPUTED OVER OWNED NODES AND MPI-REDUCED ONCE PER ANDERSON STEP.
+        std::vector<Array1D<Real>> anderson_x;
+        std::vector<Array1D<Real>> anderson_f;
+
         // USE THE SAME LIMITER FOR EACH DEFECT CORRECTION AND FOR THE
         // INDEPENDENT NONLINEAR RESIDUAL CHECK AT THE FINAL TEMPERATURE.
         auto assemble_afc_correction = [&]()
@@ -565,10 +581,208 @@ namespace cbs
 
             nodes_from_vec(solved, s, dof, x);
 
-            Real local_change = 0.0;
+            // ================================
+            // OPTIONAL ANDERSON MIXING OF THE AFC DEFECT-CORRECTION MAP.
+            //
+            // F_K = G(T_K) - T_K,  G(T) = A_LOW^-1 (B + LIMITED_FLUX(T)).
+            // MINIMISE ||F_K - DELTA_F * GAMMA||_2 AND UPDATE
+            // T_NEXT = T_K + BETA F_K - (DELTA_T + BETA DELTA_F) GAMMA.
+            //
+            // THE OLD UNDER-RELAXED UPDATE IS THE FALLBACK IF THE SMALL
+            // LEAST-SQUARES SYSTEM IS DEGENERATE OR EXTRAPOLATION IS EXCESSIVE.
+            // ================================
+            Array1D<Real> fixed_point(s.cfg.npoin);
+            fixed_point.fill(0.0);
             for (const Int ip : s.owned_nodes)
             {
-                const Real updated = temperature(ip) + afc_relax * (solved(ip) - temperature(ip));
+                if (fixed(ip) == 0)
+                {
+                    fixed_point(ip) = solved(ip) - temperature(ip);
+                }
+            }
+
+            if (anderson_m > 0)
+            {
+                anderson_x.push_back(temperature);
+                anderson_f.push_back(fixed_point);
+                if (static_cast<Int>(anderson_x.size()) > anderson_m + 1)
+                {
+                    anderson_x.erase(anderson_x.begin());
+                    anderson_f.erase(anderson_f.begin());
+                }
+            }
+
+            Int n_mix = 0;
+            std::vector<Real> gamma;
+            if (anderson_m > 0 && anderson_x.size() > 1U)
+            {
+                n_mix = static_cast<Int>(anderson_x.size()) - 1;
+                const Int count = n_mix * n_mix + n_mix;
+                std::vector<Real> local(static_cast<std::size_t>(count), 0.0);
+                std::vector<Real> global(static_cast<std::size_t>(count), 0.0);
+
+                for (const Int ip : s.owned_nodes)
+                {
+                    if (fixed(ip) != 0)
+                    {
+                        continue;
+                    }
+                    Real df[5];
+                    for (Int j = 0; j < n_mix; ++j)
+                    {
+                        df[j] = anderson_f[static_cast<std::size_t>(j + 1)](ip)
+                              - anderson_f[static_cast<std::size_t>(j)](ip);
+                        local[static_cast<std::size_t>(n_mix * n_mix + j)] +=
+                            df[j] * fixed_point(ip);
+                    }
+                    for (Int i = 0; i < n_mix; ++i)
+                    {
+                        for (Int j = 0; j < n_mix; ++j)
+                        {
+                            local[static_cast<std::size_t>(i * n_mix + j)] +=
+                                df[i] * df[j];
+                        }
+                    }
+                }
+                check_mpi(MPI_Allreduce(local.data(), global.data(), count,
+                                        MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD),
+                          "Anderson global least-squares products");
+
+                // TIKHONOV REGULARISATION KEEPS DEPENDENT HISTORY STABLE.
+                Real trace = 0.0;
+                for (Int i = 0; i < n_mix; ++i)
+                {
+                    trace += global[static_cast<std::size_t>(i * n_mix + i)];
+                }
+                bool valid = std::isfinite(trace) && trace > 0.0;
+                gamma.assign(static_cast<std::size_t>(n_mix), 0.0);
+                if (valid)
+                {
+                    const Real shift = 1.0e-10 * trace / n_mix;
+                    for (Int i = 0; i < n_mix; ++i)
+                    {
+                        global[static_cast<std::size_t>(i * n_mix + i)] += shift;
+                    }
+                    // SMALL DENSE GAUSSIAN ELIMINATION WITH PARTIAL PIVOTING.
+                    for (Int i = 0; i < n_mix && valid; ++i)
+                    {
+                        Int pivot = i;
+                        for (Int j = i + 1; j < n_mix; ++j)
+                        {
+                            if (std::abs(global[static_cast<std::size_t>(j * n_mix + i)]) >
+                                std::abs(global[static_cast<std::size_t>(pivot * n_mix + i)]))
+                            {
+                                pivot = j;
+                            }
+                        }
+                        if (!(std::abs(global[static_cast<std::size_t>(pivot * n_mix + i)]) >
+                              1.0e-14 * trace))
+                        {
+                            valid = false;
+                            break;
+                        }
+                        if (pivot != i)
+                        {
+                            for (Int j = 0; j < n_mix; ++j)
+                            {
+                                std::swap(global[static_cast<std::size_t>(i * n_mix + j)],
+                                          global[static_cast<std::size_t>(pivot * n_mix + j)]);
+                            }
+                            std::swap(global[static_cast<std::size_t>(n_mix * n_mix + i)],
+                                      global[static_cast<std::size_t>(n_mix * n_mix + pivot)]);
+                        }
+                        for (Int j = i + 1; j < n_mix; ++j)
+                        {
+                            const Real scale =
+                                global[static_cast<std::size_t>(j * n_mix + i)] /
+                                global[static_cast<std::size_t>(i * n_mix + i)];
+                            for (Int k = i; k < n_mix; ++k)
+                            {
+                                global[static_cast<std::size_t>(j * n_mix + k)] -=
+                                    scale * global[static_cast<std::size_t>(i * n_mix + k)];
+                            }
+                            global[static_cast<std::size_t>(n_mix * n_mix + j)] -=
+                                scale * global[static_cast<std::size_t>(n_mix * n_mix + i)];
+                        }
+                    }
+                    for (Int i = n_mix - 1; i >= 0 && valid; --i)
+                    {
+                        Real rhs = global[static_cast<std::size_t>(n_mix * n_mix + i)];
+                        for (Int j = i + 1; j < n_mix; ++j)
+                        {
+                            rhs -= global[static_cast<std::size_t>(i * n_mix + j)] *
+                                   gamma[static_cast<std::size_t>(j)];
+                        }
+                        gamma[static_cast<std::size_t>(i)] =
+                            rhs / global[static_cast<std::size_t>(i * n_mix + i)];
+                        valid = valid && std::isfinite(gamma[static_cast<std::size_t>(i)]);
+                    }
+                }
+                if (!valid)
+                {
+                    n_mix = 0;
+                }
+            }
+
+            Array1D<Real> candidate = temperature;
+            Real local_change = 0.0;
+            Real local_baseline = 0.0;
+            for (const Int ip : s.owned_nodes)
+            {
+                if (fixed(ip) != 0)
+                {
+                    continue;
+                }
+                const Real step = afc_relax * fixed_point(ip);
+                local_baseline = std::max(local_baseline, std::abs(step));
+                Real accelerated = step;
+                for (Int j = 0; j < n_mix; ++j)
+                {
+                    const Real dx =
+                        anderson_x[static_cast<std::size_t>(j + 1)](ip) -
+                        anderson_x[static_cast<std::size_t>(j)](ip);
+                    const Real df =
+                        anderson_f[static_cast<std::size_t>(j + 1)](ip) -
+                        anderson_f[static_cast<std::size_t>(j)](ip);
+                    accelerated -= gamma[static_cast<std::size_t>(j)] *
+                                   (dx + afc_relax * df);
+                }
+                candidate(ip) += accelerated;
+                local_change = std::max(local_change, std::abs(accelerated));
+            }
+
+            Real local_values[3] = {local_change, local_baseline, 0.0};
+            for (const Int ip : s.owned_nodes)
+            {
+                if (!std::isfinite(candidate(ip)))
+                {
+                    local_values[2] = 1.0;
+                }
+            }
+            Real global_values[3] = {};
+            check_mpi(MPI_Allreduce(local_values, global_values, 3, MPI_DOUBLE,
+                                    MPI_MAX, MPI_COMM_WORLD),
+                      "Anderson update safeguards");
+
+            if (n_mix > 0 &&
+                (global_values[2] != 0.0 ||
+                 global_values[0] > 5.0 * std::max(global_values[1], 1.0e-12)))
+            {
+                // RESTART THE HISTORY AND USE THE ORIGINAL BOUNDED STEP.
+                anderson_x.clear();
+                anderson_f.clear();
+                n_mix = 0;
+            }
+
+            local_change = 0.0;
+            for (const Int ip : s.owned_nodes)
+            {
+                if (fixed(ip) != 0)
+                {
+                    continue;
+                }
+                const Real updated = n_mix > 0 ? candidate(ip) :
+                    temperature(ip) + afc_relax * fixed_point(ip);
                 local_change = std::max(local_change, std::abs(updated - temperature(ip)));
                 temperature(ip) = updated;
             }
