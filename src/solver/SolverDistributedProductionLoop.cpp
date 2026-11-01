@@ -1334,6 +1334,17 @@ namespace cbs
                     thermal_boundary.value,
                     thermal_boundary.heat_flux_load);
 
+            if (!energy.converged)
+            {
+                throw std::runtime_error(
+                    "Implicit steady energy did not converge: AFC iterations=" +
+                    std::to_string(energy.afc_iterations) +
+                    ", last max|dT|=" + std::to_string(energy.afc_change) +
+                    " K, nonlinear relative residual=" +
+                    std::to_string(energy.residual_check) +
+                    ", total Krylov iterations=" + std::to_string(energy.iterations));
+            }
+
             DistributedPost::writeSolution(s_, case_name_, 1);
 
             if (s_.mpi_rank == 0)
@@ -1351,13 +1362,13 @@ namespace cbs
                     << "  explicit residual : ";
                 if (energy.afc)
                 {
-                    std::cout << "n/a with AFC (limited fluxes)\n";
+                    std::cout << "max|R_AFC(T)| / max|c + q| = "
+                              << energy.residual_check << "  (NONLINEAR CHECK PASS)\n";
                 }
                 else
                 {
-                    std::cout << "max|R(T)| / max|c + q| = " << energy.residual_check
-                              << (energy.residual_check < 1.0e-6 ? "  (MATRIX CHECK PASS)\n"
-                                                                 : "  (MATRIX CHECK FAIL)\n");
+                    std::cout << "max|R(T)| / max|c + q| = "
+                              << energy.residual_check << "  (MATRIX CHECK PASS)\n";
                 }
                 std::cout
                     << "  temperature range : " << energy.t_min << " .. "
