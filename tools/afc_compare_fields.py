@@ -39,8 +39,8 @@ def main():
     print("EXPLICIT:", path_e)
     print("IMPLICIT:", path_i)
 
-    step_e = re.search(r"_step_(\\d+)\\.pvtu$", path_e)
-    step_i = re.search(r"_step_(\\d+)\\.pvtu$", path_i)
+    step_e = re.search(r"_step_(\d+)\.pvtu$", path_e)
+    step_i = re.search(r"_step_(\d+)\.pvtu$", path_i)
     if (not a.allow_same_step and step_e and step_i and
             int(step_i.group(1)) <= int(step_e.group(1))):
         raise ValueError(
