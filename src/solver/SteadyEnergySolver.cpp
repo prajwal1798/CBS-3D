@@ -101,22 +101,20 @@ namespace cbs
 
             if (apply_afc)
             {
-                // TemperatureAFC performs its own reverse-add, flux limiting and
-                // owner residual assembly. Add the face load once beforehand.
-                for (const Int ip : s.owned_nodes)
-                {
-                    s.rhs1(ip) += heat_flux_load(ip);
-                }
+                // Production Step 4 limits the volume residual first. The
+                // prescribed face load must be added AFTER the limiter or its
+                // low-order predictor/bounds differ from explicit AFC.
                 TemperatureAFC::limitDistributedResidual(s);
             }
             else
             {
                 HaloExchange::sumGhostContributionsToOwners(
                     s.rhs1, s.partition_metadata, MPI_COMM_WORLD);
-                for (const Int ip : s.owned_nodes)
-                {
-                    s.rhs1(ip) += heat_flux_load(ip);
-                }
+            }
+
+            for (const Int ip : s.owned_nodes)
+            {
+                s.rhs1(ip) += heat_flux_load(ip);
             }
         }
 
