@@ -3,7 +3,7 @@
 # FILE      : selfcheck.sh
 # PURPOSE   : CHECK THE CBS3D BUILD FOR MISTAKES BEFORE A PRODUCTION RUN:
 #               1. THE TWO PRODUCTION EXECUTABLES EXIST AND MATCH THE SOURCE
-#                  (BUILT AFTER THE LAST COMMIT)
+#                  (BUILT AFTER THE NEWEST SOURCE/CMAKE FILE)
 #               2. ALL UNIT / VERIFICATION TESTS (ctest, SEPARATE TEST BUILD)
 #               3. SUBMIT selfcheck_slab.slurm: SERIAL + 4-RANK RUN OF A CASE
 #                  WITH AN EXACT SOLUTION (NUCLEAR HEATING + WALL FLUX)
@@ -21,17 +21,33 @@ JOBS="${1:-8}"
 T="$CBS3D_CODE/jobs/sunbird/templates"
 
 # ================================
-# STEP 1: EXECUTABLES NEWER THAN THE SOURCE
+# STEP 1: EXECUTABLES NEWER THAN THE BUILD INPUTS
 # ================================
-LAST=$(git -C "$CBS3D_CODE" log -1 --format=%ct)
+# A COMMIT THAT TOUCHES ONLY DOCS OR JOB SCRIPTS DOES NOT CHANGE THE
+# EXECUTABLES. COMPARE AGAINST THE NEWEST SOURCE/CMAKE FILE, NOT THE LAST
+# COMMIT TIME: COMMIT f2ffbcc CHANGED ONLY selfcheck_slab.slurm AND MADE THE
+# OLD CHECK REJECT A BUILD THAT WAS ALREADY CURRENT.
+BUILD_INPUTS=(
+    "$CBS3D_CODE/CMakeLists.txt"
+    "$CBS3D_CODE/CMakePresets.json"
+    "$CBS3D_CODE/apps"
+    "$CBS3D_CODE/include"
+    "$CBS3D_CODE/src"
+)
+LAST=$(find "${BUILD_INPUTS[@]}" -type f -printf '%T@\n' 2>/dev/null | sort -n | tail -1)
+if [[ -z "$LAST" ]]; then
+    echo "ERROR: no build inputs found under $CBS3D_CODE" >&2
+    exit 1
+fi
+LAST=${LAST%.*}
 for exe in "$CBS3D_SERIAL_EXE" "$CBS3D_MPI_EXE"; do
     [[ -x "$exe" ]] || { echo "ERROR: $exe MISSING; RUN build_cbs3d.sh" >&2; exit 1; }
     if [[ $(stat -c %Y "$exe") -lt "$LAST" ]]; then
-        echo "ERROR: $exe IS OLDER THAN THE LAST COMMIT; RUN build_cbs3d.sh" >&2
+        echo "ERROR: $exe IS OLDER THAN THE NEWEST BUILD INPUT ($(date -d "@$LAST" -Is)); RUN build_cbs3d.sh" >&2
         exit 1
     fi
 done
-echo "EXE    : both executables newer than commit $(git -C "$CBS3D_CODE" rev-parse --short HEAD)"
+echo "EXE    : both executables newer than the newest build input ($(date -d "@$LAST" -Is))"
 
 # ================================
 # STEP 2: UNIT AND VERIFICATION TESTS
