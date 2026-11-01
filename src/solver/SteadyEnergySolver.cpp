@@ -786,6 +786,37 @@ namespace cbs
                         const Real trial_relative_residual =
                             rhs_max > 0.0 ? trial_raw / rhs_max : trial_raw;
 
+                        // Audit-only: log the actual nonlinear trial residuals
+                        // BEFORE imposing the L2 Armijo and max-rate guards.
+                        // This distinguishes (1) an intrinsically non-descent
+                        // direction from (2) an overly restrictive safeguard.
+                        // The probe does not change the accepted iterates.
+                        if (it == 1 && ls < 8 && s.mpi_rank == 0)
+                        {
+                            const bool finite =
+                                std::isfinite(trial_merit) &&
+                                std::isfinite(trial_rate) &&
+                                std::isfinite(trial_relative_residual);
+                            const bool max_rate_ok =
+                                trial_rate <= max_rate_growth * initial_rate;
+                            const bool merit_ok =
+                                trial_merit <
+                                    initial_merit *
+                                        (1.0 - sufficient_decrease * alpha);
+                            std::cout
+                                << "  [AFC-PROBE] direction=" << direction_name
+                                << " alpha=" << alpha
+                                << " L2=" << trial_merit
+                                << " L2_initial=" << initial_merit
+                                << " max_rate=" << trial_rate
+                                << " max_rate_initial=" << initial_rate
+                                << " raw_rel=" << trial_relative_residual
+                                << " finite=" << finite
+                                << " Armijo=" << merit_ok
+                                << " rate_guard=" << max_rate_ok
+                                << "\n" << std::flush;
+                        }
+
                         if (!std::isfinite(trial_merit) ||
                             !std::isfinite(trial_rate) ||
                             !std::isfinite(trial_relative_residual) ||
