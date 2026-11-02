@@ -96,7 +96,7 @@ export PETSC_OPTIONS="-energy_ksp_type gmres -energy_pc_type asm -energy_sub_pc_
 arms=("bootstrap_gamma0_m0 0 0" "bootstrap_gamma0_m3 0 3")
 success=0
 executed=0
-for arm in "\${arms[@]}"; do
+for arm in "${arms[@]}"; do
     read -r label gamma anderson <<< "$arm"
     executed=$((executed + 1))
     export CBS3D_STEADY_ENERGY_PSEUDOTIME_SHIFT="$gamma"
@@ -141,8 +141,8 @@ PY
     echo "===== END $label ====="
 done
 
-echo "G12c arms executed: $executed / \${#arms[@]}"
-echo "G12c converged bounded arms: $success / \${#arms[@]}"
-[[ "$executed" == "\${#arms[@]}" ]] || exit 2
+echo "G12c arms executed: $executed / ${#arms[@]}"
+echo "G12c converged bounded arms: $success / ${#arms[@]}"
+[[ "$executed" == "${#arms[@]}" ]] || exit 2
 [[ "$success" -gt 0 ]] || { echo "G12C NONLINEAR BOOTSTRAP DID NOT SOLVE PROBLEM"; exit 1; }
 echo "G12C EXPERIMENTAL IMPLICIT AFC BOOTSTRAP CONVERGENCE PASS"
