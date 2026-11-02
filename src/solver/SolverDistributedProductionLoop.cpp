@@ -1342,8 +1342,9 @@ namespace cbs
             if (!energy.converged)
             {
                 std::ostringstream message;
-                message << "Implicit steady energy did not converge: scheme="
-                        << (energy.low_order ? "LOW_ORDER" :
+                message << "Implicit energy did not converge: scheme="
+                        << (energy.transient_be ? "PHYSICAL_BE" :
+                            energy.low_order ? "LOW_ORDER" :
                             (energy.afc ? "AFC" : "GALERKIN"))
                         << ", AFC iterations=" << energy.afc_iterations
                         << ", last max|dT|=" << energy.afc_change
@@ -1357,12 +1358,15 @@ namespace cbs
             if (s_.mpi_rank == 0)
             {
                 std::cout
-                    << "Steady energy (implicit, frozen velocity)\n"
+                    << (energy.transient_be
+                          ? "Physical-time backward Euler energy (frozen velocity)\n"
+                          : "Steady energy (implicit, frozen velocity)\n")
                     << "  Krylov iterations : " << energy.iterations
                     << (energy.converged ? " (converged)" : " (NOT CONVERGED)") << "\n"
                     << "  ||b - A T|| / ||b||: " << energy.ksp_relative_residual << "\n"
                     << "  scheme            : "
-                    << (energy.low_order ? "LOW-ORDER GRAPH-VISCOSITY (EXPERIMENTAL)" :
+                    << (energy.transient_be ? "PHYSICAL-TIME BE / LOW-ORDER GRAPH-VISCOSITY (EXPERIMENTAL)" :
+                        energy.low_order ? "LOW-ORDER GRAPH-VISCOSITY (EXPERIMENTAL)" :
                         energy.afc ? "NONLINEAR AFC" : "GALERKIN")
                     << "\n"
                     << "  AFC               : "
@@ -1375,7 +1379,9 @@ namespace cbs
                     << "  residual check    : ";
                 if (energy.low_order)
                 {
-                    std::cout << "||b-A_low*T||_inf / ||b||_inf = "
+                    std::cout << (energy.transient_be
+                                  ? "max BE step ||b-A_BE*T||_inf / ||b||_inf = "
+                                  : "||b-A_low*T||_inf / ||b||_inf = ")
                               << energy.residual_check << "  (LOW-ORDER MATRIX CHECK PASS)\n";
                 }
                 else if (energy.afc)
@@ -1391,9 +1397,14 @@ namespace cbs
                 std::cout
                     << "  temperature range : " << energy.t_min << " .. "
                     << energy.t_max << " K\n"
+                    << (energy.transient_be ?
+                        "  physical BE steps : " + std::to_string(energy.be_steps) + "\n" +
+                        "  physical BE dt    : " + std::to_string(energy.be_dt) + " s\n" : "")
                     << "  solve time        : " << energy.seconds << " s\n"
                     << "Run complete\n"
-                    << "  stop reason   : steady energy solved\n";
+                    << "  stop reason   : "
+                    << (energy.transient_be ? "physical BE energy solved\n"
+                                            : "steady energy solved\n");
             }
             return;
         }
