@@ -324,13 +324,14 @@ namespace cbs
         // (A_low + gamma * C/dt) delta T = R_AFC(T). gamma=0 recovers the
         // unshifted steady preconditioner that amplified the U-channel defect.
         const Real pseudotime_shift =
-            afc ? env_real("CBS3D_STEADY_ENERGY_PSEUDOTIME_SHIFT", 1.0) : 0.0;
-        if (transient_be && pseudotime_shift != 0.0)
-        {
-            throw std::runtime_error(
-                "Physical-time BE requires CBS3D_STEADY_ENERGY_PSEUDOTIME_SHIFT=0; "
-                "the physical C/dt diagonal is assembled independently.");
-        }
+            transient_be
+                ? 0.0
+                : (afc
+                    ? env_real("CBS3D_STEADY_ENERGY_PSEUDOTIME_SHIFT", 1.0)
+                    : 0.0);
+        // Physical-time BE always uses only the physical C/dt diagonal.
+        // Any steady pseudo-transient shift is intentionally ignored here so
+        // coupled production stepping cannot accidentally double-count storage.
         if (!std::isfinite(pseudotime_shift) || pseudotime_shift < 0.0)
         {
             throw std::runtime_error(
