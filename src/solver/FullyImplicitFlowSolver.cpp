@@ -165,11 +165,6 @@ namespace cbs
             return s.cfg.ani;
         }
 
-        Real tetra_mass(const Real volume, const Int a, const Int b)
-        {
-            return volume * (a == b ? 2.0 : 1.0) / 20.0;
-        }
-
         void set_default_option(const char* name, const char* value)
         {
             PetscBool given = PETSC_FALSE;
@@ -792,37 +787,34 @@ namespace cbs
                 const Real nu = fluid_kinematic_viscosity(s, ie);
                 const Real tau = global_tau;
 
+                // Picard field w freezes the advecting velocity in the
+                // EXACT discrete Step-1 residual used by MomentumAssembly:
+                // nodal conservative flux products, CBS characteristic term,
+                // and the componentwise Laplacian diffusion.
                 Real w[5][4] = {};
-                Real div_w = 0.0;
+                Real wmean[4] = {};
+                Real q_coeff[5] = {};
+
                 for (Int a = 1; a <= 4; ++a)
                 {
                     const Int ip = s.intma(a, ie);
                     for (Int dim = 1; dim <= 3; ++dim)
                     {
                         w[a][dim] = s.unkno(dim, ip);
-                        div_w +=
-                            w[a][dim] * grad(s, ie, dim, a);
+                        wmean[dim] += 0.25 * w[a][dim];
                     }
                 }
 
-                // g_b(node) = div(w N_b) evaluated at the four vertices.
-                Real g[5][5] = {};
-                for (Int basis = 1; basis <= 4; ++basis)
+                // q_coeff[b] is the coefficient multiplying transported
+                // component u_i(b) in div(I_h(w_j u_i)):
+                //
+                //   q_b = sum_j dN_b/dx_j * w_j(b).
+                for (Int bnode = 1; bnode <= 4; ++bnode)
                 {
-                    for (Int node = 1; node <= 4; ++node)
+                    for (Int j = 1; j <= 3; ++j)
                     {
-                        Real value = 0.0;
-                        for (Int dim = 1; dim <= 3; ++dim)
-                        {
-                            value +=
-                                w[node][dim] *
-                                grad(s, ie, dim, basis);
-                        }
-                        if (node == basis)
-                        {
-                            value += div_w;
-                        }
-                        g[basis][node] = value;
+                        q_coeff[bnode] +=
+                            grad(s, ie, j, bnode) * w[bnode][j];
                     }
                 }
 
@@ -865,70 +857,60 @@ namespace cbs
 
                 for (Int a = 1; a <= 4; ++a)
                 {
+                    Real test_direction = 0.0;
+                    for (Int j = 1; j <= 3; ++j)
+                    {
+                        test_direction +=
+                            grad(s, ie, j, a) * wmean[j];
+                    }
+
                     for (Int bnode = 1; bnode <= 4; ++bnode)
                     {
-                        Real convection = 0.0;
-                        for (Int cnode = 1; cnode <= 4; ++cnode)
+                        Real grad_dot_ab = 0.0;
+                        Real row_dot_advecting_node = 0.0;
+
+                        for (Int j = 1; j <= 3; ++j)
                         {
-                            convection +=
-                                tetra_mass(volume, a, cnode) *
-                                g[bnode][cnode];
+                            grad_dot_ab +=
+                                grad(s, ie, j, a) *
+                                grad(s, ie, j, bnode);
+                            row_dot_advecting_node +=
+                                grad(s, ie, j, a) *
+                                w[bnode][j];
                         }
 
-                        Real characteristic = 0.0;
-                        for (Int cnode = 1; cnode <= 4; ++cnode)
-                        {
-                            for (Int dnode = 1; dnode <= 4; ++dnode)
-                            {
-                                characteristic +=
-                                    g[a][cnode] *
-                                    tetra_mass(volume, cnode, dnode) *
-                                    g[bnode][dnode];
-                            }
-                        }
-                        characteristic *= 0.5 * tau;
+                        // A_u = - d(r_m)/d(u_i) under Picard freezing:
+                        //
+                        // r_conv volume =
+                        //   +(V/4) grad(N_a).sum_b[w(b) u_i(b)]
+                        //
+                        // r_char volume =
+                        //   -(dt/2) V (wbar.grad N_a)
+                        //                sum_b[q_b u_i(b)]
+                        //
+                        // r_diff volume =
+                        //   -nu V grad(N_a).grad(u_i).
+                        const Real convection =
+                            -volume * 0.25 *
+                            row_dot_advecting_node;
+                        const Real characteristic =
+                            0.5 * tau * volume *
+                            test_direction * q_coeff[bnode];
+                        const Real diffusion =
+                            nu * volume * grad_dot_ab;
 
-                        // Step 1: A_u(w) u + M_dt(u* - u) = 0.
                         for (Int i = 1; i <= 3; ++i)
                         {
                             const Int row =
                                 (a - 1) * 3 + (i - 1);
+                            const Int col =
+                                (bnode - 1) * 3 + (i - 1);
 
-                            for (Int k = 1; k <= 3; ++k)
-                            {
-                                Real diffusion = 0.0;
-
-                                for (Int j = 1; j <= 3; ++j)
-                                {
-                                    if (i == k)
-                                    {
-                                        diffusion +=
-                                            grad(s, ie, j, a) *
-                                            grad(s, ie, j, bnode);
-                                    }
-                                }
-
-                                diffusion +=
-                                    grad(s, ie, k, a) *
-                                    grad(s, ie, i, bnode);
-
-                                diffusion -=
-                                    (2.0 / 3.0) *
-                                    grad(s, ie, i, a) *
-                                    grad(s, ie, k, bnode);
-
-                                diffusion *= nu * volume;
-
-                                const Int col =
-                                    (bnode - 1) * 3 + (k - 1);
-
-                                a_uu[row * 12 + col] +=
-                                    static_cast<PetscScalar>(
-                                        diffusion +
-                                        (i == k
-                                            ? convection + characteristic
-                                            : 0.0));
-                            }
+                            a_uu[row * 12 + col] +=
+                                static_cast<PetscScalar>(
+                                    convection +
+                                    characteristic +
+                                    diffusion);
                         }
 
                         // Step 2: tau H p - B_volume u* = ...
@@ -943,17 +925,9 @@ namespace cbs
                                     grad(s, ie, i, a));
                         }
 
-                        Real h_ab = 0.0;
-                        for (Int j = 1; j <= 3; ++j)
-                        {
-                            h_ab +=
-                                grad(s, ie, j, a) *
-                                grad(s, ie, j, bnode);
-                        }
-
                         h_pressure[(a - 1) * 4 + (bnode - 1)] +=
                             static_cast<PetscScalar>(
-                                tau * volume * h_ab);
+                                tau * volume * grad_dot_ab);
 
                         // Step 3: M_dt(u-u*) + Gp = 0.
                         for (Int i = 1; i <= 3; ++i)
@@ -969,7 +943,10 @@ namespace cbs
                     }
                 }
 
-                // Production Step-1 natural deviatoric traction.
+                // Exact Picard linearisation of production Step-1 boundary
+                // terms. MomentumAssembly uses the nodal conservative face
+                // flux, the CBS characteristic boundary correction and the
+                // componentwise natural diffusion flux.
                 for (Int face = 1; face <= 4; ++face)
                 {
                     if (s.fedge(face, ie) == 0)
@@ -977,56 +954,90 @@ namespace cbs
                         continue;
                     }
 
+                    Real wmean_dot_normal = 0.0;
+                    for (Int j = 1; j <= 3; ++j)
+                    {
+                        wmean_dot_normal +=
+                            wmean[j] * s.annxf(j, face, ie);
+                    }
+
                     for (Int fa = 1; fa <= 3; ++fa)
                     {
                         const Int a = s.ippn1(face, fa);
 
+                        // Diffusion and characteristic boundary terms involve
+                        // the gradient/divergence reconstructed from all four
+                        // element nodes.
                         for (Int bnode = 1; bnode <= 4; ++bnode)
                         {
+                            Real grad_dot_normal = 0.0;
+                            for (Int j = 1; j <= 3; ++j)
+                            {
+                                grad_dot_normal +=
+                                    grad(s, ie, j, bnode) *
+                                    s.annxf(j, face, ie);
+                            }
+
+                            const Real diffusion_boundary =
+                                nu * s.cfg.fdif[2] *
+                                grad_dot_normal;
+                            const Real characteristic_boundary =
+                                0.5 * tau * s.cfg.fcon[4] *
+                                wmean_dot_normal * q_coeff[bnode];
+
                             for (Int i = 1; i <= 3; ++i)
                             {
                                 const Int row =
                                     (a - 1) * 3 + (i - 1);
+                                const Int col =
+                                    (bnode - 1) * 3 + (i - 1);
 
-                                for (Int k = 1; k <= 3; ++k)
-                                {
-                                    Real traction = 0.0;
+                                // Both terms are positive in r_m at the face;
+                                // A_u = -r_m.
+                                a_uu[row * 12 + col] -=
+                                    static_cast<PetscScalar>(
+                                        diffusion_boundary +
+                                        characteristic_boundary);
+                            }
+                        }
 
-                                    for (Int j = 1; j <= 3; ++j)
-                                    {
-                                        if (i == k)
-                                        {
-                                            traction +=
-                                                grad(s, ie, j, bnode) *
-                                                s.annxf(j, face, ie);
-                                        }
-                                    }
+                        // Conservative convective boundary term:
+                        // r_conv has - integral N_a (w_j u_i) n_j.
+                        for (Int fb = 1; fb <= 3; ++fb)
+                        {
+                            const Int bnode =
+                                s.ippn1(face, fb);
 
-                                    traction +=
-                                        grad(s, ie, i, bnode) *
-                                        s.annxf(k, face, ie);
+                            Real advective_flux = 0.0;
+                            for (Int j = 1; j <= 3; ++j)
+                            {
+                                advective_flux +=
+                                    w[bnode][j] *
+                                    s.annxf(j, face, ie);
+                            }
 
-                                    traction -=
-                                        (2.0 / 3.0) *
-                                        grad(s, ie, k, bnode) *
-                                        s.annxf(i, face, ie);
+                            const Real face_mass_factor =
+                                s.cfg.fcon[2] *
+                                (a == bnode ? 2.0 : 1.0);
 
-                                    traction *= nu / 3.0;
+                            for (Int i = 1; i <= 3; ++i)
+                            {
+                                const Int row =
+                                    (a - 1) * 3 + (i - 1);
+                                const Int col =
+                                    (bnode - 1) * 3 + (i - 1);
 
-                                    const Int col =
-                                        (bnode - 1) * 3 + (k - 1);
-
-                                    // r_m has +traction, while A_u=-r_m.
-                                    a_uu[row * 12 + col] -=
-                                        static_cast<PetscScalar>(traction);
-                                }
+                                a_uu[row * 12 + col] +=
+                                    static_cast<PetscScalar>(
+                                        face_mass_factor *
+                                        advective_flux);
                             }
                         }
                     }
 
                     // Production Step 2 volume divergence uses u*, while its
-                    // boundary flux uses unkn1. At the steady fixed point
-                    // unkn1 == corrected u, hence this block couples to u.
+                    // boundary flux uses the previous physical velocity in a
+                    // transient step. At a steady fixed point u^n == u.
                     if (s.fedge(face, ie) == 1)
                     {
                         has_step2_boundary_flux = true;
@@ -1049,8 +1060,6 @@ namespace cbs
                                     const Int col =
                                         (bnode - 1) * 3 + (i - 1);
 
-                                    // tauHp - B u*=0 and B contains
-                                    // -boundary_flux, hence +flux here.
                                     b_boundary[(a - 1) * 12 + col] +=
                                         static_cast<PetscScalar>(
                                             face_mass_factor *
