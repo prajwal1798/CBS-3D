@@ -88,23 +88,26 @@ echo "WORK $WORK"
 # Label, pseudo-time coefficient gamma, Anderson depth:
 # gamma=0 is exact steady low-order preconditioner; gamma=1 corresponds
 # to C/dt and was too close to explicit relaxation in Job29833.
-arm_table=$(cat <<'EOF'
-shift1_anderson3 1 3
-shift001 0.01 0
-shift0001 0.0001 0
-shift0 0 0
-shift001_anderson3 0.01 3
-EOF
+# Avoid a while-read loop over stdin: the nested Slurm srun consumes
+# that input, silently skipping every arm after the first.
+arm_table=(
+  "shift1_anderson3 1 3"
+  "shift001 0.01 0"
+  "shift0001 0.0001 0"
+  "shift0 0 0"
+  "shift001_anderson3 0.01 3"
 )
 success=0
-while read -r label gamma anderson; do
-    [[ -n "$label" ]] || continue
+executed=0
+for arm in "${arm_table[@]}"; do
+    read -r label gamma anderson <<< "$arm"
+    executed=$((executed+1))
     export CBS3D_STEADY_ENERGY_PSEUDOTIME_SHIFT="$gamma"
     export CBS3D_STEADY_ENERGY_ANDERSON_M="$anderson"
     mkdir -p "$WORK/$label"
     export SLURM_SUBMIT_DIR="$WORK/$label"
     echo "===== G12b ARM $label gamma=$gamma Anderson=$anderson ====="
-    if bash "$WORK/launcher.sh" "$PART" uchannel; then
+    if bash "$WORK/launcher.sh" "$PART" uchannel </dev/null; then
         echo "G12b ARM $label solver reported convergence"
         # Independently verify physical Tmin before calling any arm acceptable.
         # A small algebraic residual alone does not certify bounded CHT.
@@ -139,7 +142,16 @@ PY
         grep -E 'ERROR on MPI|Implicit steady|non-finite|SteadyEnergySolver' "$RUN/solver.err" | tail -n 4 || true
     fi
     echo "===== END $label ====="
-done <<< "$arm_table"
+done
 
-echo "G12b converged arms: $success / 5"
-echo "G12B SENSITIVITY SWEEP COMPLETED (nonconverged arms remain failures)"
+echo "G12b arms actually executed: $executed / ${#arm_table[@]}"
+echo "G12b converged and physically bounded arms: $success / ${#arm_table[@]}"
+if [[ "$executed" -ne "${#arm_table[@]}" ]]; then
+    echo "G12B SWEEP INCOMPLETE: not all arms executed" >&2
+    exit 2
+fi
+if [[ "$success" -eq 0 ]]; then
+    echo "G12B COMPLETED BUT NO CONVERGENT PHYSICALLY BOUNDED CONFIGURATION" >&2
+    exit 1
+fi
+echo "G12B SWEEP COMPLETED; at least one converged bounded candidate identified"
