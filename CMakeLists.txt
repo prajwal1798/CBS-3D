@@ -202,6 +202,22 @@ if (CBS3D_BUILD_SOURCE_VALIDATION)
         COMMAND cbs3d_step4_operator_verification
     )
 
+    # G5a: multi-tetra nonzero-velocity advection-diffusion with an exact
+    # steady solution and spatial refinement; same production energy operator,
+    # independent standalone linear solver and no flow/pressure coupling.
+    add_executable(cbs3d_g5_prescribed_transport_verification
+        tests/PrescribedVelocityThermalTransportVerification.cpp
+        src/assembly/EnergyAssembly.cpp
+    )
+    target_include_directories(cbs3d_g5_prescribed_transport_verification PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/include"
+    )
+    target_compile_features(cbs3d_g5_prescribed_transport_verification PRIVATE cxx_std_20)
+    add_test(
+        NAME g5_prescribed_velocity_transport
+        COMMAND cbs3d_g5_prescribed_transport_verification
+    )
+
     # Production thermal lumped-mass diagonal at a conformal solid-fluid node.
     add_executable(cbs3d_lumped_thermal_mass_verification
         tests/LumpedThermalMassVerification.cpp
