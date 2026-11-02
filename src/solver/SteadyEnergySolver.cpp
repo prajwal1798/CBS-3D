@@ -181,6 +181,31 @@ namespace cbs
         const bool afc = env_flag("CBS3D_TEMPERATURE_AFC");
         const bool low_order_only =
             env_flag("CBS3D_STEADY_ENERGY_LOW_ORDER_ONLY");
+        // Genuine *physical-time* lumped-capacitance backward Euler for the
+        // same frozen-velocity, graph-viscosity-stabilised CHT operator.
+        // This is NOT the local pseudo-time relaxation used in explicit CBS.
+        const Real be_dt =
+            env_real("CBS3D_IMPLICIT_ENERGY_BE_DT", 0.0);
+        const bool transient_be = be_dt > 0.0;
+        const Real be_steps_input =
+            env_real("CBS3D_IMPLICIT_ENERGY_BE_STEPS", 1.0);
+        if (!std::isfinite(be_dt) || be_dt < 0.0 ||
+            !std::isfinite(be_steps_input) || be_steps_input < 1.0 ||
+            be_steps_input > 100000.0 ||
+            std::floor(be_steps_input) != be_steps_input)
+        {
+            throw std::runtime_error(
+                "Implicit physical-time BE: dt must be finite and >=0; "
+                "steps must be an integer in [1,100000]");
+        }
+        const Int be_steps = static_cast<Int>(be_steps_input);
+        if (transient_be && !low_order_only)
+        {
+            throw std::runtime_error(
+                "Physical-time BE currently requires "
+                "CBS3D_STEADY_ENERGY_LOW_ORDER_ONLY=1. "
+                "High-order bounded transient AFC has NOT been implemented.");
+        }
         if (low_order_only && !afc)
         {
             throw std::runtime_error(
@@ -213,6 +238,12 @@ namespace cbs
         // unshifted steady preconditioner that amplified the U-channel defect.
         const Real pseudotime_shift =
             afc ? env_real("CBS3D_STEADY_ENERGY_PSEUDOTIME_SHIFT", 1.0) : 0.0;
+        if (transient_be && pseudotime_shift != 0.0)
+        {
+            throw std::runtime_error(
+                "Physical-time BE requires CBS3D_STEADY_ENERGY_PSEUDOTIME_SHIFT=0; "
+                "the physical C/dt diagonal is assembled independently.");
+        }
         if (!std::isfinite(pseudotime_shift) || pseudotime_shift < 0.0)
         {
             throw std::runtime_error(
@@ -385,7 +416,7 @@ namespace cbs
         // This is strictly opt-in and leaves production defaults unchanged.
         // Remove gamma*C/dt only from the temporary bootstrap matrix.
         const bool low_order_bootstrap =
-            afc && (low_order_only ||
+            afc && !transient_be && (low_order_only ||
                 env_flag("CBS3D_STEADY_ENERGY_LOW_ORDER_BOOTSTRAP"));
         Mat A_bootstrap = nullptr;
         if (low_order_bootstrap)
@@ -489,6 +520,159 @@ namespace cbs
         Array1D<Real> solved(s.cfg.npoin);
 
         Int total_krylov = 0;
+
+        if (transient_be)
+        {
+            // P1 tetrahedral lumped physical thermal capacitance:
+            // C_i = sum_{e contains i} (rho*cp)_e * Volume_e / 4.
+            // In contrast, elcoe2p is the inverse *pseudo-time* diagonal
+            // sum_e C_i,e / delte_e, and MUST NOT represent physical C/dt
+            // when the CBS solver uses local timesteps.
+            Array1D<Real> capacity(s.cfg.npoin);
+            capacity.fill(0.0);
+            for (Int ie = 1; ie <= s.cfg.nelem; ++ie)
+            {
+                const Real contribution =
+                    s.rho_cp_e(ie) * s.detJ(ie) / 24.0;
+                if (!(contribution > 0.0) ||
+                    !std::isfinite(contribution))
+                {
+                    throw std::runtime_error(
+                        "Implicit BE invalid physical thermal element capacity");
+                }
+                for (Int a = 1; a <= s.cfg.nep; ++a)
+                {
+                    capacity(s.intma(a, ie)) += contribution;
+                }
+            }
+            HaloExchange::sumGhostContributionsToOwners(
+                capacity, s.partition_metadata, MPI_COMM_WORLD);
+
+            for (const Int ip : s.owned_nodes)
+            {
+                const Real ci = capacity(ip);
+                if (!(ci > 0.0) || !std::isfinite(ci))
+                {
+                    throw std::runtime_error(
+                        "Implicit BE invalid assembled physical nodal capacitance");
+                }
+                if (fixed(ip) == 0)
+                {
+                    const PetscInt row = static_cast<PetscInt>(dof(ip));
+                    check_petsc(MatSetValue(A, row, row, ci / be_dt, ADD_VALUES),
+                                "MatSetValue(physical C/dt)");
+                }
+            }
+            check_petsc(MatAssemblyBegin(A, MAT_FINAL_ASSEMBLY),
+                        "MatAssemblyBegin(physical BE)");
+            check_petsc(MatAssemblyEnd(A, MAT_FINAL_ASSEMBLY),
+                        "MatAssemblyEnd(physical BE)");
+            check_petsc(KSPSetOperators(ksp, A, A),
+                        "KSPSetOperators(physical BE)");
+
+            Real max_linear_residual = 0.0;
+            Real last_storage_rate = 0.0;
+            for (Int step = 1; step <= be_steps; ++step)
+            {
+                Real local_storage_rate = 0.0;
+                for (const Int ip : s.owned_nodes)
+                {
+                    rhs_nodal(ip) = fixed(ip) != 0 ? value(ip)
+                        : base_rhs(ip) + capacity(ip) / be_dt * temperature(ip);
+                }
+                vec_from_nodes(b, s, dof, rhs_nodal);
+                vec_from_nodes(x, s, dof, temperature);
+                check_petsc(KSPSolve(ksp, b, x), "KSPSolve(physical BE)");
+                KSPConvergedReason reason;
+                PetscInt iterations = 0;
+                check_petsc(KSPGetConvergedReason(ksp, &reason),
+                            "KSPGetConvergedReason(physical BE)");
+                check_petsc(KSPGetIterationNumber(ksp, &iterations),
+                            "KSPGetIterationNumber(physical BE)");
+                if (reason <= 0)
+                {
+                    throw std::runtime_error(
+                        "Implicit physical BE PETSc KSP failed at step " +
+                        std::to_string(step) + " reason " +
+                        std::to_string(static_cast<int>(reason)));
+                }
+                total_krylov += static_cast<Int>(iterations);
+
+                // Independently evaluate the full BE algebraic equation.
+                check_petsc(MatMult(A, x, r), "MatMult(BE audit)");
+                check_petsc(VecAYPX(r, -1.0, b), "VecAYPX(BE audit)");
+                PetscReal rn = 0.0;
+                PetscReal bn = 0.0;
+                check_petsc(VecNorm(r, NORM_INFINITY, &rn),
+                            "VecNorm(BE residual)");
+                check_petsc(VecNorm(b, NORM_INFINITY, &bn),
+                            "VecNorm(BE right-hand side)");
+                const Real relative = bn > 0.0 ? rn / bn : rn;
+                max_linear_residual = std::max(max_linear_residual, relative);
+                if (!std::isfinite(relative) || relative >= residual_tol)
+                {
+                    throw std::runtime_error(
+                        "Implicit BE algebraic residual failed at step " +
+                        std::to_string(step));
+                }
+
+                nodes_from_vec(solved, s, dof, x);
+                Real local_minimum = std::numeric_limits<Real>::max();
+                Real local_maximum = -std::numeric_limits<Real>::max();
+                for (const Int ip : s.owned_nodes)
+                {
+                    if (!std::isfinite(solved(ip)))
+                    {
+                        throw std::runtime_error(
+                            "Implicit BE produced nonfinite temperature");
+                    }
+                    if (fixed(ip) == 0)
+                    {
+                        local_storage_rate += capacity(ip) *
+                            (solved(ip) - temperature(ip)) / be_dt;
+                    }
+                    local_minimum = std::min(local_minimum, solved(ip));
+                    local_maximum = std::max(local_maximum, solved(ip));
+                }
+                temperature = solved;
+                result.t_min = -global_max(-local_minimum);
+                result.t_max = global_max(local_maximum);
+                last_storage_rate = global_sum(local_storage_rate);
+                if (s.mpi_rank == 0 &&
+                    (step <= 3 || step == be_steps || step % 10 == 0))
+                {
+                    std::cout
+                        << "  [PHYSICAL-BE] step=" << step
+                        << " time=" << be_dt * step
+                        << " s Krylov=" << iterations
+                        << " residual_inf_rel=" << relative
+                        << " Tmin=" << result.t_min
+                        << " Tmax=" << result.t_max
+                        << " K storage_rate_free=" << last_storage_rate
+                        << " W\n" << std::flush;
+                }
+            }
+            // No post-hoc clipping of temperatures: the linear discrete
+            // solution is retained exactly, including all edge flux balances.
+            result.iterations = total_krylov;
+            result.low_order = true;
+            result.transient_be = true;
+            result.be_steps = be_steps;
+            result.be_dt = be_dt;
+            result.residual_check = max_linear_residual;
+            result.ksp_relative_residual = max_linear_residual;
+            result.converged = std::isfinite(max_linear_residual) &&
+                               max_linear_residual < residual_tol;
+            s.temperature = temperature;
+            s.temperature1 = temperature;
+            result.seconds = MPI_Wtime() - start;
+            check_petsc(KSPDestroy(&ksp), "KSPDestroy(physical BE)");
+            check_petsc(VecDestroy(&x), "VecDestroy(x physical BE)");
+            check_petsc(VecDestroy(&b), "VecDestroy(b physical BE)");
+            check_petsc(VecDestroy(&r), "VecDestroy(r physical BE)");
+            check_petsc(MatDestroy(&A), "MatDestroy(A physical BE)");
+            return result;
+        }
 
         if (low_order_bootstrap)
         {
