@@ -17,6 +17,7 @@ All inputs are existing original/replay VTU and .par/.matprop files.
 import argparse
 import csv
 import math
+from collections import defaultdict
 from pathlib import Path
 
 from audit_temperature_undershoot_vtu import read_piece, files_for_step
@@ -112,6 +113,9 @@ def node_residual(args):
                   "volumetric": 0.0}
     mass_over_dt = 0.0
     cells = []
+    # Sparse analytic row Jacobian dR_target/dT_j: one column per
+    # unique global node incident on the target, including MPI ghosts.
+    row_jacobian = defaultdict(lambda: defaultdict(float))
     seen_tets = set()
     dvmax = 0.0
 
@@ -165,6 +169,18 @@ def node_residual(args):
                                  ("volumetric", vol)):
                 components[label] += value
 
+            # Reconstruct the EXACT linearised production Step-4 row.
+            # Derivative of the Galerkin, relative-enthalpy divergence,
+            # CBS characteristic, and molecular diffusion contributions.
+            for b, gid in enumerate(ids):
+                jac = row_jacobian[gid]
+                jac["advection"] -= rhoCp * volume / 20.0 * dot(u_weight, grad[b])
+                jac["divergence"] -= rhoCp * volume / 20.0 * divu * (
+                    1.0 + (1.0 if b == ga else 0.0))
+                jac["characteristic"] -= 0.5 * dt * rhoCp * volume * (
+                    dot(u_bar, grad[ga]) * dot(u_bar, grad[b]))
+                jac["diffusion"] -= kappa * volume * dot(grad[ga], grad[b])
+
             dvmax = max(dvmax, abs(divu))
             cells.append((ids, volume, divu, adv, div, char, diff, vol))
     require(cells, f"No incident tetrahedra for node {args.node}")
@@ -194,6 +210,55 @@ def node_residual(args):
         print(f"  {key:17s} : {value:+.12e} K")
     print(f"Reconstructed delta T [K]     : {delta_reconstructed:+.12e}")
     print(f"Observed - reconstructed [K]  : {error:+.12e}")
+    # A real-mesh counterexample to unconditional DMP requires negative
+    # B_ij with a *positive* initial (T_j-Tref), not simply an overall
+    # negative Galerkin contribution at the target. The reference-shifted
+    # row has B_ij = delta_ij + (dR_i/dT_j)/H.
+    weighted_rows = []
+    for gid, parts in row_jacobian.items():
+        coeff = (1.0 if gid == args.node else 0.0) + math.fsum(parts.values()) / mass_over_dt
+        theta = t0[gid][1] - inlet_T
+        weighted_rows.append((gid, coeff, theta, coeff * theta, dict(parts)))
+    theta_reconstructed = math.fsum(row[3] for row in weighted_rows)
+    theta_actual = T_after - inlet_T
+    theta_error = theta_reconstructed - theta_actual
+    negative_offdiag = [row for row in weighted_rows
+                        if row[0] != args.node and row[1] < -1e-12]
+    positive_offdiag = [row for row in weighted_rows
+                        if row[0] != args.node and row[1] > 1e-12]
+    negative_weighted = math.fsum(row[3] for row in negative_offdiag)
+    positive_weighted = math.fsum(row[3] for row in positive_offdiag)
+    diagonal = next(row for row in weighted_rows if row[0] == args.node)
+    print("=== G6 NODE 5707 ACTUAL EXPLICIT STENCIL ===")
+    print(f"Stencil nonzero nodes             : {len(weighted_rows)}")
+    print(f"Negative offdiagonal B_ij count  : {len(negative_offdiag)}")
+    print(f"Positive offdiagonal B_ij count  : {len(positive_offdiag)}")
+    print(f"Diagonal B_ii                    : {diagonal[1]:+.12e}")
+    print(f"Sum negative-link B_ij*theta_j   : {negative_weighted:+.12e} K")
+    print(f"Sum positive-link B_ij*theta_j   : {positive_weighted:+.12e} K")
+    print(f"Diagonal B_ii*theta_i            : {diagonal[3]:+.12e} K")
+    print(f"Predicted T_after - Tref         : {theta_reconstructed:+.12e} K")
+    print(f"Actual T_after - Tref            : {theta_actual:+.12e} K")
+    print(f"Stencil reconstruction error     : {theta_error:+.12e} K")
+    print("12 strongest negative offdiagonal links by |B_ij*(T_j-Tref)|:")
+    for gid, Bij, theta, weighted, parts in sorted(
+        negative_offdiag, key=lambda x: abs(x[3]), reverse=True
+    )[:12]:
+        print(f"  gid={gid:6d} B_ij={Bij:+.9e} "
+              f"theta0={theta:+.9e} K product={weighted:+.9e} K "
+              f"adv={parts.get('advection',0)/mass_over_dt:+.4e} "
+              f"div={parts.get('divergence',0)/mass_over_dt:+.4e} "
+              f"CBS={parts.get('characteristic',0)/mass_over_dt:+.4e} "
+              f"diff={parts.get('diffusion',0)/mass_over_dt:+.4e}")
+    require(abs(theta_error) <= args.tolerance,
+            f"FAIL: stencil mismatch {theta_error:.4e} K; "
+            "verify field, dt and row-assembly consistency.")
+    print("G6 ORIGINAL-MESH STENCIL RECONSTRUCTION PASS")
+    if negative_weighted < -args.tolerance:
+        print("G6 NEGATIVE OFFDIAGONAL LINKS DRIVE BELOW-REFERENCE UPDATE")
+    else:
+        print("G6 negative links do not independently establish dominant cause")
+
     print("Top 8 incident cells by absolute total RHS:")
     for ids, V, div, adv, corr, char, diff, src in sorted(
         cells, key=lambda item: abs(math.fsum(item[3:])), reverse=True
