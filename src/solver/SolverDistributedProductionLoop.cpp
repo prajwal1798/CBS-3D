@@ -1342,8 +1342,10 @@ namespace cbs
             if (!energy.converged)
             {
                 std::ostringstream message;
-                message << "Implicit steady energy did not converge: AFC iterations="
-                        << energy.afc_iterations
+                message << "Implicit steady energy did not converge: scheme="
+                        << (energy.low_order ? "LOW_ORDER" :
+                            (energy.afc ? "AFC" : "GALERKIN"))
+                        << ", AFC iterations=" << energy.afc_iterations
                         << ", last max|dT|=" << energy.afc_change
                         << " K, nonlinear relative residual=" << energy.residual_check
                         << ", total Krylov iterations=" << energy.iterations;
@@ -1359,13 +1361,24 @@ namespace cbs
                     << "  Krylov iterations : " << energy.iterations
                     << (energy.converged ? " (converged)" : " (NOT CONVERGED)") << "\n"
                     << "  ||b - A T|| / ||b||: " << energy.ksp_relative_residual << "\n"
+                    << "  scheme            : "
+                    << (energy.low_order ? "LOW-ORDER GRAPH-VISCOSITY (EXPERIMENTAL)" :
+                        energy.afc ? "NONLINEAR AFC" : "GALERKIN")
+                    << "\n"
                     << "  AFC               : "
                     << (energy.afc ? "ON, " + std::to_string(energy.afc_iterations)
                                      + " defect-correction iterations, last max|dT| = "
                                      + std::to_string(energy.afc_change) + " K"
-                                   : std::string("OFF")) << "\n"
-                    << "  explicit residual : ";
-                if (energy.afc)
+                                   : energy.low_order
+                                     ? std::string("flux limiter OFF; low-order graph viscosity ON")
+                                     : std::string("OFF")) << "\n"
+                    << "  residual check    : ";
+                if (energy.low_order)
+                {
+                    std::cout << "||b-A_low*T||_inf / ||b||_inf = "
+                              << energy.residual_check << "  (LOW-ORDER MATRIX CHECK PASS)\n";
+                }
+                else if (energy.afc)
                 {
                     std::cout << "max|R_AFC(T)| / max|c + q| = "
                               << energy.residual_check << "  (NONLINEAR CHECK PASS)\n";
