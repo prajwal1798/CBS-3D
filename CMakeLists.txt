@@ -218,6 +218,23 @@ if (CBS3D_BUILD_SOURCE_VALIDATION)
         COMMAND cbs3d_g5_prescribed_transport_verification
     )
 
+    # G5b: production explicit energy RHS, element Jacobian and
+    # thermal time diagonal; DMP counterexample diagnostic is informational.
+    add_executable(cbs3d_g5_explicit_update_audit
+        tests/G5ExplicitThermalUpdateAudit.cpp
+        src/assembly/EnergyAssembly.cpp
+        src/timestep/TimeStep.cpp
+        src/turbulence/SpalartAllmaras.cpp
+    )
+    target_include_directories(cbs3d_g5_explicit_update_audit PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/include"
+    )
+    target_compile_features(cbs3d_g5_explicit_update_audit PRIVATE cxx_std_20)
+    add_test(
+        NAME g5_explicit_update_monotonicity_audit
+        COMMAND cbs3d_g5_explicit_update_audit
+    )
+
     # Production thermal lumped-mass diagonal at a conformal solid-fluid node.
     add_executable(cbs3d_lumped_thermal_mass_verification
         tests/LumpedThermalMassVerification.cpp
