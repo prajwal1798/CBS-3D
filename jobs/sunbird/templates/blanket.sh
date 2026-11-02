@@ -22,8 +22,9 @@
 #                       RUN_DIR (ITS mean_velocity WHEN IT HAS ONE), SAME RANKS
 #   implicit            FROM-SCRATCH FULL L2 STEADY CHT: FULLY IMPLICIT
 #                       CBS u-v-w-u*-v*-w*-p PETSc BLOCK SOLVE, THEN IMPLICIT T
-#   fullybe [NSTEPS]    FROM-SCRATCH FULL L2 PHYSICAL TRANSIENT: FULLY
-#                       IMPLICIT BE FLOW + IMPLICIT BE CHT (DEFAULT 1 STEP)
+#   fullybe [NSTEPS] [DT] FROM-SCRATCH FULL L2 PHYSICAL TRANSIENT: FULLY
+#                       IMPLICIT BE FLOW + IMPLICIT BE CHT (DEFAULT 1 STEP).
+#                       OPTIONAL DT [s] FORCES A GLOBAL PHYSICAL TIMESTEP.
 #   prove50k            FROM-SCRATCH FULL L2 PHYSICAL TRANSIENT: 50,000
 #                       SEMI-IMPLICIT CBS FLOW + IMPLICIT-BE CHT ON 40 RANKS
 #   check [RUN_DIR]     MASS + ENERGY BALANCE AND RESIDUAL PLOT OF A RUN
@@ -268,11 +269,18 @@ implicit)
 # ================================
 fullybe)
     NSTEPS="${1:-1}"
+    FIXED_DT="${2:-}"
     [[ "$NSTEPS" =~ ^[0-9]+$ && "$NSTEPS" -ge 1 ]] || {
         echo "ERROR: fullybe NSTEPS must be a positive integer" >&2; exit 1; }
+    if [[ -n "$FIXED_DT" ]]; then
+        awk -v x="$FIXED_DT" 'BEGIN { exit !(x + 0.0 > 0.0) }' || {
+            echo "ERROR: fullybe DT must be a positive number in seconds" >&2; exit 1; }
+    fi
 
     BASE="$SRC/blanket_L2T50K.par"
-    PAR="$DIR/blanket_fullybe_${NSTEPS}.par"
+    TAG="${FIXED_DT:-adaptive}"
+    TAG="${TAG//./p}"
+    PAR="$DIR/blanket_fullybe_${NSTEPS}_dt${TAG}.par"
     [[ -s "$BASE" ]] || { echo "ERROR: MISSING $BASE" >&2; exit 1; }
     [[ -d "$DIR/partitions_40" ]] || {
         echo "ERROR: MISSING $DIR/partitions_40; run setup first" >&2; exit 1; }
@@ -280,9 +288,16 @@ fullybe)
     # Preserve the verified physical case and change only the requested number
     # of physical steps. The timestep remains the existing communicator-wide
     # physical CBS timestep so the first BE comparison is apples-to-apples.
-    awk -v n="$NSTEPS" '
+    awk -v n="$NSTEPS" -v dt="$FIXED_DT" '
         /^#/ { print; next }
-        want_ntime == 1 { $1 = n; want_ntime = 0 }
+        want_ntime == 1 {
+            $1 = n
+            if (dt != "") {
+                $3 = 1
+                $4 = dt
+            }
+            want_ntime = 0
+        }
         /ntime transient_on dtfixed dtfix iwrite/ { want_ntime = 1 }
         { print }
     ' "$BASE" > "$PAR"
@@ -315,7 +330,11 @@ fullybe)
 
     echo "CASE   : FULL 4-U-CHANNEL BLANKET SLICE, L2 WALL + NUCLEAR HEATING"
     echo "START  : FROM SCRATCH (NO RESTART)"
-    echo "TIME   : $NSTEPS PHYSICAL BACKWARD-EULER STEP(S), GLOBAL dt"
+    if [[ -n "$FIXED_DT" ]]; then
+        echo "TIME   : $NSTEPS PHYSICAL BACKWARD-EULER STEP(S), FIXED dt=$FIXED_DT s"
+    else
+        echo "TIME   : $NSTEPS PHYSICAL BACKWARD-EULER STEP(S), BASELINE GLOBAL STABILITY dt"
+    fi
     echo "FLOW   : FULLY IMPLICIT CBS BE (u,v,w,u*,v*,w*,p)"
     echo "LINEAR : PETSc FGMRES + PCFIELDSPLIT SCHUR"
     echo "NONLIN : Picard max=$CBS3D_IMPLICIT_FLOW_MAXIT relax=$CBS3D_IMPLICIT_FLOW_RELAX"
