@@ -19,7 +19,7 @@
 | G1c | Lumped thermal mass and timestep diagonal | Code vs direct P1-tet reference with positive entries | PASS: Sunbird2 CTest 3/3 (2026-11-02), shared-node and material masks |
 | G2 | Actual inlet/outlet/wall/interface boundary inventory and flux sign | Every applied BC and flux accounted for | PASS (structural): Job 29706 has only BC 511/520/530/532, 648 BC532 faces = 0.0006 m^2, 60 W applied, zero duplicate faces, zero MPI duplicate mismatch; full global energy closure remains G7 |
 | G3 | Solid-only diffusion | Uniform/linear patch tests; analytical heated slab; mesh refinement | Analytical slab and serial/MPI PASS, Job 29742; systematic mesh refinement still pending |
-| G4 | Two-material conduction | Shared interface temperature, weak flux continuity, integrated balance | FAIL at Job 29745: 24.04% analytic error, reconstructed interface gradients 751/812 vs 1000 W/m²; must establish convergence/stop reason before interpretation |
+| G4 | Two-material conduction | Shared interface temperature, weak flux continuity, integrated balance | INCONCLUSIVE: Job 29745 hit 300,000 iteration limit with RelT=1.5201e-6 > 1e-10; longer benchmark-only 2.5M cap prepared; rerun pending |
 | G5 | Prescribed-flow scalar transport | Uniform T, analytical convection-diffusion and manufactured solutions | Uniform T check added; remaining pending |
 | G6 | Discrete positivity / DMP | Inspect assembled update matrix and *first* bound violation | U-channel AFC-off run: 176 cold nodes, ALL fluid-only, zero interface/solid; root mechanism and first crossing unresolved |
 | G7 | Integrated energy and mass | Sources + boundary heat = advection + storage within stated tolerance | Existing balance script; pending for U-channel |
@@ -120,3 +120,12 @@ The serial VTU writer outputs CellData `mat_id`; DistributedPost.cpp writes `mat
 - Both serial and 4-rank outputs give the same printed values; exact maximum difference has not been reported by the verifier because it stops at failed analytic tests. Do not claim quantified serial/MPI parity until measured.
 - CRITICAL UNRESOLVED QUESTION: did simulations stop at ntime=300000 without thermal steady convergence? Examine both solver.out iteration and stop reason, RelT and temperature history, actual effective timestep and residual CSV before changing any solver operator. This experiment is not yet evidence of defective interface assembly. Steady state analytic profile is inapplicable to an unconverged transient/pseudotransient iterate.
 - Separate issue: median cellwise interface-near reconstructed fluxes are not the same as the integrated weak interface-flux balance. Ultimately check both after convergence.
+
+## G4 convergence diagnosis and rerun controls (2026-11-02)
+
+- Job 29745 serial and MPI final stop reason: **maximum iteration count reached** at 300,000. G4 analytic steady-state comparison at that checkpoint is NOT valid as a test of stationary interface physics.
+- RelT (300,000)=1.520100200195e-6, target 1e-10; dt reported 0.000107266491. Flow residuals and velocity zero.
+- MPI Tmax still increases: 1.23549 K at 255,000 -> 1.33427 K at 300,000. RelT decreases from 2.03055e-6 to 1.52010e-6, without a plateau; expected stationary value 1.756172 K.
+- Trial estimate from relative residual 299,600 to 300,000 gives a characteristic decay of order 160k iterations; this is a local fit, NOT an extrapolation guarantee.
+- The exact binary/matprop/mesh and CFL settings remain unchanged. Separate case input cases/two_layer_conduction/cht2_convergence.par raises only ntime to 2,500,000, retains 1e-10 temperature convergence threshold. G4 runner now points to that .par and requires explicit 'steady-state convergence reached' in BOTH solver logs before interpreting numerical temperature/flux accuracy.
+- No changes to fluid/solid FEM, interface coupling, Neumann integration, pressure equation, or AFC implementation. G4 not passed; require rerun results.
