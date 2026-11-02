@@ -40,6 +40,7 @@ for r in 0000 0001; do
 done
 
 echo "G13a CODE COMMIT $(git -C "$CBS3D_CODE" rev-parse HEAD)"
+echo "G13a strict intermediate temperature floor: 298.15 K; no clipping"
 echo "G13a WORK $WORK"
 cmake -S "$CBS3D_CODE" -B "$BUILD" \
   -DCMAKE_BUILD_TYPE=Release \
@@ -77,6 +78,7 @@ export CBS3D_TEMPERATURE_AFC=1
 export CBS3D_STEADY_ENERGY=1
 export CBS3D_STEADY_ENERGY_LOW_ORDER_BOOTSTRAP=0
 export CBS3D_STEADY_ENERGY_LOW_ORDER_ONLY=1
+export CBS3D_IMPLICIT_ENERGY_BE_MIN_TEMPERATURE=298.15
 export CBS3D_RESTART=1
 export CBS3D_RESTART_FORMAT=legacy_vtu
 export CBS3D_RESTART_ROOT="$INPUT"
