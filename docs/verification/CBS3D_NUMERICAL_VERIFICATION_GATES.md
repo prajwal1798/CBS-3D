@@ -16,7 +16,7 @@
 | G0 | Baseline provenance: commit, binary SHA256, mesh, boundary data, materials, timestep flags | Reproducible case snapshot | Commit and Job 29706 identified; full case archive pending |
 | G1a | Actual Step-4 P1-tet FEM volume and surface terms vs independently evaluated quadrature | All nodal convection, conduction, characteristic, heating, Neumann contributions agree | Added C++ test; not yet executed |
 | G1b | Exact frozen-velocity element linear operator versus finite-difference residual derivative | All 16 entries agree | Added C++ test; not yet executed |
-| G1c | Lumped thermal mass and timestep diagonal | Code vs direct P1-tet reference with positive entries | Pending |
+| G1c | Lumped thermal mass and timestep diagonal | Code vs direct P1-tet reference with positive entries | New two-material interface test added; execution pending |
 | G2 | Actual inlet/outlet/wall/interface boundary inventory and flux sign | Every applied BC and flux accounted for | Pending |
 | G3 | Solid-only diffusion | Uniform and linear patch tests; analytical heated slab; mesh refinement | Existing slab check available; re-evaluation pending |
 | G4 | Two-material conduction | Shared interface temperature, weak flux continuity, integrated balance | Pending |
@@ -46,11 +46,11 @@ cd "$CBS3D_CODE"
 git fetch origin
 git switch audit/cbs-literature-verification-20261102
 cmake -S . -B build/verification -DCBS3D_BUILD_SOURCE_VALIDATION=ON -DCBS3D_BUILD_TESTS=ON -DCBS3D_ENABLE_MPI=OFF -DCBS3D_ENABLE_PETSC=OFF
-cmake --build build/verification --target cbs3d_step4_operator_verification cbs3d_source_validation -j 8
+cmake --build build/verification --target cbs3d_step4_operator_verification cbs3d_source_validation cbs3d_lumped_thermal_mass_verification -j 8
 (cd build/verification && ctest --output-on-failure -R '^step4_')
 ~~~
 
-Expected: the existing source test and the new P1 tetrahedral operator test both pass. The new executable prints five individual PASS lines, then STEP-4 OPERATOR VERIFICATION PASS.
+Expected: three CTests pass. G1a/G1b already passed on Sunbird2 (2/2 tests, 2026-11-02). G1c is newly added and has not yet been executed; it checks the production inverse thermal diagonal and fluid-only momentum/pressure masks at a shared solid-fluid node.
 
 If a test fails, halt and diagnose the specific element contribution. Do not patch production code before an independent reproduction.
 
