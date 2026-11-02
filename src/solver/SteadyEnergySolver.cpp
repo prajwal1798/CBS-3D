@@ -423,7 +423,7 @@ namespace cbs
 
             const bool apply_graph_viscosity =
                 afc &&
-                (s.mat_elem(ie) == 0 || (transient_be && low_order_only));
+                (s.mat_elem(ie) == 0 || low_order_only);
             if (apply_graph_viscosity)
             {
                 for (Int k = 0; k < 6; ++k)
