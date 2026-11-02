@@ -19,7 +19,7 @@
 | G1c | Lumped thermal mass and timestep diagonal | Code vs direct P1-tet reference with positive entries | PASS: Sunbird2 CTest 3/3 (2026-11-02), shared-node and material masks |
 | G2 | Actual inlet/outlet/wall/interface boundary inventory and flux sign | Every applied BC and flux accounted for | PASS (structural): Job 29706 has only BC 511/520/530/532, 648 BC532 faces = 0.0006 m^2, 60 W applied, zero duplicate faces, zero MPI duplicate mismatch; full global energy closure remains G7 |
 | G3 | Solid-only diffusion | Uniform/linear patch tests; analytical heated slab; mesh refinement | Analytical slab and serial/MPI PASS, Job 29742; systematic mesh refinement still pending |
-| G4 | Two-material conduction | Shared interface temperature, weak flux continuity, integrated balance | Conformal two-layer analytic test and serial/4-rank runner added; execution pending |
+| G4 | Two-material conduction | Shared interface temperature, weak flux continuity, integrated balance | FAIL at Job 29745: 24.04% analytic error, reconstructed interface gradients 751/812 vs 1000 W/m²; must establish convergence/stop reason before interpretation |
 | G5 | Prescribed-flow scalar transport | Uniform T, analytical convection-diffusion and manufactured solutions | Uniform T check added; remaining pending |
 | G6 | Discrete positivity / DMP | Inspect assembled update matrix and *first* bound violation | U-channel AFC-off run: 176 cold nodes, ALL fluid-only, zero interface/solid; root mechanism and first crossing unresolved |
 | G7 | Integrated energy and mass | Sources + boundary heat = advection + storage within stated tolerance | Existing balance script; pending for U-channel |
@@ -110,3 +110,13 @@ The serial VTU writer outputs CellData `mat_id`; DistributedPost.cpp writes `mat
 - Exact integrated input Q=qW^2=0.016 W. Nodal max error threshold 0.5% of exact top temperature, zero intended bulk flow, reference area within 0.1%, surface pressure BC inventory and shared interface-node connectivity required. Median reconstructed k*dT/dy at interface-adjacent tetrahedra must be within 5% of prescribed flux on both sides.
 - Runner: jobs/sunbird/templates/verify_two_layer_g4_no_afc.slurm, AFC disabled and no implicit energy solver. Checker: tools/check_two_layer_conduction.py. This is a new unexecuted verification case; do not claim pass until logs show it.
 - Note: interface-near k*dT/dy medians are diagnostic; pointwise element fluxes need not be continuous across a linear FEM interface even when the global weak heat balance is correct.
+
+## G4 measured status — Job 29745 (2026-11-02)
+
+- sacct: FAILED 1:0 because the **verification runner** flagged analytical comparisons; its serial/MPI solver substeps completed 0:0 according to supplied output.
+- Tested source checkout 923ca68; AFC=0, LTS_MONOTONE=0; same pre-existing serial/MPI executable hashes as G3.
+- Geometry checks: 337 unique nodes, 354 fluid tet, 763 solid tet, 58 shared interface nodes; BC502 and BC532 each 1.6e-5 m²; four intended BC types only; q*A=0.016 W exactly.
+- Analytic T_int=1.650165017 K, T_top=1.756172084 K. Measured Tmax=1.334267022 K; max analytic nodal error=0.422242384 K (24.04334%). Interface reconstructed k*dT/dy medians: fluid=751.164742 W/m², solid=811.731062 W/m² vs 1000 W/m².
+- Both serial and 4-rank outputs give the same printed values; exact maximum difference has not been reported by the verifier because it stops at failed analytic tests. Do not claim quantified serial/MPI parity until measured.
+- CRITICAL UNRESOLVED QUESTION: did simulations stop at ntime=300000 without thermal steady convergence? Examine both solver.out iteration and stop reason, RelT and temperature history, actual effective timestep and residual CSV before changing any solver operator. This experiment is not yet evidence of defective interface assembly. Steady state analytic profile is inapplicable to an unconverged transient/pseudotransient iterate.
+- Separate issue: median cellwise interface-near reconstructed fluxes are not the same as the integrated weak interface-flux balance. Ultimately check both after convergence.
