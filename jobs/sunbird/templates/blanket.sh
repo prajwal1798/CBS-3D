@@ -20,6 +20,8 @@
 #   energy RUN_DIR [L1|L2]  IMPLICIT STEADY ENERGY (WATER + STEEL, ONE PETSc
 #                       SOLVE, SteadyEnergySolver) ON THE LAST FLOW FIELD OF
 #                       RUN_DIR (ITS mean_velocity WHEN IT HAS ONE), SAME RANKS
+#   prove50k            FROM-SCRATCH FULL L2 PHYSICAL TRANSIENT: 50,000
+#                       COUPLED CBS + IMPLICIT-BE CHT STEPS ON 40 MPI RANKS
 #   check [RUN_DIR]     MASS + ENERGY BALANCE AND RESIDUAL PLOT OF A RUN
 #                       (DEFAULT: THE NEWEST RUN)
 #   status              YOUR JOBS AND THE LATEST PROGRESS LINE OF EACH RUN
@@ -201,6 +203,48 @@ run)
         echo "         THE RUN MUST USE THE SAME RANK COUNT (PASS --sets N)"
     fi
     bash "$T/submit_auto.sh" "$DIR" "$CASE" --time 24:00:00 "$@" --par "$PAR" --matprop "$MAT"
+    ;;
+
+# ================================
+# 50K FROM-SCRATCH FULL L2 PHYSICAL CHT PRODUCTION RUN
+# ================================
+prove50k)
+    PAR="$SRC/blanket_L2T50K.par"
+    [[ -s "$PAR" ]] || { echo "ERROR: MISSING $PAR" >&2; exit 1; }
+    [[ -d "$DIR/partitions_40" ]] || {
+        echo "ERROR: MISSING $DIR/partitions_40; run setup first" >&2; exit 1; }
+
+    # Pin the experiment so inherited shell state cannot silently turn this
+    # into a restart, a frozen-flow solve, or a nonphysical cp-scaled run.
+    export CBS3D_IMPLICIT_TRANSIENT_ENERGY=1
+    export CBS3D_TEMPERATURE_AFC=1
+    export CBS3D_STEADY_ENERGY_LOW_ORDER_ONLY=1
+    export CBS3D_IMPLICIT_ENERGY_BE_MIN_TEMPERATURE=298.15
+    export CBS3D_CHECKPOINT_EVERY=5000
+
+    unset CBS3D_STEADY_ENERGY
+    unset CBS3D_IMPLICIT_ENERGY_BE_DT
+    unset CBS3D_IMPLICIT_ENERGY_BE_STEPS
+    unset CBS3D_RESTART
+    unset CBS3D_RESTART_FORMAT
+    unset CBS3D_RESTART_ROOT
+    unset CBS3D_RESTART_ITERATION
+    unset CBS3D_RESTART_AS_INITIAL_CONDITION
+    unset CBS3D_RESTART_VELOCITY_ARRAY
+    unset CBS3D_AVERAGE_START_TIME
+    unset CBS3D_AVERAGE_START_ITERATION
+
+    echo "CASE   : FULL 4-U-CHANNEL BLANKET SLICE, L2 WALL + NUCLEAR HEATING"
+    echo "START  : FROM SCRATCH (NO RESTART)"
+    echo "TIME   : 50000 PHYSICAL CBS STEPS, GLOBAL dt"
+    echo "ENERGY : IMPLICIT BACKWARD EULER STEP 4, LOW-ORDER GRAPH VISCOSITY"
+    echo "MAT    : PHYSICAL blanket.matprop (CP_SCALE IGNORED)"
+    echo "MPI    : 40 RANKS"
+    echo "CHECK  : checkpoint + VTU every 5000 steps"
+
+    bash "$T/submit_auto.sh" "$DIR" "$CASE" \
+        --sets "40" --time 08:00:00 \
+        --par "$PAR" --matprop "$SRC/blanket.matprop"
     ;;
 
 # ================================
