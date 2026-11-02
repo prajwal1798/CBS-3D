@@ -117,7 +117,7 @@ from verify_uchannel_partition_parity_g8b import owned_fields
 data=owned_fields(Path(sys.argv[2]),50001,2)
 assert len(data)==9613,len(data)
 t=[v["temperature"][0] for v in data.values()]
-print("Independent final AFC state: Tmin=%.12f K, Tmax=%.12f K, nodes=%d"%
+print("Independent final LOW-ORDER state: Tmin=%.12f K, Tmax=%.12f K, nodes=%d"%
       (min(t),max(t),len(t)))
 assert min(t)>=298.15-1e-8,"Unphysical Tmin"
 PY
