@@ -1792,8 +1792,20 @@ namespace cbs
                     flow.linear_relative_residual;
                 pressure_result.converged = true;
 
+                // Preserve the legacy residual CSV schema. In monolithic mode
+                // these fields report the final coupled linear residual, not
+                // a standalone pressure-CG residual.
+                s_.last_cg_iterations =
+                    flow.total_krylov_iterations;
+                s_.last_cg_initial_l2 = 0.0;
+                s_.last_cg_final_l2 =
+                    flow.linear_relative_residual;
+                s_.last_cg_relative_l2 =
+                    flow.linear_relative_residual;
+                s_.last_cg_max_abs = 0.0;
+
                 local_maximum_velocity_correction =
-                    flow.maximum_velocity_change;
+                    flow.maximum_velocity_correction;
 
                 // Diagnostic weak continuity residual on the converged
                 // u^(n+1). This does not perform another pressure solve.
