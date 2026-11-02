@@ -105,8 +105,29 @@ while read -r label gamma anderson; do
     export SLURM_SUBMIT_DIR="$WORK/$label"
     echo "===== G12b ARM $label gamma=$gamma Anderson=$anderson ====="
     if bash "$WORK/launcher.sh" "$PART" uchannel; then
-        success=$((success+1))
-        echo "G12b ARM $label CONVERGED"
+        echo "G12b ARM $label solver reported convergence"
+        # Independently verify physical Tmin before calling any arm acceptable.
+        # A small algebraic residual alone does not certify bounded CHT.
+        if python3 - "$CBS3D_CODE/tools" "$WORK/$label/run_uchannel_${SLURM_JOB_ID:-manual}/output/uchannel" <<'PY'
+import sys
+sys.path.insert(0,sys.argv[1])
+from pathlib import Path
+from verify_uchannel_partition_parity_g8b import owned_fields
+fields=owned_fields(Path(sys.argv[2]),50001,2)
+temperatures=[record["temperature"][0] for record in fields.values()]
+minimum=min(temperatures)
+maximum=max(temperatures)
+print("Independent steady AFC VTU: nodes=%d Tmin=%.12f Tmax=%.12f K" %
+      (len(temperatures),minimum,maximum))
+if minimum < 298.15-1e-8:
+    raise SystemExit("G12b unacceptable: sub-reference temperature")
+PY
+        then
+            success=$((success+1))
+            echo "G12b ARM $label CONVERGED AND PHYSICAL-FLOOR PASS"
+        else
+            echo "G12b ARM $label FAIL: reported solve violates T >= 298.15 K"
+        fi
     else
         echo "G12b ARM $label FAILED (nonconvergence or solver failure)"
     fi
