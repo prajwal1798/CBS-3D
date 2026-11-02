@@ -401,7 +401,10 @@ namespace cbs
     }
 
     FullyImplicitFlowSolver::Result
-    FullyImplicitFlowSolver::solve(CBSStateSI& s)
+    FullyImplicitFlowSolver::solveImpl(
+        CBSStateSI& s,
+        const bool backward_euler,
+        const Real physical_dt)
     {
         if (!s.mpi_enabled || s.mpi_size < 2)
         {
@@ -431,6 +434,13 @@ namespace cbs
 
         const double start = MPI_Wtime();
         Result result;
+
+        if (backward_euler &&
+            (!(physical_dt > 0.0) || !std::isfinite(physical_dt)))
+        {
+            throw std::runtime_error(
+                "Fully implicit CBS backward Euler needs a positive finite dt");
+        }
 
         const Real nonlinear_tol =
             env_real("CBS3D_IMPLICIT_FLOW_TOL", 1.0e-7);
@@ -639,7 +649,9 @@ namespace cbs
         if (s.mpi_rank == 0)
         {
             std::cout
-                << "Fully implicit steady CBS flow\n"
+                << (backward_euler
+                        ? "Fully implicit backward-Euler CBS flow step\n"
+                        : "Fully implicit steady CBS flow\n")
                 << "  active fluid nodes : " << global_active << "\n"
                 << "  coupled DOFs       : " << global_dofs
                 << " (u,v,w,u*,v*,w*,p)\n"
@@ -653,6 +665,12 @@ namespace cbs
                 << "  max Picard iters   : " << max_nonlinear << "\n"
                 << "  initial relaxation : "
                 << requested_relaxation << "\n";
+            if (backward_euler)
+            {
+                std::cout
+                    << "  physical BE dt     : "
+                    << physical_dt << " s\n";
+            }
         }
 
         Real relaxation = requested_relaxation;
@@ -672,39 +690,45 @@ namespace cbs
 
             mass_over_tau.fill(0.0);
 
-            // Reproduce the production solver_opt=3 timestep convention.
-            // TimeStep computes the stable candidate from the CURRENT Picard
-            // velocity; the distributed production path then uses the
-            // communicator-wide minimum for every element. This dt is a CBS
-            // numerical parameter, not physical elapsed time.
-            TimeStep::computeTimeStep(s, nonlinear);
+            Real global_tau = physical_dt;
 
-            Real local_tau = std::numeric_limits<Real>::max();
-            for (Int ie = 1; ie <= s.cfg.nelem; ++ie)
+            if (!backward_euler)
             {
-                local_tau = std::min(local_tau, s.delte(ie));
-            }
+                // Steady solve: reproduce the production pseudo-time convention.
+                // The pseudo-time is a nonlinear continuation/stabilisation
+                // parameter and is not physical elapsed time.
+                TimeStep::computeTimeStep(s, nonlinear);
 
-            Real global_tau = 0.0;
-            check_mpi(MPI_Allreduce(
-                &local_tau, &global_tau, 1, MPI_DOUBLE, MPI_MIN,
-                MPI_COMM_WORLD), "flow global CBS timestep");
+                Real local_tau = std::numeric_limits<Real>::max();
+                for (Int ie = 1; ie <= s.cfg.nelem; ++ie)
+                {
+                    local_tau = std::min(local_tau, s.delte(ie));
+                }
 
-            const Real tau_scale =
-                env_real("CBS3D_IMPLICIT_FLOW_TAU_SCALE", 1.0);
-            if (!(tau_scale > 0.0) || !std::isfinite(tau_scale))
-            {
-                throw std::runtime_error(
-                    "CBS3D_IMPLICIT_FLOW_TAU_SCALE must be positive and finite");
+                check_mpi(MPI_Allreduce(
+                    &local_tau, &global_tau, 1, MPI_DOUBLE, MPI_MIN,
+                    MPI_COMM_WORLD), "flow global CBS timestep");
+
+                const Real tau_scale =
+                    env_real("CBS3D_IMPLICIT_FLOW_TAU_SCALE", 1.0);
+                if (!(tau_scale > 0.0) || !std::isfinite(tau_scale))
+                {
+                    throw std::runtime_error(
+                        "CBS3D_IMPLICIT_FLOW_TAU_SCALE must be positive and finite");
+                }
+                global_tau *= tau_scale;
             }
-            global_tau *= tau_scale;
 
             if (!(global_tau > 0.0) || !std::isfinite(global_tau))
             {
                 throw std::runtime_error(
-                    "Fully implicit CBS obtained invalid global timestep");
+                    backward_euler
+                        ? "Fully implicit CBS obtained invalid physical BE timestep"
+                        : "Fully implicit CBS obtained invalid pseudo-timestep");
             }
 
+            // In BE mode the physical step is used consistently by all three
+            // CBS blocks. In steady mode this remains the global pseudo-time.
             for (Int ie = 1; ie <= s.cfg.nelem; ++ie)
             {
                 s.delte(ie) = global_tau;
@@ -739,6 +763,7 @@ namespace cbs
                 mass_over_tau, s.partition_metadata, MPI_COMM_WORLD);
 
             check_petsc(MatZeroEntries(A), "MatZeroEntries(flow)");
+            check_petsc(VecSet(b, 0.0), "VecSet(flow b)");
 
             // Element operators: A_u, G, B and tau H.
             for (Int ie = 1; ie <= s.cfg.nelem; ++ie)
@@ -1056,11 +1081,39 @@ namespace cbs
 
                 if (has_step2_boundary_flux)
                 {
-                    check_petsc(MatSetValues(
-                        A, 4, pressure_rows,
-                        12, corrected_cols,
-                        b_boundary, ADD_VALUES),
-                        "MatSetValues(flow Bboundary)");
+                    if (backward_euler)
+                    {
+                        PetscScalar pressure_boundary_rhs[4] = {};
+                        for (Int a = 0; a < 4; ++a)
+                        {
+                            for (Int bnode = 1; bnode <= 4; ++bnode)
+                            {
+                                const Int ip = s.intma(bnode, ie);
+                                for (Int dim = 1; dim <= 3; ++dim)
+                                {
+                                    const Int col =
+                                        (bnode - 1) * 3 + (dim - 1);
+                                    pressure_boundary_rhs[a] -=
+                                        b_boundary[a * 12 + col] *
+                                        static_cast<PetscScalar>(
+                                            s.unkn1(dim, ip));
+                                }
+                            }
+                        }
+
+                        check_petsc(VecSetValues(
+                            b, 4, pressure_rows,
+                            pressure_boundary_rhs, ADD_VALUES),
+                            "VecSetValues(flow BE pressure boundary RHS)");
+                    }
+                    else
+                    {
+                        check_petsc(MatSetValues(
+                            A, 4, pressure_rows,
+                            12, corrected_cols,
+                            b_boundary, ADD_VALUES),
+                            "MatSetValues(flow Bboundary)");
+                    }
                 }
             }
 
@@ -1094,14 +1147,29 @@ namespace cbs
                     const PetscInt predictor_col =
                         base + predictor_offset + dim;
 
-                    check_petsc(MatSetValue(
-                        A, step1_row, u_col,
-                        -mdt, ADD_VALUES),
-                        "MatSetValue(Step1 -Mdt)");
+                    if (!backward_euler)
+                    {
+                        check_petsc(MatSetValue(
+                            A, step1_row, u_col,
+                            -mdt, ADD_VALUES),
+                            "MatSetValue(Step1 steady -Mdt)");
+                    }
+
                     check_petsc(MatSetValue(
                         A, step1_row, predictor_col,
                         mdt, ADD_VALUES),
                         "MatSetValue(Step1 +Mdt)");
+
+                    if (backward_euler)
+                    {
+                        const PetscScalar old_mass_rhs =
+                            static_cast<PetscScalar>(
+                                mdt * s.unkn1(dim + 1, ip));
+                        check_petsc(VecSetValue(
+                            b, step1_row, old_mass_rhs, ADD_VALUES),
+                            "VecSetValue(Step1 BE old-velocity RHS)");
+                    }
+
                     check_petsc(MatSetValue(
                         A, step3_row, u_col,
                         mdt, ADD_VALUES),
@@ -1122,7 +1190,6 @@ namespace cbs
 
             // Current corrected velocity is also a good initial guess for u*.
             check_petsc(VecSet(x, 0.0), "VecSet(flow x)");
-            check_petsc(VecSet(b, 0.0), "VecSet(flow b)");
 
             PetscScalar* x_values = nullptr;
             check_petsc(VecGetArray(
@@ -1283,6 +1350,20 @@ namespace cbs
 
         return result;
     }
+
+    FullyImplicitFlowSolver::Result
+    FullyImplicitFlowSolver::solve(CBSStateSI& s)
+    {
+        return solveImpl(s, false, 0.0);
+    }
+
+    FullyImplicitFlowSolver::Result
+    FullyImplicitFlowSolver::solveBackwardEulerStep(
+        CBSStateSI& s,
+        const Real physical_dt)
+    {
+        return solveImpl(s, true, physical_dt);
+    }
 }
 
 #else
@@ -1294,6 +1375,15 @@ namespace cbs
     {
         throw std::runtime_error(
             "Fully implicit CBS requires MPI + PETSc");
+    }
+
+    FullyImplicitFlowSolver::Result
+    FullyImplicitFlowSolver::solveBackwardEulerStep(
+        CBSStateSI&,
+        Real)
+    {
+        throw std::runtime_error(
+            "Fully implicit CBS backward Euler requires MPI + PETSc");
     }
 }
 
