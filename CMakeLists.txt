@@ -201,6 +201,23 @@ if (CBS3D_BUILD_SOURCE_VALIDATION)
         NAME step4_p1_tetra_operator_verification
         COMMAND cbs3d_step4_operator_verification
     )
+
+    # Production thermal lumped-mass diagonal at a conformal solid-fluid node.
+    add_executable(cbs3d_lumped_thermal_mass_verification
+        tests/LumpedThermalMassVerification.cpp
+        src/timestep/TimeStep.cpp
+        src/turbulence/SpalartAllmaras.cpp
+    )
+
+    target_include_directories(cbs3d_lumped_thermal_mass_verification PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/include"
+    )
+    target_compile_features(cbs3d_lumped_thermal_mass_verification PRIVATE cxx_std_20)
+
+    add_test(
+        NAME step4_lumped_thermal_mass
+        COMMAND cbs3d_lumped_thermal_mass_verification
+    )
 endif()
 
 #==============================================================================
