@@ -29,6 +29,7 @@
 #include "cbs/io/DistributedPost.hpp"
 #include "cbs/io/TimeAverage.hpp"
 #include "cbs/solver/SteadyEnergySolver.hpp"
+#include "cbs/solver/FullyImplicitFlowSolver.hpp"
 #include "cbs/linalg/PetscPersistentDistributedPressureSystem.hpp"
 #include "cbs/parallel/Coloring.hpp"
 #include "cbs/parallel/HaloExchange.hpp"
@@ -1367,6 +1368,146 @@ namespace cbs
                     << "    Energy dt is the physical CBS global dt; "
                        "standalone BE dt/step environment values are ignored.\n";
             }
+        }
+
+        // ================================
+        // FULLY IMPLICIT STEADY LAMINAR FLOW + STEADY CHT.
+        //
+        // This path removes the explicit CBS pseudo-time march from the steady
+        // blanket calculation. The nonlinear flow equations are solved by
+        // Picard/Oseen iteration; every nonlinear iterate solves u,v,w,p in one
+        // PETSc block system. With constant properties/no buoyancy, temperature
+        // is one-way coupled, so solve it once after the converged flow.
+        // ================================
+        if (environment_flag_enabled("CBS3D_FULLY_IMPLICIT_FLOW"))
+        {
+            if (s_.cfg.transient_on > 0)
+            {
+                throw std::runtime_error(
+                    "CBS3D_FULLY_IMPLICIT_FLOW is a steady solver; set transient_on=0");
+            }
+            if (coupled_implicit_energy)
+            {
+                throw std::runtime_error(
+                    "CBS3D_FULLY_IMPLICIT_FLOW and CBS3D_IMPLICIT_TRANSIENT_ENERGY "
+                    "are mutually exclusive");
+            }
+            if (environment_flag_enabled("CBS3D_STEADY_ENERGY"))
+            {
+                throw std::runtime_error(
+                    "CBS3D_FULLY_IMPLICIT_FLOW already performs the steady energy "
+                    "solve; do not also set CBS3D_STEADY_ENERGY");
+            }
+            if (s_.cfg.turbulence_on > 0)
+            {
+                throw std::runtime_error(
+                    "CBS3D_FULLY_IMPLICIT_FLOW baseline is laminar only");
+            }
+
+            const FullyImplicitFlowSolver::Result flow =
+                FullyImplicitFlowSolver::solve(s_);
+
+            if (!flow.converged)
+            {
+                std::ostringstream message;
+                message
+                    << "Fully implicit flow did not converge: Picard="
+                    << flow.nonlinear_iterations
+                    << ", total KSP=" << flow.total_krylov_iterations
+                    << ", RelU=" << flow.relative_velocity_change
+                    << ", RelP=" << flow.relative_pressure_change
+                    << ", DivRMS=" << flow.divergence_rms;
+                throw std::runtime_error(message.str());
+            }
+
+            SteadyEnergySolver::Result energy;
+            bool energy_solved = false;
+
+            if (s_.cfg.temp_calc > 0)
+            {
+                if (!environment_flag_enabled("CBS3D_TEMPERATURE_AFC") ||
+                    !environment_flag_enabled("CBS3D_STEADY_ENERGY_LOW_ORDER_ONLY"))
+                {
+                    throw std::runtime_error(
+                        "Fully implicit steady CHT currently requires the "
+                        "validated monotone low-order thermal operator: set "
+                        "CBS3D_TEMPERATURE_AFC=1 and "
+                        "CBS3D_STEADY_ENERGY_LOW_ORDER_ONLY=1");
+                }
+
+                // SteadyEnergySolver uses the time diagonal only to construct
+                // its optional pseudo-transient preconditioner/bootstrap. The
+                // accepted low-order stationary solution itself removes that
+                // shift before solving.
+                build_distributed_time_diagonals(s_);
+
+                energy =
+                    SteadyEnergySolver::solve(
+                        s_,
+                        thermal_boundary.fixed,
+                        thermal_boundary.value,
+                        thermal_boundary.heat_flux_load);
+
+                if (!energy.converged)
+                {
+                    std::ostringstream message;
+                    message
+                        << "Fully implicit steady CHT energy solve failed: "
+                        << "KSP=" << energy.iterations
+                        << ", residual=" << energy.residual_check;
+                    throw std::runtime_error(message.str());
+                }
+                energy_solved = true;
+            }
+
+            s_.unkn1 = s_.unkno;
+            s_.pres1 = s_.pres;
+            if (s_.cfg.temp_calc > 0)
+            {
+                s_.temperature1 = s_.temperature;
+            }
+
+            updateVelocityMagnitude();
+            DistributedPost::writeSolution(s_, case_name_, 1);
+
+            if (s_.mpi_rank == 0)
+            {
+                std::cout
+                    << "Fully implicit steady solve complete\n"
+                    << "  flow Picard iterations : "
+                    << flow.nonlinear_iterations << "\n"
+                    << "  flow total Krylov      : "
+                    << flow.total_krylov_iterations << "\n"
+                    << "  final RelU             : "
+                    << flow.relative_velocity_change << "\n"
+                    << "  final RelP             : "
+                    << flow.relative_pressure_change << "\n"
+                    << "  final DivRMS           : "
+                    << flow.divergence_rms << " 1/s\n"
+                    << "  Umax                   : "
+                    << flow.maximum_velocity << " m/s\n"
+                    << "  flow solve time        : "
+                    << flow.seconds << " s\n";
+
+                if (energy_solved)
+                {
+                    std::cout
+                        << "  thermal Krylov         : "
+                        << energy.iterations << "\n"
+                        << "  thermal residual       : "
+                        << energy.residual_check << "\n"
+                        << "  temperature range      : "
+                        << energy.t_min << " .. "
+                        << energy.t_max << " K\n"
+                        << "  thermal solve time     : "
+                        << energy.seconds << " s\n";
+                }
+
+                std::cout
+                    << "Run complete\n"
+                    << "  stop reason   : fully implicit steady flow/CHT converged\n";
+            }
+            return;
         }
 
         // ================================
