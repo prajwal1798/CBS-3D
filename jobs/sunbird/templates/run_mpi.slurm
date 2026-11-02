@@ -102,6 +102,8 @@ done
     echo "temp. AFC : ${CBS3D_TEMPERATURE_AFC:-0} (CBS3D_TEMPERATURE_AFC)"
     echo "LTS       : monotone ${CBS3D_LTS_MONOTONE:-0}, margin ${CBS3D_LTS_REFRESH_MARGIN:-0.8}"
     echo "steady T  : ${CBS3D_STEADY_ENERGY:-0} (CBS3D_STEADY_ENERGY; velocity array ${CBS3D_RESTART_VELOCITY_ARRAY:-velocity})"
+    echo "implicit T: ${CBS3D_IMPLICIT_TRANSIENT_ENERGY:-0} (physical BE Step 4; dt = CBS global dt)"
+    echo "T loworder: ${CBS3D_STEADY_ENERGY_LOW_ORDER_ONLY:-0} (graph viscosity; nonlinear limiter not applied)"
     echo "average   : start time ${CBS3D_AVERAGE_START_TIME:-off}, start iteration ${CBS3D_AVERAGE_START_ITERATION:-off}"
     echo "restart   : ${CBS3D_RESTART:-0} ${CBS3D_RESTART_FORMAT:-native} ${CBS3D_RESTART_ROOT:-} ${CBS3D_RESTART_ITERATION:-} initial-condition=${CBS3D_RESTART_AS_INITIAL_CONDITION:-0}"
     sha256sum "$CBS3D_MPI_EXE" "$RUN_DIR/partitions/rank_0000/${CASE}_rank_0000.par" \
