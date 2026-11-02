@@ -1959,9 +1959,10 @@ namespace cbs
             {
                 if (coupled_implicit_energy)
                 {
-                    // Standard loose/segregated transient CHT coupling:
-                    // use corrected u^(n+1) from CBS Step 3 and advance exactly
-                    // one physical BE temperature step with T^n on the RHS.
+                    // Advance exactly one physical BE temperature
+                    // step with T^n on the RHS. The velocity is the corrected
+                    // u^(n+1) from either the monolithic BE flow solve above
+                    // or the standard CBS Step-3 path.
                     const SteadyEnergySolver::Result energy =
                         SteadyEnergySolver::solve(
                             s_,
