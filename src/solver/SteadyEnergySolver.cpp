@@ -92,38 +92,46 @@ namespace cbs
         void explicit_residual(CBSStateSI& s, const Array1D<Real>& heat_flux_load,
                                const bool apply_afc = false)
         {
-            s.temperature1 = s.temperature;
-
+            // EnergyAssembly reads temperature1. This helper is an algebraic
+            // residual evaluator and must not destroy the production loop's
+            // T^n history when called from an implicit physical-time step.
+            const Array1D<Real> saved_temperature1 = s.temperature1;
             const Real saved_flux = s.cfg.heat_flux_bc;
+
+            s.temperature1 = s.temperature;
             s.cfg.heat_flux_bc = 0.0;
+
             try
             {
                 EnergyAssembly::assembleStep4Rhs(s);
+
+                if (apply_afc)
+                {
+                    // Production Step 4 limits the volume residual first. The
+                    // prescribed face load must be added AFTER the limiter or its
+                    // low-order predictor/bounds differ from explicit AFC.
+                    TemperatureAFC::limitDistributedResidual(s);
+                }
+                else
+                {
+                    HaloExchange::sumGhostContributionsToOwners(
+                        s.rhs1, s.partition_metadata, MPI_COMM_WORLD);
+                }
+
+                for (const Int ip : s.owned_nodes)
+                {
+                    s.rhs1(ip) += heat_flux_load(ip);
+                }
             }
             catch (...)
             {
                 s.cfg.heat_flux_bc = saved_flux;
+                s.temperature1 = saved_temperature1;
                 throw;
             }
+
             s.cfg.heat_flux_bc = saved_flux;
-
-            if (apply_afc)
-            {
-                // Production Step 4 limits the volume residual first. The
-                // prescribed face load must be added AFTER the limiter or its
-                // low-order predictor/bounds differ from explicit AFC.
-                TemperatureAFC::limitDistributedResidual(s);
-            }
-            else
-            {
-                HaloExchange::sumGhostContributionsToOwners(
-                    s.rhs1, s.partition_metadata, MPI_COMM_WORLD);
-            }
-
-            for (const Int ip : s.owned_nodes)
-            {
-                s.rhs1(ip) += heat_flux_load(ip);
-            }
+            s.temperature1 = saved_temperature1;
         }
 
         // ================================
@@ -164,7 +172,9 @@ namespace cbs
         CBSStateSI& s,
         const Array1D<Int>& fixed,
         const Array1D<Real>& value,
-        const Array1D<Real>& heat_flux_load)
+        const Array1D<Real>& heat_flux_load,
+        const Real physical_be_dt_override,
+        const Int physical_be_steps_override)
     {
         if (!s.mpi_enabled || s.cfg.nep != 4 || s.cfg.ndim != 3)
         {
@@ -181,14 +191,38 @@ namespace cbs
         const bool afc = env_flag("CBS3D_TEMPERATURE_AFC");
         const bool low_order_only =
             env_flag("CBS3D_STEADY_ENERGY_LOW_ORDER_ONLY");
+
+        if (!std::isfinite(physical_be_dt_override) ||
+            physical_be_dt_override < 0.0 ||
+            physical_be_steps_override < 0)
+        {
+            throw std::runtime_error(
+                "Implicit physical-time BE override must use finite dt >= 0 "
+                "and steps >= 0");
+        }
+
+        const bool physical_be_override = physical_be_dt_override > 0.0;
+        if (!physical_be_override && physical_be_steps_override != 0)
+        {
+            throw std::runtime_error(
+                "Implicit physical-time BE step override requires dt > 0");
+        }
+
         // Genuine *physical-time* lumped-capacitance backward Euler for the
-        // same frozen-velocity, graph-viscosity-stabilised CHT operator.
-        // This is NOT the local pseudo-time relaxation used in explicit CBS.
-        const Real be_dt =
-            env_real("CBS3D_IMPLICIT_ENERGY_BE_DT", 0.0);
+        // same corrected-velocity, graph-viscosity-stabilised CHT operator.
+        // Standalone G13 uses environment settings. The production CBS loop
+        // supplies its communicator-wide physical dt directly so flow and
+        // temperature advance on exactly the same time level.
+        const Real be_dt = physical_be_override
+            ? physical_be_dt_override
+            : env_real("CBS3D_IMPLICIT_ENERGY_BE_DT", 0.0);
         const bool transient_be = be_dt > 0.0;
-        const Real be_steps_input =
-            env_real("CBS3D_IMPLICIT_ENERGY_BE_STEPS", 1.0);
+        const Real be_steps_input = physical_be_override
+            ? static_cast<Real>(
+                  physical_be_steps_override > 0
+                      ? physical_be_steps_override
+                      : 1)
+            : env_real("CBS3D_IMPLICIT_ENERGY_BE_STEPS", 1.0);
         if (!std::isfinite(be_dt) || be_dt < 0.0 ||
             !std::isfinite(be_steps_input) || be_steps_input < 1.0 ||
             be_steps_input > 100000.0 ||
@@ -700,7 +734,8 @@ namespace cbs
                         "physical verification floor at step " +
                         std::to_string(step));
                 }
-                if (s.mpi_rank == 0 &&
+                if (!physical_be_override &&
+                    s.mpi_rank == 0 &&
                     (step <= 3 || step == be_steps || step % 10 == 0))
                 {
                     std::cout
@@ -726,7 +761,13 @@ namespace cbs
             result.converged = std::isfinite(max_linear_residual) &&
                                max_linear_residual < residual_tol;
             s.temperature = temperature;
-            s.temperature1 = temperature;
+            // Standalone BE finishes a self-contained thermal march. In the
+            // coupled production loop temperature1 must remain T^n until the
+            // convergence/output diagnostics have consumed it.
+            if (!physical_be_override)
+            {
+                s.temperature1 = temperature;
+            }
             result.seconds = MPI_Wtime() - start;
             check_petsc(KSPDestroy(&ksp), "KSPDestroy(physical BE)");
             check_petsc(VecDestroy(&x), "VecDestroy(x physical BE)");
