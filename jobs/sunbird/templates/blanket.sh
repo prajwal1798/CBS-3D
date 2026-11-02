@@ -348,6 +348,45 @@ fullybe)
     ;;
 
 # ================================
+# 5-STEP FROM-SCRATCH FULLY IMPLICIT PHYSICAL-TIME BE SMOKE TEST.
+# This is a verification job, NOT a production run.
+# ================================
+be-smoke)
+    PAR="$DIR/blanket_BE_smoke.par"
+    mkdir -p "$DIR"
+    [[ -d "$DIR/partitions_40" ]] || {
+        echo "ERROR: MISSING partitions_40; run setup first" >&2; exit 1; }
+    # Modify only the numeric ntime/transient controls in the existing
+    # physical transient input. Keep all geometry, heat sources, and materials.
+    awk '
+      /ntime transient_on dtfixed dtfix iwrite/ { next_line=1; print; next }
+      next_line == 1 { $1=5; $2=1; next_line=0 }
+      { print }
+    ' "$SRC/blanket_L2T50K.par" > "$PAR"
+
+    export CBS3D_FULLY_IMPLICIT_FLOW=1
+    export CBS3D_IMPLICIT_TRANSIENT_ENERGY=1
+    export CBS3D_TEMPERATURE_AFC=1
+    export CBS3D_STEADY_ENERGY_LOW_ORDER_ONLY=1
+    export CBS3D_IMPLICIT_FLOW_MAXIT="${CBS3D_IMPLICIT_FLOW_MAXIT:-100}"
+    export CBS3D_IMPLICIT_FLOW_RELAX="${CBS3D_IMPLICIT_FLOW_RELAX:-0.7}"
+    export CBS3D_IMPLICIT_FLOW_TOL="${CBS3D_IMPLICIT_FLOW_TOL:-1.0e-7}"
+    export CBS3D_IMPLICIT_FLOW_PRESSURE_TOL="${CBS3D_IMPLICIT_FLOW_PRESSURE_TOL:-1.0e-6}"
+    export CBS3D_IMPLICIT_FLOW_DIVERGENCE_TOL="${CBS3D_IMPLICIT_FLOW_DIVERGENCE_TOL:-1.0e-7}"
+
+    # Do not turn a numerical overshoot into clipping; absence of a floor
+    # merely avoids conflating the BE-flow and CHT verification gates.
+    unset CBS3D_IMPLICIT_ENERGY_BE_MIN_TEMPERATURE
+    unset CBS3D_STEADY_ENERGY
+    unset CBS3D_RESTART CBS3D_RESTART_FORMAT CBS3D_RESTART_ROOT
+    unset CBS3D_RESTART_ITERATION CBS3D_RESTART_AS_INITIAL_CONDITION
+
+    echo "TEST: five fully implicit physical-time BE flow + CHT steps, 40 MPI ranks"
+    bash "$T/submit_auto.sh" "$DIR" "$CASE" --sets "40" \
+        --time 01:00:00 --par "$PAR" --matprop "$SRC/blanket.matprop"
+    ;;
+
+# ================================
 # 50K FROM-SCRATCH FULL L2 PHYSICAL CHT PRODUCTION RUN
 # ================================
 prove50k)
