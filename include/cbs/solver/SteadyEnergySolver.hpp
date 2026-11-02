@@ -58,7 +58,10 @@ namespace cbs
             bool converged = false;
             Real t_min = 0.0;
             Real t_max = 0.0;
-            bool low_order = false;        // experimental stationary graph-viscosity FEM
+            bool low_order = false;        // experimental graph-viscosity FEM
+            bool transient_be = false;      // true physical-time backward Euler
+            Int be_steps = 0;
+            Real be_dt = 0.0;               // physical global timestep in seconds
             bool afc = false;              // true only for nonlinear flux-corrected solution
             Int afc_iterations = 0;        // DEFECT-CORRECTION ITERATIONS
             Real afc_change = 0.0;         // LAST max |T^{k+1} - T^k| [K]
