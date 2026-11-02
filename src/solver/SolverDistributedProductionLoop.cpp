@@ -1353,6 +1353,14 @@ namespace cbs
                 throw std::runtime_error(message.str());
             }
 
+            if (energy.transient_be)
+            {
+                // BE physical time is relative to the imported temperature
+                // field (t=0). Do not inherit local pseudo-time from the
+                // restart, which is NOT necessarily physical elapsed time.
+                s_.cfg.rtime = energy.be_dt * energy.be_steps;
+                s_.cfg.dtreal = energy.be_dt;
+            }
             DistributedPost::writeSolution(s_, case_name_, 1);
 
             if (s_.mpi_rank == 0)
