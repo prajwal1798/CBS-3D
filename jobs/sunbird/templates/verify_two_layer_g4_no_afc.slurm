@@ -9,7 +9,7 @@
 #               2. SERIAL RUN    (CBS3D_SERIAL_EXE)
 #               3. 4-RANK MPI RUN (CBS3D_MPI_EXE ON 4 PARTITIONS)
 #                  (WITH CBS3D_TEMPERATURE_AFC=0, LIKE SERIAL)
-#               4. BOTH AGAINST THE EXACT 1D TEMPERATURE (tools/check_two_layer_conduction.py),
+#               4. REQUIRE STEADY STOP, THEN BOTH AGAINST EXACT TEMPERATURE (tools/check_two_layer_conduction.py),
 #                  AND THE MPI FIELD AGAINST THE SERIAL FIELD, NODE BY NODE
 #               5. THE PRINTED HEAT INPUT AGAINST q''*W^2=0.016 W
 #             LAST LINE: G4-CONFORMAL-NO-AFC PASS OR G4-CONFORMAL-NO-AFC FAIL.
@@ -83,7 +83,7 @@ sha256sum "$CBS3D_SERIAL_EXE" "$CBS3D_MPI_EXE"
 # ================================
 "$GMSH" "$SRC/cht2.geo" -3 -format msh2 -o cht2.msh > gmsh.log 2>&1 || fail "gmsh"
 python3 "$CBS3D_CODE/tools/gmsh_to_cbs.py" cht2.msh --case-name cht2 \
-    --out-dir serial --par "$SRC/cht2.par" --matprop "$SRC/cht2.matprop" \
+    --out-dir serial --par "$SRC/cht2_convergence.par" --matprop "$SRC/cht2.matprop" \
     --overwrite > convert.log 2>&1 || fail "gmsh_to_cbs"
 python3 "$CBS3D_CODE/tools/export_rank_local_cbs.py" serial/cht2 --parts 4 \
     --out-dir p4 --gmsh "$GMSH" --overwrite > export.log 2>&1 || fail "export 4 ranks"
@@ -106,6 +106,14 @@ mkdir -p mpi4
 # ================================
 for run in serial mpi4; do
     echo "---- $run ----"
+    # The comparison is against a STATIONARY analytic solution; the numerical
+    # run is invalid until the thermal steady-state convergence gate is met.
+    # Catch an iteration-limit stop even if an unconverged field happens to
+    # fall within the benchmark's spatial error tolerance.
+    if ! grep -qi "steady-state convergence reached" "$run/solver.out"; then
+        fail "$run terminated without steady-state convergence"
+        grep -i -E "stop reason|maximum iteration count" "$run/solver.out" | tail -n 3 || true
+    fi
     CMP=()
     [[ "$run" == mpi4 ]] && CMP=(--compare serial/output)     # MPI MUST EQUAL SERIAL
     python3 "$CBS3D_CODE/tools/check_two_layer_conduction.py" "$run/output" "${CMP[@]}" || fail "$run temperature"
