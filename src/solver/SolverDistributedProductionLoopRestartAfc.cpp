@@ -73,10 +73,12 @@ namespace cbs
             // Kader k_n in each incident CHT wall-normal direction.
             (void)turbulence::CHTWallModelCoupling::correctThermalWallDiffusion(s);
 
-            if (TemperatureAFC::enabled())
-            {
-                TemperatureAFC::limitDistributedResidual(s);
-            }
+            // Do NOT limit here. The production iteration calls
+            // TemperatureAFC::limitDistributedResidual exactly once after
+            // EnergyAssembly::assembleStep4Rhs returns. Limiting here too
+            // applies graph viscosity/antidiffusive flux correction twice
+            // and makes the explicit operator disagree with the stationary
+            // residual used by SteadyEnergySolver.
         }
 
         static void applyRealTimeEnergyTerm(CBSStateSI& s)
