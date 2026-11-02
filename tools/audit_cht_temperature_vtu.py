@@ -130,9 +130,25 @@ def read_piece(path: Path) -> Piece:
     temperature = parse_float_array(
         named_data_array(point_data, "temperature", str(path)), str(path)
     )
-    mat_id = parse_int_array(
-        named_data_array(cell_data, "mat_id", str(path)), str(path)
-    )
+    # The serial VTU writer names this array "mat_id", while the MPI
+    # DistributedPost writer names it "material_id". Accept either format,
+    # and reject contradictory values if both names appear in one file.
+    cell_arrays = {
+        node.get("Name"): node for node in cell_data.findall("DataArray")
+    }
+    material_field = cell_arrays.get("material_id")
+    legacy_field = cell_arrays.get("mat_id")
+    if material_field is None and legacy_field is None:
+        fail(
+            f"{path}: missing CellData material field "
+            "(expected 'material_id' for MPI or 'mat_id' for serial VTU)"
+        )
+    chosen_field = material_field if material_field is not None else legacy_field
+    assert chosen_field is not None
+    mat_id = parse_int_array(chosen_field, str(path))
+    if material_field is not None and legacy_field is not None:
+        if parse_int_array(legacy_field, str(path)) != mat_id:
+            fail(f"{path}: conflicting material_id and mat_id cell arrays")
     bc_id = parse_int_array(
         named_data_array(cell_data, "bc_id", str(path)), str(path)
     )
