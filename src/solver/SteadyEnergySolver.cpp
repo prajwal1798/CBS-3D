@@ -179,6 +179,14 @@ namespace cbs
         // using a frozen low-order PETSc matrix as defect-correction
         // preconditioner. The limiter itself is NOT independently reimplemented.
         const bool afc = env_flag("CBS3D_TEMPERATURE_AFC");
+        const bool low_order_only =
+            env_flag("CBS3D_STEADY_ENERGY_LOW_ORDER_ONLY");
+        if (low_order_only && !afc)
+        {
+            throw std::runtime_error(
+                "CBS3D_STEADY_ENERGY_LOW_ORDER_ONLY requires "
+                "CBS3D_TEMPERATURE_AFC=1 to construct the fluid graph viscosity");
+        }
         const Real afc_tol = env_real("CBS3D_STEADY_ENERGY_TOL", 1.0e-6);
         const Real residual_tol = env_real("CBS3D_STEADY_ENERGY_RESIDUAL_TOL", 1.0e-6);
         if (!(residual_tol > 0.0) || !std::isfinite(residual_tol))
@@ -377,7 +385,8 @@ namespace cbs
         // This is strictly opt-in and leaves production defaults unchanged.
         // Remove gamma*C/dt only from the temporary bootstrap matrix.
         const bool low_order_bootstrap =
-            afc && env_flag("CBS3D_STEADY_ENERGY_LOW_ORDER_BOOTSTRAP");
+            afc && (low_order_only ||
+                env_flag("CBS3D_STEADY_ENERGY_LOW_ORDER_BOOTSTRAP"));
         Mat A_bootstrap = nullptr;
         if (low_order_bootstrap)
         {
@@ -531,6 +540,54 @@ namespace cbs
                           << " K (subsequent AFC residual still nonlinear)"
                           << "\n" << std::flush;
             }
+            if (low_order_only)
+            {
+                // This solves a DIFFERENT discretisation from high-order AFC:
+                // stationary graph-viscosity-stabilised P1 FEM. It is an
+                // experimental bounded/robust baseline, NOT high-fidelity AFC.
+                // Check the actual assembled low-order linear equation rather
+                // than evaluating a different high-order nonlinear residual.
+                check_petsc(MatMult(A_bootstrap, x, r),
+                            "MatMult(low-order independent residual)");
+                check_petsc(VecAYPX(r, -1.0, b),
+                            "VecAYPX(b - A_low*T)");
+                PetscReal residual_inf = 0.0;
+                PetscReal rhs_inf = 0.0;
+                check_petsc(VecNorm(r, NORM_INFINITY, &residual_inf),
+                            "VecNorm(low-order residual infinity)");
+                check_petsc(VecNorm(b, NORM_INFINITY, &rhs_inf),
+                            "VecNorm(low-order RHS infinity)");
+                result.residual_check = rhs_inf > 0.0
+                    ? residual_inf / rhs_inf : residual_inf;
+                result.ksp_relative_residual = result.residual_check;
+                result.t_min = minimum;
+                result.t_max = maximum;
+                result.iterations = total_krylov;
+                result.low_order = true;
+                result.afc = false;
+                result.converged =
+                    std::isfinite(result.residual_check) &&
+                    result.residual_check < residual_tol;
+                s.temperature = temperature;
+                s.temperature1 = temperature;
+                result.seconds = MPI_Wtime() - start;
+                if (s.mpi_rank == 0)
+                {
+                    std::cout << "  [LOW-ORDER] implicit stationary solve"
+                              << " relative Linf residual="
+                              << result.residual_check
+                              << " accepted=" << result.converged
+                              << "\n" << std::flush;
+                }
+                check_petsc(KSPDestroy(&ksp), "KSPDestroy(low-order)");
+                check_petsc(VecDestroy(&x), "VecDestroy(x low-order)");
+                check_petsc(VecDestroy(&b), "VecDestroy(b low-order)");
+                check_petsc(VecDestroy(&r), "VecDestroy(r low-order)");
+                check_petsc(MatDestroy(&A_bootstrap), "MatDestroy(A_low)");
+                check_petsc(MatDestroy(&A), "MatDestroy(A)");
+                return result;
+            }
+
             // Restore the intended shifted defect preconditioner before
             // nonlinear iterations; PETSc rebuilds this preconditioner.
             check_petsc(KSPSetOperators(ksp, A, A),
