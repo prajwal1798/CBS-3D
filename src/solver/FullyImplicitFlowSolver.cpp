@@ -1,20 +1,28 @@
 //=============================================================================
 // CBS3D++_SI
 //
-// Fully implicit steady laminar flow solve for the distributed P1/TET4 system.
+// Fully implicit steady CBS flow solve.
 //
-// Nonlinearity is treated by Picard/Oseen iteration. At nonlinear iteration k,
-// convection and CBS characteristic stabilisation are frozen on u^k while
-// u^(k+1) and p^(k+1) are solved simultaneously:
+// The original semi-implicit CBS iteration is
 //
-//   [ A_Oseen(u^k)   G ] [u] = 0
-//   [      -D       tauH] [p] = 0.
+//   M_dt (u* - u) = r_m(u)
+//   A_p p          = B u*
+//   M_dt (u - u*) + G p = 0
 //
-// tauH is the existing CBS equal-order pressure stabilisation. The velocity
-// block uses the same conservative convection and full deviatoric viscous
-// operator as MomentumAssemblyLiu.cpp. Strong constraints are imposed with
-// MatZeroRowsColumnsIS, so prescribed inlet/wall/interface values also enter
-// neighbouring free equations consistently.
+// where A_p = sum_e tau_e H_e and M_dt is the lumped momentum mass divided by
+// the same local CBS pseudo-time. Instead of marching these equations millions
+// of times, this solver treats u, u* and p as simultaneous unknowns. Picard
+// linearisation freezes the nonlinear convection/stabilisation coefficients on
+// the current corrected velocity. Every Picard iteration therefore solves the
+// exact linearised CBS Step-1/2/3 fixed-point equations in one PETSc system.
+//
+// Per active fluid node the unknown ordering is
+//
+//   [u, v, w, u*, v*, w*, p].
+//
+// Temperature is intentionally not included: for the present constant-property
+// forced-flow blanket problem there is no T -> (u,p) feedback. The converged
+// flow is followed by the existing implicit steady CHT solve.
 //=============================================================================
 
 #include "cbs/solver/FullyImplicitFlowSolver.hpp"
@@ -43,8 +51,10 @@ namespace cbs
 {
     namespace
     {
-        constexpr Int velocity_components = 3;
-        constexpr Int dofs_per_active_node = 4;
+        constexpr Int corrected_offset = 0;
+        constexpr Int predictor_offset = 3;
+        constexpr Int pressure_offset = 6;
+        constexpr Int dofs_per_active_node = 7;
 
         void check_mpi(const int code, const char* what)
         {
@@ -132,7 +142,7 @@ namespace cbs
                 if (!(s.rho_e(ie) > 0.0) || !std::isfinite(s.rho_e(ie)))
                 {
                     throw std::runtime_error(
-                        "Fully implicit flow: invalid fluid density");
+                        "Fully implicit CBS: invalid fluid density");
                 }
 
                 const Real mu =
@@ -141,7 +151,7 @@ namespace cbs
                 if (!(mu >= 0.0) || !std::isfinite(mu))
                 {
                     throw std::runtime_error(
-                        "Fully implicit flow: invalid fluid viscosity");
+                        "Fully implicit CBS: invalid fluid viscosity");
                 }
                 return mu / s.rho_e(ie);
             }
@@ -149,7 +159,7 @@ namespace cbs
             if (!(s.cfg.ani >= 0.0) || !std::isfinite(s.cfg.ani))
             {
                 throw std::runtime_error(
-                    "Fully implicit flow: invalid nondimensional viscosity");
+                    "Fully implicit CBS: invalid nondimensional viscosity");
             }
             return s.cfg.ani;
         }
@@ -158,11 +168,12 @@ namespace cbs
         {
             const Real h = s.alen_e(ie);
             const Real nu = fluid_kinematic_viscosity(s, ie);
+
             if (!(h > 0.0) || !std::isfinite(h) ||
                 !(nu >= 0.0) || !std::isfinite(nu))
             {
                 throw std::runtime_error(
-                    "Fully implicit flow: invalid h/nu for CBS stabilisation");
+                    "Fully implicit CBS: invalid h/nu for stabilisation");
             }
 
             Real speed = 0.0;
@@ -177,9 +188,9 @@ namespace cbs
                     std::sqrt(ux * ux + uy * uy + uz * uz));
             }
 
-            const Real advective =
+            const Real dt_adv =
                 h / std::max(speed, static_cast<Real>(1.0e-14));
-            const Real diffusive =
+            const Real dt_diff =
                 nu > 0.0
                     ? h * h / (2.0 * nu)
                     : std::numeric_limits<Real>::max();
@@ -192,13 +203,13 @@ namespace cbs
                     "CBS3D_IMPLICIT_FLOW_TAU_SCALE must be positive");
             }
 
-            const Real tau = scale * s.cfg.csafm *
-                std::min(advective, diffusive);
+            const Real tau =
+                scale * s.cfg.csafm * std::min(dt_adv, dt_diff);
 
             if (!(tau > 0.0) || !std::isfinite(tau))
             {
                 throw std::runtime_error(
-                    "Fully implicit flow: invalid CBS stabilisation tau");
+                    "Fully implicit CBS: invalid local tau");
             }
             return tau;
         }
@@ -208,9 +219,7 @@ namespace cbs
             return volume * (a == b ? 2.0 : 1.0) / 20.0;
         }
 
-        void set_default_option(
-            const char* name,
-            const char* value)
+        void set_default_option(const char* name, const char* value)
         {
             PetscBool given = PETSC_FALSE;
             check_petsc(
@@ -228,7 +237,7 @@ namespace cbs
         {
             set_default_option("-flow_ksp_type", "fgmres");
             set_default_option("-flow_ksp_rtol", "1e-8");
-            set_default_option("-flow_ksp_max_it", "400");
+            set_default_option("-flow_ksp_max_it", "500");
             set_default_option("-flow_pc_type", "fieldsplit");
             set_default_option("-flow_pc_fieldsplit_type", "schur");
             set_default_option(
@@ -236,14 +245,13 @@ namespace cbs
             set_default_option(
                 "-flow_pc_fieldsplit_schur_precondition", "a11");
 
-            // Oseen velocity block: local overlapping ILU is robust for the
-            // nonsymmetric convection-diffusion operator at the present scale.
+            // The six-component velocity/predictor block is nonsymmetric.
             set_default_option(
                 "-flow_fieldsplit_velocity_ksp_type", "gmres");
             set_default_option(
                 "-flow_fieldsplit_velocity_ksp_rtol", "1e-2");
             set_default_option(
-                "-flow_fieldsplit_velocity_ksp_max_it", "30");
+                "-flow_fieldsplit_velocity_ksp_max_it", "40");
             set_default_option(
                 "-flow_fieldsplit_velocity_pc_type", "asm");
             set_default_option(
@@ -253,14 +261,13 @@ namespace cbs
             set_default_option(
                 "-flow_fieldsplit_velocity_sub_pc_factor_levels", "1");
 
-            // Pressure Schur approximation: the CBS pressure block is an
-            // elliptic tau*Laplacian, for which BoomerAMG is appropriate.
+            // The pressure preconditioning block is tau times a Laplacian.
             set_default_option(
                 "-flow_fieldsplit_pressure_ksp_type", "gmres");
             set_default_option(
                 "-flow_fieldsplit_pressure_ksp_rtol", "1e-2");
             set_default_option(
-                "-flow_fieldsplit_pressure_ksp_max_it", "30");
+                "-flow_fieldsplit_pressure_ksp_max_it", "40");
             set_default_option(
                 "-flow_fieldsplit_pressure_pc_type", "hypre");
             set_default_option(
@@ -303,15 +310,12 @@ namespace cbs
                     continue;
                 }
 
-                const PetscInt expected =
-                    local_start + static_cast<PetscInt>(cursor);
-                (void)expected;
-
                 for (Int dim = 1; dim <= 3; ++dim)
                 {
                     const Real old_value = s.unkno(dim, ip);
                     const Real linear_value =
-                        static_cast<Real>(values[cursor + (dim - 1)]);
+                        static_cast<Real>(
+                            values[cursor + corrected_offset + (dim - 1)]);
                     const Real new_value =
                         velocity_fixed(s, ip)
                             ? linear_value
@@ -329,7 +333,7 @@ namespace cbs
 
                 const Real old_pressure = s.pres(ip);
                 const Real linear_pressure =
-                    static_cast<Real>(values[cursor + 3]);
+                    static_cast<Real>(values[cursor + pressure_offset]);
                 const Real new_pressure =
                     s.node_pressure_fixed(ip) != 0
                         ? linear_pressure
@@ -360,7 +364,7 @@ namespace cbs
             if (local_start + static_cast<PetscInt>(cursor) != local_end)
             {
                 throw std::runtime_error(
-                    "Fully implicit flow: local vector/DOF ownership mismatch");
+                    "Fully implicit CBS: local vector/DOF ownership mismatch");
             }
 
             Boundary::applyOwnedVelocityConstraints(s);
@@ -385,9 +389,11 @@ namespace cbs
                     const Int ip = s.intma(a, ie);
                     for (Int dim = 1; dim <= 3; ++dim)
                     {
-                        div_u += s.unkno(dim, ip) * grad(s, ie, dim, a);
+                        div_u +=
+                            s.unkno(dim, ip) * grad(s, ie, dim, a);
                     }
                 }
+
                 const Real volume = s.detJ(ie) / 6.0;
                 local_div2 += volume * div_u * div_u;
                 local_volume += volume;
@@ -401,47 +407,39 @@ namespace cbs
             Real global_volume = 0.0;
             Real global_umax = 0.0;
 
-            check_mpi(
-                MPI_Allreduce(
-                    &local_du2, &global_du2, 1, MPI_DOUBLE, MPI_SUM,
-                    MPI_COMM_WORLD),
-                "implicit flow du norm");
-            check_mpi(
-                MPI_Allreduce(
-                    &local_u2, &global_u2, 1, MPI_DOUBLE, MPI_SUM,
-                    MPI_COMM_WORLD),
-                "implicit flow u norm");
-            check_mpi(
-                MPI_Allreduce(
-                    &local_dp2, &global_dp2, 1, MPI_DOUBLE, MPI_SUM,
-                    MPI_COMM_WORLD),
-                "implicit flow dp norm");
-            check_mpi(
-                MPI_Allreduce(
-                    &local_p2, &global_p2, 1, MPI_DOUBLE, MPI_SUM,
-                    MPI_COMM_WORLD),
-                "implicit flow p norm");
-            check_mpi(
-                MPI_Allreduce(
-                    &local_div2, &global_div2, 1, MPI_DOUBLE, MPI_SUM,
-                    MPI_COMM_WORLD),
-                "implicit flow divergence norm");
-            check_mpi(
-                MPI_Allreduce(
-                    &local_volume, &global_volume, 1, MPI_DOUBLE, MPI_SUM,
-                    MPI_COMM_WORLD),
-                "implicit flow fluid volume");
-            check_mpi(
-                MPI_Allreduce(
-                    &local_umax, &global_umax, 1, MPI_DOUBLE, MPI_MAX,
-                    MPI_COMM_WORLD),
-                "implicit flow Umax");
+            check_mpi(MPI_Allreduce(
+                &local_du2, &global_du2, 1, MPI_DOUBLE, MPI_SUM,
+                MPI_COMM_WORLD), "flow du norm");
+            check_mpi(MPI_Allreduce(
+                &local_u2, &global_u2, 1, MPI_DOUBLE, MPI_SUM,
+                MPI_COMM_WORLD), "flow u norm");
+            check_mpi(MPI_Allreduce(
+                &local_dp2, &global_dp2, 1, MPI_DOUBLE, MPI_SUM,
+                MPI_COMM_WORLD), "flow dp norm");
+            check_mpi(MPI_Allreduce(
+                &local_p2, &global_p2, 1, MPI_DOUBLE, MPI_SUM,
+                MPI_COMM_WORLD), "flow p norm");
+            check_mpi(MPI_Allreduce(
+                &local_div2, &global_div2, 1, MPI_DOUBLE, MPI_SUM,
+                MPI_COMM_WORLD), "flow divergence norm");
+            check_mpi(MPI_Allreduce(
+                &local_volume, &global_volume, 1, MPI_DOUBLE, MPI_SUM,
+                MPI_COMM_WORLD), "flow fluid volume");
+            check_mpi(MPI_Allreduce(
+                &local_umax, &global_umax, 1, MPI_DOUBLE, MPI_MAX,
+                MPI_COMM_WORLD), "flow Umax");
 
             Metrics m;
-            m.rel_u = std::sqrt(global_du2) /
-                std::max(std::sqrt(global_u2), static_cast<Real>(1.0e-30));
-            m.rel_p = std::sqrt(global_dp2) /
-                std::max(std::sqrt(global_p2), static_cast<Real>(1.0));
+            m.rel_u =
+                std::sqrt(global_du2) /
+                std::max(
+                    std::sqrt(global_u2),
+                    static_cast<Real>(1.0e-30));
+            m.rel_p =
+                std::sqrt(global_dp2) /
+                std::max(
+                    std::sqrt(global_p2),
+                    static_cast<Real>(1.0));
             m.div_rms =
                 global_volume > 0.0
                     ? std::sqrt(global_div2 / global_volume)
@@ -457,18 +455,17 @@ namespace cbs
         if (!s.mpi_enabled || s.mpi_size < 2)
         {
             throw std::runtime_error(
-                "Fully implicit flow requires distributed MPI execution");
+                "Fully implicit CBS requires distributed MPI execution");
         }
         if (s.cfg.ndim != 3 || s.cfg.nep != 4)
         {
             throw std::runtime_error(
-                "Fully implicit flow currently requires 3D P1/TET4");
+                "Fully implicit CBS currently requires 3D P1/TET4");
         }
         if (s.cfg.turbulence_on > 0)
         {
             throw std::runtime_error(
-                "Fully implicit flow baseline is laminar only; implicit SA "
-                "coupling has not yet been added");
+                "Fully implicit CBS baseline is laminar only");
         }
 
         for (const Int ip : s.owned_nodes)
@@ -476,8 +473,8 @@ namespace cbs
             if (s.node_symmetry(ip) != 0)
             {
                 throw std::runtime_error(
-                    "Fully implicit flow currently supports strong velocity "
-                    "conditions but not distributed symmetry constraints");
+                    "Fully implicit CBS does not yet support distributed "
+                    "symmetry constraints");
             }
         }
 
@@ -502,7 +499,7 @@ namespace cbs
             requested_relaxation > 1.0)
         {
             throw std::runtime_error(
-                "Invalid fully implicit flow nonlinear controls");
+                "Invalid fully implicit CBS nonlinear controls");
         }
 
         long long local_active = 0;
@@ -516,16 +513,12 @@ namespace cbs
 
         long long global_active = 0;
         long long active_offset = 0;
-        check_mpi(
-            MPI_Allreduce(
-                &local_active, &global_active, 1, MPI_LONG_LONG, MPI_SUM,
-                MPI_COMM_WORLD),
-            "implicit flow active node count");
-        check_mpi(
-            MPI_Exscan(
-                &local_active, &active_offset, 1, MPI_LONG_LONG, MPI_SUM,
-                MPI_COMM_WORLD),
-            "implicit flow active node offset");
+        check_mpi(MPI_Allreduce(
+            &local_active, &global_active, 1, MPI_LONG_LONG, MPI_SUM,
+            MPI_COMM_WORLD), "flow active node count");
+        check_mpi(MPI_Exscan(
+            &local_active, &active_offset, 1, MPI_LONG_LONG, MPI_SUM,
+            MPI_COMM_WORLD), "flow active node offset");
         if (s.mpi_rank == 0)
         {
             active_offset = 0;
@@ -536,22 +529,26 @@ namespace cbs
         if (global_dofs > std::numeric_limits<Int>::max())
         {
             throw std::runtime_error(
-                "Fully implicit flow global DOF count exceeds CBS Int range");
+                "Fully implicit CBS global DOF count exceeds CBS Int range");
         }
 
         Array1D<Int> base_dof(s.cfg.npoin);
         base_dof.fill(-1);
-        long long local_index = 0;
+
+        long long local_active_index = 0;
         for (const Int ip : s.owned_nodes)
         {
             if (!touches_fluid(s, ip))
             {
                 continue;
             }
+
             base_dof(ip) = static_cast<Int>(
-                dofs_per_active_node * (active_offset + local_index));
-            ++local_index;
+                dofs_per_active_node *
+                (active_offset + local_active_index));
+            ++local_active_index;
         }
+
         HaloExchange::broadcastOwnedToGhosts(
             base_dof, s.partition_metadata, MPI_COMM_WORLD);
 
@@ -566,13 +563,14 @@ namespace cbs
                 if (base_dof(s.intma(a, ie)) < 0)
                 {
                     throw std::runtime_error(
-                        "Fully implicit flow: fluid node has no global DOF");
+                        "Fully implicit CBS: fluid node has no global DOF");
                 }
             }
         }
 
         const PetscInt local_dofs =
-            static_cast<PetscInt>(dofs_per_active_node * local_active);
+            static_cast<PetscInt>(
+                dofs_per_active_node * local_active);
         const PetscInt n_global =
             static_cast<PetscInt>(global_dofs);
 
@@ -585,28 +583,25 @@ namespace cbs
         IS pressure_is = nullptr;
         IS fixed_is = nullptr;
 
-        check_petsc(
-            MatCreateAIJ(
-                MPI_COMM_WORLD,
-                local_dofs, local_dofs,
-                n_global, n_global,
-                64, nullptr, 64, nullptr,
-                &A),
-            "MatCreateAIJ(implicit flow)");
-        check_petsc(
-            MatSetOption(
-                A, MAT_NEW_NONZERO_ALLOCATION_ERR, PETSC_FALSE),
-            "MatSetOption(implicit flow)");
+        check_petsc(MatCreateAIJ(
+            MPI_COMM_WORLD,
+            local_dofs, local_dofs,
+            n_global, n_global,
+            96, nullptr, 96, nullptr,
+            &A), "MatCreateAIJ(fully implicit CBS)");
+        check_petsc(MatSetOption(
+            A, MAT_NEW_NONZERO_ALLOCATION_ERR, PETSC_FALSE),
+            "MatSetOption(flow)");
 
-        check_petsc(MatCreateVecs(A, &x, &b), "MatCreateVecs");
-        check_petsc(VecDuplicate(b, &residual), "VecDuplicate");
+        check_petsc(MatCreateVecs(A, &x, &b), "MatCreateVecs(flow)");
+        check_petsc(VecDuplicate(b, &residual), "VecDuplicate(flow)");
 
         std::vector<PetscInt> velocity_indices;
         std::vector<PetscInt> pressure_indices;
         std::vector<PetscInt> fixed_indices;
 
         velocity_indices.reserve(
-            static_cast<std::size_t>(3 * local_active));
+            static_cast<std::size_t>(6 * local_active));
         pressure_indices.reserve(
             static_cast<std::size_t>(local_active));
 
@@ -619,96 +614,91 @@ namespace cbs
 
             const PetscInt base =
                 static_cast<PetscInt>(base_dof(ip));
-            for (Int dim = 0; dim < 3; ++dim)
+
+            for (Int q = 0; q < 6; ++q)
             {
-                velocity_indices.push_back(base + dim);
+                velocity_indices.push_back(base + q);
                 if (velocity_fixed(s, ip))
                 {
-                    fixed_indices.push_back(base + dim);
+                    fixed_indices.push_back(base + q);
                 }
             }
-            pressure_indices.push_back(base + 3);
+
+            pressure_indices.push_back(base + pressure_offset);
             if (s.node_pressure_fixed(ip) != 0)
             {
-                fixed_indices.push_back(base + 3);
+                fixed_indices.push_back(base + pressure_offset);
             }
         }
 
-        check_petsc(
-            ISCreateGeneral(
-                MPI_COMM_WORLD,
-                static_cast<PetscInt>(velocity_indices.size()),
-                velocity_indices.data(),
-                PETSC_COPY_VALUES,
-                &velocity_is),
-            "ISCreateGeneral(velocity)");
-        check_petsc(
-            ISCreateGeneral(
-                MPI_COMM_WORLD,
-                static_cast<PetscInt>(pressure_indices.size()),
-                pressure_indices.data(),
-                PETSC_COPY_VALUES,
-                &pressure_is),
-            "ISCreateGeneral(pressure)");
-        check_petsc(
-            ISCreateGeneral(
-                MPI_COMM_WORLD,
-                static_cast<PetscInt>(fixed_indices.size()),
-                fixed_indices.data(),
-                PETSC_COPY_VALUES,
-                &fixed_is),
-            "ISCreateGeneral(fixed)");
+        check_petsc(ISCreateGeneral(
+            MPI_COMM_WORLD,
+            static_cast<PetscInt>(velocity_indices.size()),
+            velocity_indices.data(),
+            PETSC_COPY_VALUES,
+            &velocity_is), "ISCreateGeneral(flow velocity)");
+        check_petsc(ISCreateGeneral(
+            MPI_COMM_WORLD,
+            static_cast<PetscInt>(pressure_indices.size()),
+            pressure_indices.data(),
+            PETSC_COPY_VALUES,
+            &pressure_is), "ISCreateGeneral(flow pressure)");
+        check_petsc(ISCreateGeneral(
+            MPI_COMM_WORLD,
+            static_cast<PetscInt>(fixed_indices.size()),
+            fixed_indices.data(),
+            PETSC_COPY_VALUES,
+            &fixed_is), "ISCreateGeneral(flow fixed)");
 
-        check_petsc(KSPCreate(MPI_COMM_WORLD, &ksp), "KSPCreate");
-        check_petsc(
-            KSPSetOptionsPrefix(ksp, "flow_"),
-            "KSPSetOptionsPrefix(flow)");
-        check_petsc(KSPSetType(ksp, KSPFGMRES), "KSPSetType(FGMRES)");
-        check_petsc(
-            KSPSetTolerances(
-                ksp, 1.0e-8, 0.0, PETSC_DEFAULT, 400),
+        check_petsc(KSPCreate(MPI_COMM_WORLD, &ksp), "KSPCreate(flow)");
+        check_petsc(KSPSetOptionsPrefix(
+            ksp, "flow_"), "KSPSetOptionsPrefix(flow)");
+        check_petsc(KSPSetType(
+            ksp, KSPFGMRES), "KSPSetType(flow FGMRES)");
+        check_petsc(KSPSetTolerances(
+            ksp, 1.0e-8, 0.0, PETSC_DEFAULT, 500),
             "KSPSetTolerances(flow)");
-        check_petsc(
-            KSPSetInitialGuessNonzero(ksp, PETSC_TRUE),
-            "KSPSetInitialGuessNonzero(flow)");
+        check_petsc(KSPSetInitialGuessNonzero(
+            ksp, PETSC_TRUE), "KSPSetInitialGuessNonzero(flow)");
 
         PC pc = nullptr;
         check_petsc(KSPGetPC(ksp, &pc), "KSPGetPC(flow)");
-        check_petsc(PCSetType(pc, PCFIELDSPLIT), "PCSetType(fieldsplit)");
-        check_petsc(
-            PCFieldSplitSetIS(pc, "velocity", velocity_is),
+        check_petsc(PCSetType(
+            pc, PCFIELDSPLIT), "PCSetType(flow fieldsplit)");
+        check_petsc(PCFieldSplitSetIS(
+            pc, "velocity", velocity_is),
             "PCFieldSplitSetIS(velocity)");
-        check_petsc(
-            PCFieldSplitSetIS(pc, "pressure", pressure_is),
+        check_petsc(PCFieldSplitSetIS(
+            pc, "pressure", pressure_is),
             "PCFieldSplitSetIS(pressure)");
-        check_petsc(
-            PCFieldSplitSetType(pc, PC_COMPOSITE_SCHUR),
+        check_petsc(PCFieldSplitSetType(
+            pc, PC_COMPOSITE_SCHUR),
             "PCFieldSplitSetType(Schur)");
-        check_petsc(
-            PCFieldSplitSetSchurFactType(
-                pc, PC_FIELDSPLIT_SCHUR_FACT_FULL),
+        check_petsc(PCFieldSplitSetSchurFactType(
+            pc, PC_FIELDSPLIT_SCHUR_FACT_FULL),
             "PCFieldSplitSetSchurFactType");
-        check_petsc(
-            PCFieldSplitSetSchurPre(
-                pc, PC_FIELDSPLIT_SCHUR_PRE_A11, nullptr),
+        check_petsc(PCFieldSplitSetSchurPre(
+            pc, PC_FIELDSPLIT_SCHUR_PRE_A11, nullptr),
             "PCFieldSplitSetSchurPre");
 
         install_default_petsc_options();
-        check_petsc(KSPSetFromOptions(ksp), "KSPSetFromOptions(flow)");
+        check_petsc(KSPSetFromOptions(
+            ksp), "KSPSetFromOptions(flow)");
 
         if (s.mpi_rank == 0)
         {
             std::cout
-                << "Fully implicit steady flow\n"
+                << "Fully implicit steady CBS flow\n"
                 << "  active fluid nodes : " << global_active << "\n"
                 << "  coupled DOFs       : " << global_dofs
-                << " (u,v,w,p)\n"
+                << " (u,v,w,u*,v*,w*,p)\n"
                 << "  nonlinear method   : Picard/Oseen\n"
                 << "  linear method      : PETSc FGMRES + "
                    "PCFIELDSPLIT Schur\n"
                 << "  nonlinear tol      : " << nonlinear_tol << "\n"
                 << "  pressure tol       : " << pressure_tol << "\n"
-                << "  divergence tol     : " << divergence_tol << " 1/s\n"
+                << "  divergence tol     : "
+                << divergence_tol << " 1/s\n"
                 << "  max Picard iters   : " << max_nonlinear << "\n"
                 << "  initial relaxation : "
                 << requested_relaxation << "\n";
@@ -716,6 +706,7 @@ namespace cbs
 
         Real relaxation = requested_relaxation;
         Real previous_rel_u = std::numeric_limits<Real>::max();
+        Array1D<Real> mass_over_tau(s.cfg.npoin);
 
         for (Int nonlinear = 1;
              nonlinear <= max_nonlinear;
@@ -728,11 +719,39 @@ namespace cbs
             HaloExchange::broadcastOwnedToGhosts(
                 s.pres, s.partition_metadata, MPI_COMM_WORLD);
 
-            check_petsc(MatZeroEntries(A), "MatZeroEntries(flow)");
+            mass_over_tau.fill(0.0);
 
             Real local_tau_min = std::numeric_limits<Real>::max();
             Real local_tau_max = 0.0;
 
+            // Assemble M_dt = sum_e (V_e/4)/tau_e on the owner nodes.
+            for (Int ie = 1; ie <= s.cfg.nelem; ++ie)
+            {
+                if (s.mat_elem(ie) != 0)
+                {
+                    continue;
+                }
+
+                const Real volume = s.detJ(ie) / 6.0;
+                const Real tau = element_cbs_tau(s, ie);
+                local_tau_min = std::min(local_tau_min, tau);
+                local_tau_max = std::max(local_tau_max, tau);
+
+                const Real contribution = (volume * 0.25) / tau;
+                for (Int a = 1; a <= 4; ++a)
+                {
+                    mass_over_tau(s.intma(a, ie)) += contribution;
+                }
+            }
+
+            HaloExchange::sumGhostContributionsToOwners(
+                mass_over_tau, s.partition_metadata, MPI_COMM_WORLD);
+            HaloExchange::broadcastOwnedToGhosts(
+                mass_over_tau, s.partition_metadata, MPI_COMM_WORLD);
+
+            check_petsc(MatZeroEntries(A), "MatZeroEntries(flow)");
+
+            // Element operators: A_u, G, B and tau H.
             for (Int ie = 1; ie <= s.cfg.nelem; ++ie)
             {
                 if (s.mat_elem(ie) != 0)
@@ -744,13 +763,11 @@ namespace cbs
                 if (!(volume > 0.0) || !std::isfinite(volume))
                 {
                     throw std::runtime_error(
-                        "Fully implicit flow: invalid fluid element volume");
+                        "Fully implicit CBS: invalid fluid element volume");
                 }
 
                 const Real nu = fluid_kinematic_viscosity(s, ie);
                 const Real tau = element_cbs_tau(s, ie);
-                local_tau_min = std::min(local_tau_min, tau);
-                local_tau_max = std::max(local_tau_max, tau);
 
                 Real w[5][4] = {};
                 Real div_w = 0.0;
@@ -765,6 +782,7 @@ namespace cbs
                     }
                 }
 
+                // g_b(node) = div(w N_b) evaluated at the four vertices.
                 Real g[5][5] = {};
                 for (Int basis = 1; basis <= 4; ++basis)
                 {
@@ -785,19 +803,19 @@ namespace cbs
                     }
                 }
 
-                PetscInt rows[16] = {};
-                PetscInt cols[16] = {};
-                PetscScalar values[16 * 16] = {};
+                PetscInt rows[28] = {};
+                PetscInt cols[28] = {};
+                PetscScalar values[28 * 28] = {};
 
                 for (Int a = 1; a <= 4; ++a)
                 {
                     const PetscInt base =
                         static_cast<PetscInt>(
                             base_dof(s.intma(a, ie)));
-                    for (Int q = 0; q < 4; ++q)
+                    for (Int q = 0; q < dofs_per_active_node; ++q)
                     {
-                        rows[(a - 1) * 4 + q] = base + q;
-                        cols[(a - 1) * 4 + q] = base + q;
+                        rows[(a - 1) * 7 + q] = base + q;
+                        cols[(a - 1) * 7 + q] = base + q;
                     }
                 }
 
@@ -826,10 +844,13 @@ namespace cbs
                         }
                         characteristic *= 0.5 * tau;
 
+                        // Step 1 equation:
+                        // A_u(w) u + M_dt(u* - u) = 0.
                         for (Int i = 1; i <= 3; ++i)
                         {
                             const Int row =
-                                (a - 1) * 4 + (i - 1);
+                                (a - 1) * 7 +
+                                corrected_offset + (i - 1);
 
                             for (Int k = 1; k <= 3; ++k)
                             {
@@ -843,6 +864,7 @@ namespace cbs
                                             grad(s, ie, j, bnode);
                                     }
                                 }
+
                                 diffusion +=
                                     grad(s, ie, k, a) *
                                     grad(s, ie, i, bnode);
@@ -853,8 +875,10 @@ namespace cbs
                                 diffusion *= nu * volume;
 
                                 const Int col =
-                                    (bnode - 1) * 4 + (k - 1);
-                                values[row * 16 + col] +=
+                                    (bnode - 1) * 7 +
+                                    corrected_offset + (k - 1);
+
+                                values[row * 28 + col] +=
                                     static_cast<PetscScalar>(
                                         diffusion +
                                         (i == k
@@ -862,25 +886,22 @@ namespace cbs
                                               characteristic
                                             : 0.0));
                             }
-
-                            // Kinematic pressure gradient:
-                            // integral N_a * dp/dx_i dV.
-                            const Int pcol =
-                                (bnode - 1) * 4 + 3;
-                            values[row * 16 + pcol] +=
-                                static_cast<PetscScalar>(
-                                    volume * 0.25 *
-                                    grad(s, ie, i, bnode));
                         }
 
-                        // CBS stabilised continuity:
-                        // tau H p - [volume weak divergence] = 0.
-                        const Int prow = (a - 1) * 4 + 3;
+                        // Step 2 equation:
+                        // tau H p - B u* = 0.
+                        const Int pressure_row =
+                            (a - 1) * 7 + pressure_offset;
+
                         for (Int i = 1; i <= 3; ++i)
                         {
-                            const Int ucol =
-                                (bnode - 1) * 4 + (i - 1);
-                            values[prow * 16 + ucol] -=
+                            const Int predictor_col =
+                                (bnode - 1) * 7 +
+                                predictor_offset + (i - 1);
+
+                            values[
+                                pressure_row * 28 +
+                                predictor_col] -=
                                 static_cast<PetscScalar>(
                                     volume * 0.25 *
                                     grad(s, ie, i, a));
@@ -893,15 +914,34 @@ namespace cbs
                                 grad(s, ie, j, a) *
                                 grad(s, ie, j, bnode);
                         }
-                        const Int pcol =
-                            (bnode - 1) * 4 + 3;
-                        values[prow * 16 + pcol] +=
+
+                        const Int pressure_col =
+                            (bnode - 1) * 7 + pressure_offset;
+                        values[
+                            pressure_row * 28 +
+                            pressure_col] +=
                             static_cast<PetscScalar>(
                                 tau * volume * h_ab);
+
+                        // Step 3 equation pressure gradient:
+                        // M_dt(u-u*) + G p = 0.
+                        for (Int i = 1; i <= 3; ++i)
+                        {
+                            const Int correction_row =
+                                (a - 1) * 7 +
+                                predictor_offset + (i - 1);
+
+                            values[
+                                correction_row * 28 +
+                                pressure_col] +=
+                                static_cast<PetscScalar>(
+                                    volume * 0.25 *
+                                    grad(s, ie, i, bnode));
+                        }
                     }
                 }
 
-                // Match the production weak boundary operators.
+                // Production Step-1 natural deviatoric traction.
                 for (Int face = 1; face <= 4; ++face)
                 {
                     if (s.fedge(face, ie) == 0)
@@ -909,20 +949,22 @@ namespace cbs
                         continue;
                     }
 
-                    // Momentum: subtract the natural deviatoric traction
-                    // operator because the production residual adds +tau.n.
                     for (Int fa = 1; fa <= 3; ++fa)
                     {
                         const Int a = s.ippn1(face, fa);
+
                         for (Int bnode = 1; bnode <= 4; ++bnode)
                         {
                             for (Int i = 1; i <= 3; ++i)
                             {
                                 const Int row =
-                                    (a - 1) * 4 + (i - 1);
+                                    (a - 1) * 7 +
+                                    corrected_offset + (i - 1);
+
                                 for (Int k = 1; k <= 3; ++k)
                                 {
                                     Real traction = 0.0;
+
                                     for (Int j = 1; j <= 3; ++j)
                                     {
                                         if (i == k)
@@ -932,46 +974,60 @@ namespace cbs
                                                 s.annxf(j, face, ie);
                                         }
                                     }
+
                                     traction +=
                                         grad(s, ie, i, bnode) *
                                         s.annxf(k, face, ie);
+
                                     traction -=
                                         (2.0 / 3.0) *
                                         grad(s, ie, k, bnode) *
                                         s.annxf(i, face, ie);
+
                                     traction *= nu / 3.0;
 
                                     const Int col =
-                                        (bnode - 1) * 4 + (k - 1);
-                                    values[row * 16 + col] -=
+                                        (bnode - 1) * 7 +
+                                        corrected_offset + (k - 1);
+
+                                    // r_m contains + traction; A_u=-r_m.
+                                    values[row * 28 + col] -=
                                         static_cast<PetscScalar>(traction);
                                 }
                             }
                         }
                     }
 
-                    // Continuity boundary flux is present only on the
-                    // production fedge==1 faces.
+                    // Production Step-2 weak divergence boundary term:
+                    // B u* = volume term - boundary flux.
                     if (s.fedge(face, ie) == 1)
                     {
                         for (Int fa = 1; fa <= 3; ++fa)
                         {
                             const Int a = s.ippn1(face, fa);
-                            const Int prow = (a - 1) * 4 + 3;
+                            const Int pressure_row =
+                                (a - 1) * 7 + pressure_offset;
 
                             for (Int fb = 1; fb <= 3; ++fb)
                             {
                                 const Int bnode =
                                     s.ippn1(face, fb);
+
                                 const Real face_mass_factor =
                                     s.cfg.fcon[2] *
                                     (a == bnode ? 2.0 : 1.0);
 
+                                // Step-2 equation is tauHp - B u*=0,
+                                // hence + boundary flux here.
                                 for (Int i = 1; i <= 3; ++i)
                                 {
-                                    const Int ucol =
-                                        (bnode - 1) * 4 + (i - 1);
-                                    values[prow * 16 + ucol] +=
+                                    const Int predictor_col =
+                                        (bnode - 1) * 7 +
+                                        predictor_offset + (i - 1);
+
+                                    values[
+                                        pressure_row * 28 +
+                                        predictor_col] +=
                                         static_cast<PetscScalar>(
                                             face_mass_factor *
                                             s.annxf(i, face, ie));
@@ -981,26 +1037,75 @@ namespace cbs
                     }
                 }
 
-                check_petsc(
-                    MatSetValues(
-                        A, 16, rows, 16, cols, values, ADD_VALUES),
-                    "MatSetValues(implicit flow element)");
+                check_petsc(MatSetValues(
+                    A, 28, rows, 28, cols, values, ADD_VALUES),
+                    "MatSetValues(fully implicit CBS element)");
             }
 
-            check_petsc(
-                MatAssemblyBegin(A, MAT_FINAL_ASSEMBLY),
-                "MatAssemblyBegin(implicit flow)");
-            check_petsc(
-                MatAssemblyEnd(A, MAT_FINAL_ASSEMBLY),
-                "MatAssemblyEnd(implicit flow)");
+            // Add the assembled lumped M_dt coupling exactly once per owned
+            // active node. It appears in Step 1 and Step 3 with opposite signs.
+            for (const Int ip : s.owned_nodes)
+            {
+                if (!touches_fluid(s, ip))
+                {
+                    continue;
+                }
 
-            // Pack current iterate. Fixed entries carry their prescribed value
-            // and are used by MatZeroRowsColumnsIS to shift free-equation RHS.
-            check_petsc(VecSet(x, 0.0), "VecSet(x)");
-            check_petsc(VecSet(b, 0.0), "VecSet(b)");
+                const Real mdt = mass_over_tau(ip);
+                if (!(mdt > 0.0) || !std::isfinite(mdt))
+                {
+                    throw std::runtime_error(
+                        "Fully implicit CBS: invalid assembled M_dt");
+                }
+
+                const PetscInt base =
+                    static_cast<PetscInt>(base_dof(ip));
+
+                for (Int dim = 0; dim < 3; ++dim)
+                {
+                    const PetscInt step1_row =
+                        base + corrected_offset + dim;
+                    const PetscInt step3_row =
+                        base + predictor_offset + dim;
+                    const PetscInt u_col =
+                        base + corrected_offset + dim;
+                    const PetscInt predictor_col =
+                        base + predictor_offset + dim;
+
+                    check_petsc(MatSetValue(
+                        A, step1_row, u_col,
+                        -mdt, ADD_VALUES),
+                        "MatSetValue(Step1 -Mdt)");
+                    check_petsc(MatSetValue(
+                        A, step1_row, predictor_col,
+                        mdt, ADD_VALUES),
+                        "MatSetValue(Step1 +Mdt)");
+                    check_petsc(MatSetValue(
+                        A, step3_row, u_col,
+                        mdt, ADD_VALUES),
+                        "MatSetValue(Step3 +Mdt)");
+                    check_petsc(MatSetValue(
+                        A, step3_row, predictor_col,
+                        -mdt, ADD_VALUES),
+                        "MatSetValue(Step3 -Mdt)");
+                }
+            }
+
+            check_petsc(MatAssemblyBegin(
+                A, MAT_FINAL_ASSEMBLY),
+                "MatAssemblyBegin(flow)");
+            check_petsc(MatAssemblyEnd(
+                A, MAT_FINAL_ASSEMBLY),
+                "MatAssemblyEnd(flow)");
+
+            // Current corrected velocity is also a good initial guess for u*.
+            check_petsc(VecSet(x, 0.0), "VecSet(flow x)");
+            check_petsc(VecSet(b, 0.0), "VecSet(flow b)");
 
             PetscScalar* x_values = nullptr;
-            check_petsc(VecGetArray(x, &x_values), "VecGetArray(x)");
+            check_petsc(VecGetArray(
+                x, &x_values), "VecGetArray(flow x)");
+
             long long cursor = 0;
             for (const Int ip : s.owned_nodes)
             {
@@ -1008,43 +1113,54 @@ namespace cbs
                 {
                     continue;
                 }
-                x_values[cursor + 0] = s.unkno(1, ip);
-                x_values[cursor + 1] = s.unkno(2, ip);
-                x_values[cursor + 2] = s.unkno(3, ip);
-                x_values[cursor + 3] = s.pres(ip);
-                cursor += 4;
-            }
-            check_petsc(VecRestoreArray(x, &x_values), "VecRestoreArray(x)");
-            check_petsc(
-                VecAssemblyBegin(x), "VecAssemblyBegin(x)");
-            check_petsc(
-                VecAssemblyEnd(x), "VecAssemblyEnd(x)");
-            check_petsc(
-                VecAssemblyBegin(b), "VecAssemblyBegin(b)");
-            check_petsc(
-                VecAssemblyEnd(b), "VecAssemblyEnd(b)");
 
-            check_petsc(
-                MatZeroRowsColumnsIS(A, fixed_is, 1.0, x, b),
+                for (Int dim = 0; dim < 3; ++dim)
+                {
+                    const Real value = s.unkno(dim + 1, ip);
+                    x_values[
+                        cursor + corrected_offset + dim] = value;
+                    x_values[
+                        cursor + predictor_offset + dim] = value;
+                }
+                x_values[cursor + pressure_offset] = s.pres(ip);
+
+                cursor += dofs_per_active_node;
+            }
+
+            check_petsc(VecRestoreArray(
+                x, &x_values), "VecRestoreArray(flow x)");
+            check_petsc(VecAssemblyBegin(
+                x), "VecAssemblyBegin(flow x)");
+            check_petsc(VecAssemblyEnd(
+                x), "VecAssemblyEnd(flow x)");
+            check_petsc(VecAssemblyBegin(
+                b), "VecAssemblyBegin(flow b)");
+            check_petsc(VecAssemblyEnd(
+                b), "VecAssemblyEnd(flow b)");
+
+            check_petsc(MatZeroRowsColumnsIS(
+                A, fixed_is, 1.0, x, b),
                 "MatZeroRowsColumnsIS(flow BC)");
 
-            check_petsc(KSPSetOperators(ksp, A, A), "KSPSetOperators(flow)");
-            check_petsc(KSPSolve(ksp, b, x), "KSPSolve(flow)");
+            check_petsc(KSPSetOperators(
+                ksp, A, A), "KSPSetOperators(flow)");
+            check_petsc(KSPSolve(
+                ksp, b, x), "KSPSolve(flow)");
 
             KSPConvergedReason reason;
             PetscInt linear_iterations = 0;
-            check_petsc(
-                KSPGetConvergedReason(ksp, &reason),
-                "KSPGetConvergedReason(flow)");
-            check_petsc(
-                KSPGetIterationNumber(ksp, &linear_iterations),
+
+            check_petsc(KSPGetConvergedReason(
+                ksp, &reason), "KSPGetConvergedReason(flow)");
+            check_petsc(KSPGetIterationNumber(
+                ksp, &linear_iterations),
                 "KSPGetIterationNumber(flow)");
 
             if (reason <= 0)
             {
                 std::ostringstream message;
                 message
-                    << "Fully implicit flow linear solve failed at Picard "
+                    << "Fully implicit CBS linear solve failed at Picard "
                     << nonlinear
                     << ": KSP reason=" << static_cast<int>(reason)
                     << ", iterations=" << linear_iterations;
@@ -1054,26 +1170,26 @@ namespace cbs
             result.total_krylov_iterations +=
                 static_cast<Int>(linear_iterations);
 
-            check_petsc(
-                MatMult(A, x, residual), "MatMult(flow audit)");
-            check_petsc(
-                VecAYPX(residual, -1.0, b), "VecAYPX(flow audit)");
+            check_petsc(MatMult(
+                A, x, residual), "MatMult(flow audit)");
+            check_petsc(VecAYPX(
+                residual, -1.0, b), "VecAYPX(flow audit)");
 
             PetscReal rn = 0.0;
             PetscReal bn = 0.0;
-            check_petsc(
-                VecNorm(residual, NORM_2, &rn),
-                "VecNorm(flow residual)");
-            check_petsc(
-                VecNorm(b, NORM_2, &bn),
-                "VecNorm(flow rhs)");
+
+            check_petsc(VecNorm(
+                residual, NORM_2, &rn), "VecNorm(flow residual)");
+            check_petsc(VecNorm(
+                b, NORM_2, &bn), "VecNorm(flow rhs)");
+
             result.linear_relative_residual =
                 bn > 0.0 ? rn / bn : rn;
 
             if (!std::isfinite(result.linear_relative_residual))
             {
                 throw std::runtime_error(
-                    "Fully implicit flow produced nonfinite linear residual");
+                    "Fully implicit CBS produced nonfinite linear residual");
             }
 
             const Metrics metrics =
@@ -1086,16 +1202,12 @@ namespace cbs
 
             Real tau_min = 0.0;
             Real tau_max = 0.0;
-            check_mpi(
-                MPI_Allreduce(
-                    &local_tau_min, &tau_min, 1, MPI_DOUBLE, MPI_MIN,
-                    MPI_COMM_WORLD),
-                "implicit flow tau min");
-            check_mpi(
-                MPI_Allreduce(
-                    &local_tau_max, &tau_max, 1, MPI_DOUBLE, MPI_MAX,
-                    MPI_COMM_WORLD),
-                "implicit flow tau max");
+            check_mpi(MPI_Allreduce(
+                &local_tau_min, &tau_min, 1, MPI_DOUBLE, MPI_MIN,
+                MPI_COMM_WORLD), "flow tau min");
+            check_mpi(MPI_Allreduce(
+                &local_tau_max, &tau_max, 1, MPI_DOUBLE, MPI_MAX,
+                MPI_COMM_WORLD), "flow tau max");
 
             if (s.mpi_rank == 0)
             {
@@ -1109,7 +1221,8 @@ namespace cbs
                     << "  DivRMS=" << metrics.div_rms
                     << "  Umax=" << metrics.umax
                     << "  omega=" << relaxation
-                    << "  tau=[" << tau_min << "," << tau_max << "]\n"
+                    << "  tau=[" << tau_min
+                    << "," << tau_max << "]\n"
                     << std::flush;
             }
 
@@ -1121,8 +1234,6 @@ namespace cbs
                 break;
             }
 
-            // Conservative automatic damping if Picard starts to move away
-            // from its fixed point. Never increase above the requested value.
             if (nonlinear > 2 &&
                 std::isfinite(previous_rel_u) &&
                 metrics.rel_u > 1.25 * previous_rel_u)
@@ -1131,19 +1242,28 @@ namespace cbs
                     static_cast<Real>(0.2),
                     static_cast<Real>(0.5) * relaxation);
             }
+
             previous_rel_u = metrics.rel_u;
         }
 
         result.seconds = MPI_Wtime() - start;
 
-        check_petsc(ISDestroy(&fixed_is), "ISDestroy(fixed)");
-        check_petsc(ISDestroy(&pressure_is), "ISDestroy(pressure)");
-        check_petsc(ISDestroy(&velocity_is), "ISDestroy(velocity)");
-        check_petsc(KSPDestroy(&ksp), "KSPDestroy(flow)");
-        check_petsc(VecDestroy(&residual), "VecDestroy(flow residual)");
-        check_petsc(VecDestroy(&b), "VecDestroy(flow b)");
-        check_petsc(VecDestroy(&x), "VecDestroy(flow x)");
-        check_petsc(MatDestroy(&A), "MatDestroy(flow)");
+        check_petsc(ISDestroy(
+            &fixed_is), "ISDestroy(flow fixed)");
+        check_petsc(ISDestroy(
+            &pressure_is), "ISDestroy(flow pressure)");
+        check_petsc(ISDestroy(
+            &velocity_is), "ISDestroy(flow velocity)");
+        check_petsc(KSPDestroy(
+            &ksp), "KSPDestroy(flow)");
+        check_petsc(VecDestroy(
+            &residual), "VecDestroy(flow residual)");
+        check_petsc(VecDestroy(
+            &b), "VecDestroy(flow b)");
+        check_petsc(VecDestroy(
+            &x), "VecDestroy(flow x)");
+        check_petsc(MatDestroy(
+            &A), "MatDestroy(flow)");
 
         return result;
     }
@@ -1157,7 +1277,7 @@ namespace cbs
     FullyImplicitFlowSolver::solve(CBSStateSI&)
     {
         throw std::runtime_error(
-            "Fully implicit flow requires MPI + PETSc");
+            "Fully implicit CBS requires MPI + PETSc");
     }
 }
 
