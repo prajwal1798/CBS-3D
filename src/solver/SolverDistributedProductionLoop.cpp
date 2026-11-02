@@ -1315,6 +1315,60 @@ namespace cbs
 
         DistributedPost::initialise(s_, case_name_);
 
+        // Standard segregated transient coupling:
+        // CBS Steps 1-3 advance the incompressible flow to u^(n+1), then one
+        // backward-Euler CHT solve advances T^n -> T^(n+1) with the SAME
+        // communicator-wide physical timestep. This replaces only explicit
+        // Step 4; the pressure/momentum algorithm is unchanged.
+        const bool coupled_implicit_energy =
+            environment_flag_enabled("CBS3D_IMPLICIT_TRANSIENT_ENERGY");
+
+        if (coupled_implicit_energy)
+        {
+            if (s_.cfg.temp_calc < 1)
+            {
+                throw std::runtime_error(
+                    "CBS3D_IMPLICIT_TRANSIENT_ENERGY needs temp_calc = 1");
+            }
+            if (s_.cfg.transient_on < 1)
+            {
+                throw std::runtime_error(
+                    "CBS3D_IMPLICIT_TRANSIENT_ENERGY requires transient_on = 1; "
+                    "the BE energy step must share a physical CBS timestep");
+            }
+            if (environment_flag_enabled("CBS3D_STEADY_ENERGY"))
+            {
+                throw std::runtime_error(
+                    "CBS3D_IMPLICIT_TRANSIENT_ENERGY and CBS3D_STEADY_ENERGY "
+                    "are mutually exclusive");
+            }
+            if (!environment_flag_enabled("CBS3D_TEMPERATURE_AFC") ||
+                !environment_flag_enabled("CBS3D_STEADY_ENERGY_LOW_ORDER_ONLY"))
+            {
+                throw std::runtime_error(
+                    "Coupled implicit transient energy currently uses the "
+                    "validated low-order graph-viscosity operator: set "
+                    "CBS3D_TEMPERATURE_AFC=1 and "
+                    "CBS3D_STEADY_ENERGY_LOW_ORDER_ONLY=1");
+            }
+            if (environment_flag_enabled("CBS3D_CHT_WALL_TREATMENT"))
+            {
+                throw std::runtime_error(
+                    "Coupled implicit transient energy does not yet support "
+                    "CBS3D_CHT_WALL_TREATMENT");
+            }
+
+            if (s_.mpi_rank == 0)
+            {
+                std::cout
+                    << "  Energy time integration : IMPLICIT BACKWARD EULER\n"
+                    << "    Segregated CBS coupling: Step 1 -> Step 2 -> Step 3 "
+                       "-> implicit Step 4\n"
+                    << "    Energy dt is the physical CBS global dt; "
+                       "standalone BE dt/step environment values are ignored.\n";
+            }
+        }
+
         // ================================
         // IMPLICIT STEADY ENERGY FOR THE CURRENT (FROZEN) VELOCITY INSTEAD OF
         // THE ITERATION LOOP: CBS3D_STEADY_ENERGY=1 (SteadyEnergySolver.hpp).
@@ -1608,44 +1662,81 @@ namespace cbs
                 Steps::stepSpalartAllmaras(s_);
             }
 
+            Int implicit_energy_krylov = 0;
+            Real implicit_energy_linear_residual = 0.0;
+            double implicit_energy_seconds = 0.0;
+
             if (s_.cfg.temp_calc > 0)
             {
+                if (coupled_implicit_energy)
                 {
-                    ScopedHeatFluxSuppression suppress_heat_flux(s_);
-                    EnergyAssembly::assembleStep4Rhs(s_);
-                }
+                    // Standard loose/segregated transient CHT coupling:
+                    // use corrected u^(n+1) from CBS Step 3 and advance exactly
+                    // one physical BE temperature step with T^n on the RHS.
+                    const SteadyEnergySolver::Result energy =
+                        SteadyEnergySolver::solve(
+                            s_,
+                            thermal_boundary.fixed,
+                            thermal_boundary.value,
+                            thermal_boundary.heat_flux_load,
+                            global_dt,
+                            1);
 
-                // Shared production AFC residual. This routine already
-                // reverse-adds the element contributions and leaves the
-                // assembled result only on owner nodes.
-                if (TemperatureAFC::enabled())
+                    if (!energy.converged)
+                    {
+                        std::ostringstream message;
+                        message
+                            << "Coupled implicit energy failed at global iteration "
+                            << global_iteration
+                            << ": dt=" << global_dt
+                            << ", residual=" << energy.residual_check
+                            << ", Krylov iterations=" << energy.iterations;
+                        throw std::runtime_error(message.str());
+                    }
+
+                    implicit_energy_krylov = energy.iterations;
+                    implicit_energy_linear_residual = energy.residual_check;
+                    implicit_energy_seconds = energy.seconds;
+                }
+                else
                 {
-                    TemperatureAFC::limitDistributedResidual(s_);
+                    {
+                        ScopedHeatFluxSuppression suppress_heat_flux(s_);
+                        EnergyAssembly::assembleStep4Rhs(s_);
+                    }
+
+                    // Shared production AFC residual. This routine already
+                    // reverse-adds the element contributions and leaves the
+                    // assembled result only on owner nodes.
+                    if (TemperatureAFC::enabled())
+                    {
+                        TemperatureAFC::limitDistributedResidual(s_);
+                    }
+
+                    HaloExchange::sumGhostContributionsToOwners(
+                        s_.rhs1,
+                        s_.partition_metadata,
+                        MPI_COMM_WORLD);
+
+                    for (const Int ip : s_.owned_nodes)
+                    {
+                        s_.rhs1(ip) +=
+                            thermal_boundary.heat_flux_load(ip);
+
+                        s_.temperature(ip) =
+                            s_.temperature1(ip) +
+                            s_.rhs1(ip) * s_.elcoe2p(ip);
+                    }
+
+                    apply_owned_temperature_constraints(
+                        s_,
+                        thermal_boundary);
+
+                    HaloExchange::broadcastOwnedToGhosts(
+                        s_.temperature,
+                        s_.partition_metadata,
+                        MPI_COMM_WORLD);
                 }
-
-                HaloExchange::sumGhostContributionsToOwners(
-                    s_.rhs1,
-                    s_.partition_metadata,
-                    MPI_COMM_WORLD);
-
-                for (const Int ip : s_.owned_nodes)
-                {
-                    s_.rhs1(ip) +=
-                        thermal_boundary.heat_flux_load(ip);
-
-                    s_.temperature(ip) =
-                        s_.temperature1(ip) +
-                        s_.rhs1(ip) * s_.elcoe2p(ip);
-                }
-
-                apply_owned_temperature_constraints(
-                    s_,
-                    thermal_boundary);
-
-                HaloExchange::broadcastOwnedToGhosts(
-                    s_.temperature,
-                    s_.partition_metadata,
-                    MPI_COMM_WORLD);
             }
 
             updateVelocityMagnitude();
@@ -1750,6 +1841,14 @@ namespace cbs
                         << "  RelT=" << metrics.relative_temperature
                         << "  Tmin=" << metrics.minimum_temperature
                         << "  Tmax=" << metrics.maximum_temperature;
+
+                    if (coupled_implicit_energy)
+                    {
+                        std::cout
+                            << "  TKSP=" << implicit_energy_krylov
+                            << "  Tlin=" << implicit_energy_linear_residual
+                            << "  Tsolve=" << implicit_energy_seconds << "s";
+                    }
                 }
 
                 if (distributed_local_timestep_enabled(s_))
