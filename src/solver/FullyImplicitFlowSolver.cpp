@@ -226,7 +226,7 @@ namespace cbs
             Real rel_p = 0.0;
             Real div_rms = 0.0;
             Real umax = 0.0;
-            Real du_max = 0.0;
+            Real correction_max = 0.0;
         };
 
         Metrics update_state_from_solution(
@@ -249,7 +249,7 @@ namespace cbs
             Real local_dp2 = 0.0;
             Real local_p2 = 0.0;
             Real local_umax = 0.0;
-            Real local_du_max = 0.0;
+            Real local_correction_max = 0.0;
 
             for (const Int ip : s.owned_nodes)
             {
@@ -275,10 +275,16 @@ namespace cbs
                     {
                         local_du2 += delta * delta;
                         local_u2 += new_value * new_value;
-                        local_du_max =
-                            std::max(local_du_max, std::abs(delta));
                     }
                     s.unkno(dim, ip) = new_value;
+
+                    const Real predictor_value =
+                        static_cast<Real>(
+                            values[cursor + predictor_offset + (dim - 1)]);
+                    local_correction_max =
+                        std::max(
+                            local_correction_max,
+                            std::abs(linear_value - predictor_value));
                 }
 
                 const Real old_pressure = s.pres(ip);
@@ -356,7 +362,7 @@ namespace cbs
             Real global_div2 = 0.0;
             Real global_volume = 0.0;
             Real global_umax = 0.0;
-            Real global_du_max = 0.0;
+            Real global_correction_max = 0.0;
 
             check_mpi(MPI_Allreduce(
                 &local_du2, &global_du2, 1, MPI_DOUBLE, MPI_SUM,
@@ -380,8 +386,9 @@ namespace cbs
                 &local_umax, &global_umax, 1, MPI_DOUBLE, MPI_MAX,
                 MPI_COMM_WORLD), "flow Umax");
             check_mpi(MPI_Allreduce(
-                &local_du_max, &global_du_max, 1, MPI_DOUBLE, MPI_MAX,
-                MPI_COMM_WORLD), "flow dUmax");
+                &local_correction_max, &global_correction_max,
+                1, MPI_DOUBLE, MPI_MAX, MPI_COMM_WORLD),
+                "flow velocity correction max");
 
             Metrics m;
             m.rel_u =
@@ -399,7 +406,7 @@ namespace cbs
                     ? std::sqrt(global_div2 / global_volume)
                     : 0.0;
             m.umax = global_umax;
-            m.du_max = global_du_max;
+            m.correction_max = global_correction_max;
             return m;
         }
     }
@@ -1306,7 +1313,7 @@ namespace cbs
             result.relative_pressure_change = metrics.rel_p;
             result.divergence_rms = metrics.div_rms;
             result.maximum_velocity = metrics.umax;
-            result.maximum_velocity_change = metrics.du_max;
+            result.maximum_velocity_correction = metrics.correction_max;
 
             const Real tau_min = global_tau;
             const Real tau_max = global_tau;
@@ -1322,7 +1329,7 @@ namespace cbs
                     << "  RelP=" << metrics.rel_p
                     << "  DivRMS=" << metrics.div_rms
                     << "  Umax=" << metrics.umax
-                    << "  dUmax=" << metrics.du_max
+                    << "  dUmax=" << metrics.correction_max
                     << "  omega=" << relaxation
                     << "  tau=[" << tau_min
                     << "," << tau_max << "]\n"
