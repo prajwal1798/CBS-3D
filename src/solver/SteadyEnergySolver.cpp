@@ -371,6 +371,38 @@ namespace cbs
         check_petsc(MatAssemblyBegin(A, MAT_FINAL_ASSEMBLY), "MatAssemblyBegin");
         check_petsc(MatAssemblyEnd(A, MAT_FINAL_ASSEMBLY), "MatAssemblyEnd");
 
+        // Experimental nonlinear AFC initialisation: obtain the stationary
+        // monotone *low-order* solution once, rather than starting the AFC
+        // defect iteration from a nearly frozen explicit pseudo-time state.
+        // This is strictly opt-in and leaves production defaults unchanged.
+        // Remove gamma*C/dt only from the temporary bootstrap matrix.
+        const bool low_order_bootstrap =
+            afc && env_flag("CBS3D_STEADY_ENERGY_LOW_ORDER_BOOTSTRAP");
+        Mat A_bootstrap = nullptr;
+        if (low_order_bootstrap)
+        {
+            check_petsc(MatDuplicate(A, MAT_COPY_VALUES, &A_bootstrap),
+                        "MatDuplicate(low-order stationary bootstrap)");
+            if (pseudotime_shift > 0.0)
+            {
+                for (const Int ip : s.owned_nodes)
+                {
+                    if (fixed(ip) == 0)
+                    {
+                        const PetscInt row = static_cast<PetscInt>(dof(ip));
+                        const Real shift = pseudotime_shift / s.elcoe2p(ip);
+                        check_petsc(
+                            MatSetValue(A_bootstrap, row, row, -shift, ADD_VALUES),
+                            "MatSetValue(remove pseudo-time shift)");
+                    }
+                }
+                check_petsc(MatAssemblyBegin(A_bootstrap, MAT_FINAL_ASSEMBLY),
+                            "MatAssemblyBegin(bootstrap)");
+                check_petsc(MatAssemblyEnd(A_bootstrap, MAT_FINAL_ASSEMBLY),
+                            "MatAssemblyEnd(bootstrap)");
+            }
+        }
+
         // ================================
         // 4. KRYLOV SOLVER: GMRES + ASM/ILU(1) BY DEFAULT (ROBUST FOR THE
         //    NON-SYMMETRIC ADVECTION OPERATOR); PREFIX energy_ OVERRIDES,
@@ -448,6 +480,65 @@ namespace cbs
         Array1D<Real> solved(s.cfg.npoin);
 
         Int total_krylov = 0;
+
+        if (low_order_bootstrap)
+        {
+            // Use the SAME stationary source vector and Dirichlet constraints
+            // as the unlimited Galerkin solve, but on A_low = -(M+D).
+            // The subsequent nonlinear AFC solve still targets the EXACT
+            // shared, single-application production AFC residual.
+            check_petsc(KSPSetOperators(ksp, A_bootstrap, A_bootstrap),
+                        "KSPSetOperators(bootstrap)");
+            vec_from_nodes(b, s, dof, base_rhs);
+            vec_from_nodes(x, s, dof, temperature);
+            check_petsc(KSPSolve(ksp, b, x), "KSPSolve(low-order bootstrap)");
+
+            KSPConvergedReason bootstrap_reason;
+            PetscInt bootstrap_iterations = 0;
+            check_petsc(KSPGetConvergedReason(ksp, &bootstrap_reason),
+                        "KSPGetConvergedReason(bootstrap)");
+            check_petsc(KSPGetIterationNumber(ksp, &bootstrap_iterations),
+                        "KSPGetIterationNumber(bootstrap)");
+            if (bootstrap_reason <= 0)
+            {
+                throw std::runtime_error(
+                    "Low-order steady AFC bootstrap KSP did not converge; reason "
+                    + std::to_string(static_cast<int>(bootstrap_reason)));
+            }
+            total_krylov += static_cast<Int>(bootstrap_iterations);
+            nodes_from_vec(temperature, s, dof, x);
+
+            Real local_min = std::numeric_limits<Real>::max();
+            Real local_max = -std::numeric_limits<Real>::max();
+            for (const Int ip : s.owned_nodes)
+            {
+                if (!std::isfinite(temperature(ip)))
+                {
+                    throw std::runtime_error(
+                        "Low-order steady AFC bootstrap returned nonfinite T");
+                }
+                local_min = std::min(local_min, temperature(ip));
+                local_max = std::max(local_max, temperature(ip));
+            }
+            const Real minimum = -global_max(-local_min);
+            const Real maximum = global_max(local_max);
+            if (s.mpi_rank == 0)
+            {
+                std::cout << "  [AFC-BOOTSTRAP] low-order stationary KSP="
+                          << bootstrap_iterations
+                          << " Tmin=" << minimum
+                          << " Tmax=" << maximum
+                          << " K (subsequent AFC residual still nonlinear)"
+                          << "\n" << std::flush;
+            }
+            // Restore the intended shifted defect preconditioner before
+            // nonlinear iterations; PETSc rebuilds this preconditioner.
+            check_petsc(KSPSetOperators(ksp, A, A),
+                        "KSPSetOperators(restore defect)");
+            check_petsc(MatDestroy(&A_bootstrap),
+                        "MatDestroy(low-order bootstrap)");
+        }
+
         Int afc_iterations = 0;
         Real last_change = 0.0;
         bool all_converged = true;
