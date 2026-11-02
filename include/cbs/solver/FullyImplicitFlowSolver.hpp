@@ -41,6 +41,17 @@ namespace cbs
             double seconds = 0.0;
         };
 
+        // Steady nonlinear CBS fixed-point solve (pseudo-time only).
         static Result solve(CBSStateSI& s);
+
+        // One physical backward-Euler step. s.unkn1 must contain u^n and
+        // s.unkno is used as the Picard initial guess for u^(n+1).
+        static Result solveBackwardEulerStep(CBSStateSI& s, Real physical_dt);
+
+    private:
+        static Result solveImpl(
+            CBSStateSI& s,
+            bool backward_euler,
+            Real physical_dt);
     };
 }
