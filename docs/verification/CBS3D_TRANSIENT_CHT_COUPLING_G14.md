@@ -71,3 +71,30 @@ Do **not** create another family of toy verification studies. The first executio
 - then move directly to the intended large case and measure memory, wall time and thermal KSP scaling.
 
 After that, the physically necessary validation remains energy conservation, CHT interface flux balance, timestep sensitivity and grid sensitivity. Algebraic residual convergence alone is not a physical validation.
+
+
+## G14b: discrete maximum principle on the full CHT mesh
+
+The first 50,000-step blanket-slice production attempt exposed a genuine
+low-order-operator issue rather than an MPI/PETSc failure. The physical BE
+solve converged algebraically, but the temperature-floor audit detected a
+small undershoot below the 298.15 K inlet/reference minimum.
+
+The cause was that algebraic graph viscosity had been applied only to fluid
+elements. That is sufficient to monotonicise the advective fluid operator,
+but it does not guarantee a discrete maximum principle for P1 diffusion on a
+general tetrahedral solid mesh. Arbitrary/obtuse tetrahedra can give diffusion
+stiffness coefficients that violate the M-matrix sign conditions.
+
+For physical low-order BE, the graph correction is therefore assembled on
+every material element (fluid and solid):
+
+    d_ab = max(0, -M_ab, -M_ba)
+
+with the equal-and-opposite diagonal correction that preserves row sums. This
+makes the corrected residual-operator off-diagonals nonnegative, equivalently
+the BE system off-diagonals nonpositive after the solver sign convention.
+
+This is a monotone low-order baseline. It is intentionally more diffusive than
+the eventual bounded high-order transient AFC/convex-limited formulation and
+must not be presented as the final spatial-accuracy method.
