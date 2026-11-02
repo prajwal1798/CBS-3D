@@ -78,6 +78,8 @@ def main():
     residual = defaultdict(float)            # W
     categories = Counter()
     cell_sets = set()
+    node_materials = defaultdict(set)
+    node_external_bcs = defaultdict(set)
     face_adjacency = defaultdict(list)        # key -> (material, opposite_gid)
     boundary_bcs = {}                        # exact boundary faces
     total_volume = 0.0
@@ -100,6 +102,8 @@ def main():
                 insist(key not in boundary_bcs,
                        f"duplicated boundary facet {key}")
                 boundary_bcs[key] = bc
+                for gid in ids:
+                    node_external_bcs[gid].add(bc)
                 continue
             if vtk_type != 10:
                 continue
@@ -109,6 +113,8 @@ def main():
             cell_sets.add(key)
             insist(mid in materials, f"missing material {mid}")
             mat = materials[mid]
+            for gid in ids:
+                node_materials[gid].add(mid)
 
             p = [current[gid][0] for gid in ids]
             grad, V = gradients_and_volume(*p)
@@ -255,6 +261,36 @@ def main():
     print(f"Relative closure error      : {abs(closure)/scale:.12e}")
     print(f"Adv volume/surface err [W]  : {adv_face_mismatch:+.12e}")
     print(f"Worst free-node residual err : {interior_update_error:.12e} W")
+    print("=== NODE-LEVEL UPDATE MISMATCH DIAGNOSIS (no gate relaxation) ===")
+    mismatches = []
+    classification = defaultdict(lambda: [0,0.0,0.0,0.0])
+    for gid in old:
+        error_i = capacity[gid]*(current[gid][1]-old[gid][1])/dt - residual[gid]
+        mats = node_materials[gid]
+        if 0 in mats and len(mats)>1:
+            label = "interface"
+        elif 0 in mats:
+            label = "fluid-only"
+        else:
+            label = "solid-only"
+        if gid in fixed:
+            label = "FIXED-" + label
+        group = classification[label]
+        group[0] += 1
+        group[1] += error_i
+        group[2] += abs(error_i)
+        group[3] = max(group[3], abs(error_i))
+        if gid not in fixed:
+            mismatches.append((abs(error_i),gid,error_i,label))
+    for label, (count,total,absolute,maximum) in sorted(classification.items()):
+        print(f"  {label:18s} N={count:6d} sum_err={total:+.12e} W"
+              f" abs_sum={absolute:.12e} W max_abs={maximum:.12e} W")
+    print("  Worst 20 FREE nodes (error = observed C*deltaT/dt - reconstructed RHS):")
+    for _abs,gid,err,label in sorted(mismatches, reverse=True)[:20]:
+        print(f"    gid={gid:6d} error={err:+.12e} W"
+              f" class={label} BCs={sorted(node_external_bcs.get(gid,set()))}"
+              f" T0={old[gid][1]:.9f} T1={current[gid][1]:.9f}"
+              f" R={residual[gid]:+.9e} W")
     print("Note: this is ONE pseudo-time update, not a steady-state"
           " Qout=Qin verification.")
     insist(abs(closure)<a.tolerance_w,
