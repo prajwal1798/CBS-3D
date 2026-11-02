@@ -837,6 +837,94 @@ namespace cbs
                 MPI_COMM_WORLD);
         }
 
+        // Assemble the weak mass residual of the FINAL corrected
+        // velocity. The standard Step-2 routine deliberately mixes predicted
+        // volume velocity with u^n on boundary faces, which is correct for the
+        // CBS pressure equation but is not a valid post-solve diagnostic for a
+        // monolithic BE step.
+        void assemble_corrected_velocity_continuity_rhs(CBSStateSI& s)
+        {
+            s.rhs1.fill(0.0);
+
+            for (Int ie = 1; ie <= s.cfg.nelem; ++ie)
+            {
+                if (s.mat_elem(ie) != 0)
+                {
+                    continue;
+                }
+
+                const Real vol4 = s.detJ(ie) * s.cfg.fcon[1];
+                Real u_sum[4] = {0.0, 0.0, 0.0, 0.0};
+
+                for (Int a = 1; a <= s.cfg.nep; ++a)
+                {
+                    const Int ip = s.intma(a, ie);
+                    for (Int dim = 1; dim <= s.cfg.ndim; ++dim)
+                    {
+                        u_sum[dim] += s.unkno(dim, ip);
+                    }
+                }
+
+                for (Int dim = 1; dim <= s.cfg.ndim; ++dim)
+                {
+                    u_sum[dim] *= vol4;
+                }
+
+                Real lrhs[5] = {0.0, 0.0, 0.0, 0.0, 0.0};
+                for (Int a = 1; a <= s.cfg.nep; ++a)
+                {
+                    for (Int dim = 1; dim <= s.cfg.ndim; ++dim)
+                    {
+                        const Int index =
+                            (ie - 1) * s.cfg.ndim * s.cfg.nep +
+                            (dim - 1) * s.cfg.nep +
+                            a;
+                        lrhs[a] += s.dNkdx(index) * u_sum[dim];
+                    }
+                }
+
+                for (Int face = 1; face <= s.cfg.nsid; ++face)
+                {
+                    if (s.fedge(face, ie) != 1)
+                    {
+                        continue;
+                    }
+
+                    Real face_u_sum[4] = {0.0, 0.0, 0.0, 0.0};
+                    for (Int fa = 1; fa <= s.cfg.nsidp; ++fa)
+                    {
+                        const Int local_node = s.ippn1(face, fa);
+                        const Int ip = s.intma(local_node, ie);
+                        for (Int dim = 1; dim <= s.cfg.ndim; ++dim)
+                        {
+                            face_u_sum[dim] += s.unkno(dim, ip);
+                        }
+                    }
+
+                    for (Int dim = 1; dim <= s.cfg.ndim; ++dim)
+                    {
+                        const Real normal_factor =
+                            s.annxf(dim, face, ie) * s.cfg.fcon[2];
+
+                        for (Int fa = 1; fa <= s.cfg.nsidp; ++fa)
+                        {
+                            const Int local_node = s.ippn1(face, fa);
+                            const Int ip = s.intma(local_node, ie);
+                            lrhs[local_node] -=
+                                (face_u_sum[dim] + s.unkno(dim, ip)) *
+                                normal_factor;
+                        }
+                    }
+                }
+
+                for (Int a = 1; a <= s.cfg.nep; ++a)
+                {
+                    s.rhs1(s.intma(a, ie)) += lrhs[a];
+                }
+            }
+        }
+
+
         struct ContinuityMetrics
         {
             Real l2_squared = 0.0;
@@ -1807,9 +1895,11 @@ namespace cbs
                 local_maximum_velocity_correction =
                     flow.maximum_velocity_correction;
 
-                // Diagnostic weak continuity residual on the converged
-                // u^(n+1). This does not perform another pressure solve.
-                PressureAssembly::assembleStep2Rhs(s_);
+                // Diagnostic weak continuity residual of the FINAL
+                // corrected u^(n+1). Do not call PressureAssembly here: its
+                // boundary term intentionally uses u^n for the CBS Step-2
+                // equation and therefore is not a final mass-residual audit.
+                assemble_corrected_velocity_continuity_rhs(s_);
                 HaloExchange::sumGhostContributionsToOwners(
                     s_.rhs1,
                     s_.partition_metadata,
