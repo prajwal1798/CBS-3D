@@ -34,6 +34,7 @@
 #include "cbs/boundary/Boundary.hpp"
 #include "cbs/linalg/PetscHeaders.hpp"
 #include "cbs/parallel/HaloExchange.hpp"
+#include "cbs/timestep/TimeStep.hpp"
 
 #include <mpi.h>
 
@@ -162,56 +163,6 @@ namespace cbs
                     "Fully implicit CBS: invalid nondimensional viscosity");
             }
             return s.cfg.ani;
-        }
-
-        Real element_cbs_tau(const CBSStateSI& s, const Int ie)
-        {
-            const Real h = s.alen_e(ie);
-            const Real nu = fluid_kinematic_viscosity(s, ie);
-
-            if (!(h > 0.0) || !std::isfinite(h) ||
-                !(nu >= 0.0) || !std::isfinite(nu))
-            {
-                throw std::runtime_error(
-                    "Fully implicit CBS: invalid h/nu for stabilisation");
-            }
-
-            Real speed = 0.0;
-            for (Int a = 1; a <= 4; ++a)
-            {
-                const Int ip = s.intma(a, ie);
-                const Real ux = s.unkno(1, ip);
-                const Real uy = s.unkno(2, ip);
-                const Real uz = s.unkno(3, ip);
-                speed = std::max(
-                    speed,
-                    std::sqrt(ux * ux + uy * uy + uz * uz));
-            }
-
-            const Real dt_adv =
-                h / std::max(speed, static_cast<Real>(1.0e-14));
-            const Real dt_diff =
-                nu > 0.0
-                    ? h * h / (2.0 * nu)
-                    : std::numeric_limits<Real>::max();
-
-            const Real scale =
-                env_real("CBS3D_IMPLICIT_FLOW_TAU_SCALE", 1.0);
-            if (!(scale > 0.0))
-            {
-                throw std::runtime_error(
-                    "CBS3D_IMPLICIT_FLOW_TAU_SCALE must be positive");
-            }
-
-            const Real tau =
-                scale * s.cfg.csafm * std::min(dt_adv, dt_diff);
-
-            if (!(tau > 0.0) || !std::isfinite(tau))
-            {
-                throw std::runtime_error(
-                    "Fully implicit CBS: invalid local tau");
-            }
-            return tau;
         }
 
         Real tetra_mass(const Real volume, const Int a, const Int b)
@@ -721,10 +672,52 @@ namespace cbs
 
             mass_over_tau.fill(0.0);
 
-            Real local_tau_min = std::numeric_limits<Real>::max();
-            Real local_tau_max = 0.0;
+            // Reproduce the production solver_opt=3 timestep convention.
+            // TimeStep computes the stable candidate from the CURRENT Picard
+            // velocity; the distributed production path then uses the
+            // communicator-wide minimum for every element. This dt is a CBS
+            // numerical parameter, not physical elapsed time.
+            TimeStep::computeTimeStep(s, nonlinear);
 
-            // Assemble M_dt = sum_e (V_e/4)/tau_e on the owner nodes.
+            Real local_tau = std::numeric_limits<Real>::max();
+            for (Int ie = 1; ie <= s.cfg.nelem; ++ie)
+            {
+                local_tau = std::min(local_tau, s.delte(ie));
+            }
+
+            Real global_tau = 0.0;
+            check_mpi(MPI_Allreduce(
+                &local_tau, &global_tau, 1, MPI_DOUBLE, MPI_MIN,
+                MPI_COMM_WORLD), "flow global CBS timestep");
+
+            const Real tau_scale =
+                env_real("CBS3D_IMPLICIT_FLOW_TAU_SCALE", 1.0);
+            if (!(tau_scale > 0.0) || !std::isfinite(tau_scale))
+            {
+                throw std::runtime_error(
+                    "CBS3D_IMPLICIT_FLOW_TAU_SCALE must be positive and finite");
+            }
+            global_tau *= tau_scale;
+
+            if (!(global_tau > 0.0) || !std::isfinite(global_tau))
+            {
+                throw std::runtime_error(
+                    "Fully implicit CBS obtained invalid global timestep");
+            }
+
+            for (Int ie = 1; ie <= s.cfg.nelem; ++ie)
+            {
+                s.delte(ie) = global_tau;
+            }
+            for (Int ip = 1; ip <= s.cfg.npoin; ++ip)
+            {
+                s.deltp(ip) = global_tau;
+                s.deltp1(ip) = global_tau;
+                s.deltp2(ip) = global_tau;
+            }
+            s.cfg.dtreal = global_tau;
+
+            // Assemble M_dt = sum_e (V_e/4)/dt on the owner nodes.
             for (Int ie = 1; ie <= s.cfg.nelem; ++ie)
             {
                 if (s.mat_elem(ie) != 0)
@@ -733,11 +726,7 @@ namespace cbs
                 }
 
                 const Real volume = s.detJ(ie) / 6.0;
-                const Real tau = element_cbs_tau(s, ie);
-                local_tau_min = std::min(local_tau_min, tau);
-                local_tau_max = std::max(local_tau_max, tau);
-
-                const Real contribution = (volume * 0.25) / tau;
+                const Real contribution = (volume * 0.25) / global_tau;
                 for (Int a = 1; a <= 4; ++a)
                 {
                     mass_over_tau(s.intma(a, ie)) += contribution;
@@ -767,7 +756,7 @@ namespace cbs
                 }
 
                 const Real nu = fluid_kinematic_viscosity(s, ie);
-                const Real tau = element_cbs_tau(s, ie);
+                const Real tau = global_tau;
 
                 Real w[5][4] = {};
                 Real div_w = 0.0;
@@ -1205,14 +1194,8 @@ namespace cbs
             result.divergence_rms = metrics.div_rms;
             result.maximum_velocity = metrics.umax;
 
-            Real tau_min = 0.0;
-            Real tau_max = 0.0;
-            check_mpi(MPI_Allreduce(
-                &local_tau_min, &tau_min, 1, MPI_DOUBLE, MPI_MIN,
-                MPI_COMM_WORLD), "flow tau min");
-            check_mpi(MPI_Allreduce(
-                &local_tau_max, &tau_max, 1, MPI_DOUBLE, MPI_MAX,
-                MPI_COMM_WORLD), "flow tau max");
+            const Real tau_min = global_tau;
+            const Real tau_max = global_tau;
 
             if (s.mpi_rank == 0)
             {
