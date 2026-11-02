@@ -81,9 +81,15 @@ namespace cbs
 
         // fixed / value / heat_flux_load: THE THERMAL BOUNDARY STATE OF THE
         // PRODUCTION LOOP (DIRICHLET MASK AND VALUES, NODAL BC 532 LOAD).
+        // physical_be_dt_override > 0 performs physical-time backward Euler
+        // using the supplied timestep instead of the standalone environment
+        // setting. This is used by the production CBS loop so Step 4 advances
+        // T^n -> T^(n+1) with the same physical dt as Steps 1-3.
         static Result solve(CBSStateSI& s,
                             const Array1D<Int>& fixed,
                             const Array1D<Real>& value,
-                            const Array1D<Real>& heat_flux_load);
+                            const Array1D<Real>& heat_flux_load,
+                            Real physical_be_dt_override = 0.0,
+                            Int physical_be_steps_override = 0);
     };
 }
