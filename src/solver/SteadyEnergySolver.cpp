@@ -741,6 +741,108 @@ namespace cbs
                 if (be_check_floor &&
                     result.t_min < be_floor - floor_tolerance)
                 {
+                    // Diagnose the lower-bound invariant without altering the
+                    // solution. For an M-matrix BE operator, T >= T_floor is
+                    // guaranteed when T_floor is a discrete subsolution:
+                    //
+                    //     b - A_BE T_floor >= 0
+                    //
+                    // on every free row. A negative value means the assembled
+                    // spatial/source/boundary balance itself drives below the
+                    // requested floor. A non-negative value with an undershoot
+                    // instead points to loss of inverse positivity/monotonicity.
+                    Array1D<Real> floor_state(s.cfg.npoin);
+                    for (Int jp = 1; jp <= s.cfg.npoin; ++jp)
+                    {
+                        floor_state(jp) = be_floor;
+                    }
+                    for (const Int jp : s.owned_nodes)
+                    {
+                        if (fixed(jp) != 0)
+                        {
+                            floor_state(jp) = value(jp);
+                        }
+                    }
+                    HaloExchange::broadcastOwnedToGhosts(
+                        floor_state,
+                        s.partition_metadata,
+                        MPI_COMM_WORLD);
+
+                    Vec floor_vec = nullptr;
+                    check_petsc(
+                        VecDuplicate(b, &floor_vec),
+                        "VecDuplicate(BE floor diagnostic)");
+                    vec_from_nodes(
+                        floor_vec,
+                        s,
+                        dof,
+                        floor_state);
+
+                    check_petsc(
+                        MatMult(A, floor_vec, r),
+                        "MatMult(BE floor diagnostic)");
+                    check_petsc(
+                        VecAYPX(r, -1.0, b),
+                        "VecAYPX(BE floor diagnostic)");
+
+                    const PetscScalar* floor_residual = nullptr;
+                    PetscInt floor_begin = 0;
+                    PetscInt floor_end = 0;
+                    check_petsc(
+                        VecGetOwnershipRange(
+                            r,
+                            &floor_begin,
+                            &floor_end),
+                        "VecGetOwnershipRange(BE floor diagnostic)");
+                    check_petsc(
+                        VecGetArrayRead(
+                            r,
+                            &floor_residual),
+                        "VecGetArrayRead(BE floor diagnostic)");
+
+                    Real local_floor_subsolution_min =
+                        std::numeric_limits<Real>::max();
+                    for (const Int jp : s.owned_nodes)
+                    {
+                        if (fixed(jp) != 0)
+                        {
+                            continue;
+                        }
+
+                        const PetscInt gid =
+                            static_cast<PetscInt>(dof(jp));
+                        if (gid < floor_begin || gid >= floor_end)
+                        {
+                            throw std::runtime_error(
+                                "Implicit BE floor diagnostic DOF ownership mismatch");
+                        }
+                        local_floor_subsolution_min =
+                            std::min(
+                                local_floor_subsolution_min,
+                                static_cast<Real>(
+                                    floor_residual[gid - floor_begin]));
+                    }
+
+                    check_petsc(
+                        VecRestoreArrayRead(
+                            r,
+                            &floor_residual),
+                        "VecRestoreArrayRead(BE floor diagnostic)");
+                    check_petsc(
+                        VecDestroy(&floor_vec),
+                        "VecDestroy(BE floor diagnostic)");
+
+                    Real global_floor_subsolution_min = 0.0;
+                    check_mpi(
+                        MPI_Allreduce(
+                            &local_floor_subsolution_min,
+                            &global_floor_subsolution_min,
+                            1,
+                            MPI_DOUBLE,
+                            MPI_MIN,
+                            MPI_COMM_WORLD),
+                        "BE floor subsolution minimum");
+
                     std::ostringstream message;
                     message << std::setprecision(17)
                             << "Implicit BE temperature fell below the requested "
@@ -748,7 +850,9 @@ namespace cbs
                             << ": Tmin=" << result.t_min
                             << " K, floor=" << be_floor
                             << " K, undershoot=" << (be_floor - result.t_min)
-                            << " K, tolerance=" << floor_tolerance << " K";
+                            << " K, tolerance=" << floor_tolerance
+                            << " K, min(b-A_BE*T_floor)_free="
+                            << global_floor_subsolution_min;
                     throw std::runtime_error(message.str());
                 }
                 if (!physical_be_override &&

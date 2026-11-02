@@ -837,6 +837,94 @@ namespace cbs
                 MPI_COMM_WORLD);
         }
 
+        // Assemble the weak mass residual of the FINAL corrected
+        // velocity. The standard Step-2 routine deliberately mixes predicted
+        // volume velocity with u^n on boundary faces, which is correct for the
+        // CBS pressure equation but is not a valid post-solve diagnostic for a
+        // monolithic BE step.
+        void assemble_corrected_velocity_continuity_rhs(CBSStateSI& s)
+        {
+            s.rhs1.fill(0.0);
+
+            for (Int ie = 1; ie <= s.cfg.nelem; ++ie)
+            {
+                if (s.mat_elem(ie) != 0)
+                {
+                    continue;
+                }
+
+                const Real vol4 = s.detJ(ie) * s.cfg.fcon[1];
+                Real u_sum[4] = {0.0, 0.0, 0.0, 0.0};
+
+                for (Int a = 1; a <= s.cfg.nep; ++a)
+                {
+                    const Int ip = s.intma(a, ie);
+                    for (Int dim = 1; dim <= s.cfg.ndim; ++dim)
+                    {
+                        u_sum[dim] += s.unkno(dim, ip);
+                    }
+                }
+
+                for (Int dim = 1; dim <= s.cfg.ndim; ++dim)
+                {
+                    u_sum[dim] *= vol4;
+                }
+
+                Real lrhs[5] = {0.0, 0.0, 0.0, 0.0, 0.0};
+                for (Int a = 1; a <= s.cfg.nep; ++a)
+                {
+                    for (Int dim = 1; dim <= s.cfg.ndim; ++dim)
+                    {
+                        const Int index =
+                            (ie - 1) * s.cfg.ndim * s.cfg.nep +
+                            (dim - 1) * s.cfg.nep +
+                            a;
+                        lrhs[a] += s.dNkdx(index) * u_sum[dim];
+                    }
+                }
+
+                for (Int face = 1; face <= s.cfg.nsid; ++face)
+                {
+                    if (s.fedge(face, ie) != 1)
+                    {
+                        continue;
+                    }
+
+                    Real face_u_sum[4] = {0.0, 0.0, 0.0, 0.0};
+                    for (Int fa = 1; fa <= s.cfg.nsidp; ++fa)
+                    {
+                        const Int local_node = s.ippn1(face, fa);
+                        const Int ip = s.intma(local_node, ie);
+                        for (Int dim = 1; dim <= s.cfg.ndim; ++dim)
+                        {
+                            face_u_sum[dim] += s.unkno(dim, ip);
+                        }
+                    }
+
+                    for (Int dim = 1; dim <= s.cfg.ndim; ++dim)
+                    {
+                        const Real normal_factor =
+                            s.annxf(dim, face, ie) * s.cfg.fcon[2];
+
+                        for (Int fa = 1; fa <= s.cfg.nsidp; ++fa)
+                        {
+                            const Int local_node = s.ippn1(face, fa);
+                            const Int ip = s.intma(local_node, ie);
+                            lrhs[local_node] -=
+                                (face_u_sum[dim] + s.unkno(dim, ip)) *
+                                normal_factor;
+                        }
+                    }
+                }
+
+                for (Int a = 1; a <= s.cfg.nep; ++a)
+                {
+                    s.rhs1(s.intma(a, ie)) += lrhs[a];
+                }
+            }
+        }
+
+
         struct ContinuityMetrics
         {
             Real l2_squared = 0.0;
@@ -1436,12 +1524,29 @@ namespace cbs
             if (s_.mpi_rank == 0)
             {
                 std::cout
-                    << "  Energy time integration : IMPLICIT BACKWARD EULER\n"
-                    << "    Segregated CBS coupling: Step 1 -> Step 2 -> Step 3 "
-                       "-> implicit Step 4\n"
+                    << "  Energy time integration : IMPLICIT BACKWARD EULER\n";
+                if (fully_implicit_flow)
+                {
+                    std::cout
+                        << "    Coupling: fully implicit BE flow -> implicit BE "
+                           "energy at the same physical dt\n";
+                }
+                else
+                {
+                    std::cout
+                        << "    Segregated CBS coupling: Step 1 -> Step 2 -> Step 3 "
+                           "-> implicit Step 4\n";
+                }
+                std::cout
                     << "    Energy dt is the physical CBS global dt; "
                        "standalone BE dt/step environment values are ignored.\n";
             }
+        }
+
+        if (fully_implicit_flow && s_.cfg.turbulence_on > 0)
+        {
+            throw std::runtime_error(
+                "CBS3D_FULLY_IMPLICIT_FLOW currently supports laminar flow only");
         }
 
         // ================================
@@ -1453,13 +1558,8 @@ namespace cbs
         // PETSc block system. With constant properties/no buoyancy, temperature
         // is one-way coupled, so solve it once after the converged flow.
         // ================================
-        if (fully_implicit_flow)
+        if (fully_implicit_flow && s_.cfg.transient_on < 1)
         {
-            if (s_.cfg.transient_on > 0)
-            {
-                throw std::runtime_error(
-                    "CBS3D_FULLY_IMPLICIT_FLOW is a steady solver; set transient_on=0");
-            }
             if (coupled_implicit_energy)
             {
                 throw std::runtime_error(
@@ -1729,7 +1829,7 @@ namespace cbs
                 s_.cfg.rtime += global_dt;
             }
 
-            if (s_.lts_operator_stale)
+            if (!fully_implicit_flow && s_.lts_operator_stale)
             {
                 pressure_system.rebuildOperator(s_);
                 s_.lts_operator_stale = false;
@@ -1746,6 +1846,69 @@ namespace cbs
 
             build_distributed_time_diagonals(s_);
 
+            ContinuityMetrics continuity;
+            ConjugateGradient::Result pressure_result;
+            Real local_maximum_velocity_correction = 0.0;
+
+            if (fully_implicit_flow)
+            {
+                const FullyImplicitFlowSolver::Result flow =
+                    FullyImplicitFlowSolver::solveBackwardEulerStep(
+                        s_,
+                        global_dt);
+
+                if (!flow.converged)
+                {
+                    std::ostringstream message;
+                    message
+                        << "Fully implicit BE flow failed at global iteration "
+                        << global_iteration
+                        << ": dt=" << global_dt
+                        << ", Picard=" << flow.nonlinear_iterations
+                        << ", total KSP=" << flow.total_krylov_iterations
+                        << ", RelU=" << flow.relative_velocity_change
+                        << ", RelP=" << flow.relative_pressure_change
+                        << ", DivRMS=" << flow.divergence_rms
+                        << ", linear residual="
+                        << flow.linear_relative_residual;
+                    throw std::runtime_error(message.str());
+                }
+
+                pressure_result.iterations =
+                    flow.total_krylov_iterations;
+                pressure_result.final_relative_l2 =
+                    flow.linear_relative_residual;
+                pressure_result.converged = true;
+
+                // Preserve the legacy residual CSV schema. In monolithic mode
+                // these fields report the final coupled linear residual, not
+                // a standalone pressure-CG residual.
+                s_.last_cg_iterations =
+                    flow.total_krylov_iterations;
+                s_.last_cg_initial_l2 = 0.0;
+                s_.last_cg_final_l2 =
+                    flow.linear_relative_residual;
+                s_.last_cg_relative_l2 =
+                    flow.linear_relative_residual;
+                s_.last_cg_max_abs = 0.0;
+
+                local_maximum_velocity_correction =
+                    flow.maximum_velocity_correction;
+
+                // Diagnostic weak continuity residual of the FINAL
+                // corrected u^(n+1). Do not call PressureAssembly here: its
+                // boundary term intentionally uses u^n for the CBS Step-2
+                // equation and therefore is not a final mass-residual audit.
+                assemble_corrected_velocity_continuity_rhs(s_);
+                HaloExchange::sumGhostContributionsToOwners(
+                    s_.rhs1,
+                    s_.partition_metadata,
+                    MPI_COMM_WORLD);
+                continuity =
+                    global_preprojection_continuity(s_);
+            }
+            else
+            {
             // CBS Step 1: local owned-element momentum assembly, reverse-add,
             // owner-only predictor update and strong velocity constraints.
             MomentumAssembly::assembleStep1Rhs(s_);
@@ -1786,10 +1949,10 @@ namespace cbs
                 s_.partition_metadata,
                 MPI_COMM_WORLD);
 
-            const ContinuityMetrics continuity =
+            continuity =
                 global_preprojection_continuity(s_);
 
-            const ConjugateGradient::Result pressure_result =
+            pressure_result =
                 pressure_system.solve(s_);
 
             s_.last_cg_iterations = pressure_result.iterations;
@@ -1833,7 +1996,7 @@ namespace cbs
                 s_.partition_metadata,
                 MPI_COMM_WORLD);
 
-            Real local_maximum_velocity_correction = 0.0;
+            local_maximum_velocity_correction = 0.0;
 
             for (const Int ip : s_.owned_nodes)
             {
@@ -1870,6 +2033,7 @@ namespace cbs
                 s_.unkno,
                 s_.partition_metadata,
                 MPI_COMM_WORLD);
+            }
 
             if (s_.cfg.turbulence_on > 0)
             {
@@ -1885,9 +2049,10 @@ namespace cbs
             {
                 if (coupled_implicit_energy)
                 {
-                    // Standard loose/segregated transient CHT coupling:
-                    // use corrected u^(n+1) from CBS Step 3 and advance exactly
-                    // one physical BE temperature step with T^n on the RHS.
+                    // Advance exactly one physical BE temperature
+                    // step with T^n on the RHS. The velocity is the corrected
+                    // u^(n+1) from either the monolithic BE flow solve above
+                    // or the standard CBS Step-3 path.
                     const SteadyEnergySolver::Result energy =
                         SteadyEnergySolver::solve(
                             s_,
@@ -2041,10 +2206,24 @@ namespace cbs
                 std::cout
                     << "Iteration " << iteration
                     << "/" << s_.cfg.ntime
-                    << "  dt=" << global_dt
-                    << "  CG=" << pressure_result.iterations
-                    << "  CGrel=" << pressure_result.final_relative_l2
-                    << "  CGfloor=" << (pressure_result.roundoff_limited ? 1 : 0)
+                    << "  dt=" << global_dt;
+
+                if (fully_implicit_flow)
+                {
+                    std::cout
+                        << "  FKSP=" << pressure_result.iterations
+                        << "  Flin=" << pressure_result.final_relative_l2;
+                }
+                else
+                {
+                    std::cout
+                        << "  CG=" << pressure_result.iterations
+                        << "  CGrel=" << pressure_result.final_relative_l2
+                        << "  CGfloor="
+                        << (pressure_result.roundoff_limited ? 1 : 0);
+                }
+
+                std::cout
                     << "  RelU=" << metrics.relative_u
                     << "  RelV=" << metrics.relative_v
                     << "  RelW=" << metrics.relative_w

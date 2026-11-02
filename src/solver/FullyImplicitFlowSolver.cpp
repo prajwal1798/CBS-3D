@@ -1,28 +1,24 @@
 //=============================================================================
 // CBS3D++_SI
 //
-// Fully implicit steady CBS flow solve.
+// Monolithic CBS flow solve for steady fixed points and physical backward Euler.
 //
-// The original semi-implicit CBS iteration is
-//
-//   M_dt (u* - u) = r_m(u)
-//   A_p p          = B u*
-//   M_dt (u - u*) + G p = 0
-//
-// where A_p = sum_e tau_e H_e and M_dt is the lumped momentum mass divided by
-// the same local CBS pseudo-time. Instead of marching these equations millions
-// of times, this solver treats u, u* and p as simultaneous unknowns. Picard
-// linearisation freezes the nonlinear convection/stabilisation coefficients on
-// the current corrected velocity. Every Picard iteration therefore solves the
-// exact linearised CBS Step-1/2/3 fixed-point equations in one PETSc system.
-//
-// Per active fluid node the unknown ordering is
+// Unknown ordering per active fluid node:
 //
 //   [u, v, w, u*, v*, w*, p].
 //
-// Temperature is intentionally not included: for the present constant-property
-// forced-flow blanket problem there is no T -> (u,p) feedback. The converged
-// flow is followed by the existing implicit steady CHT solve.
+// The solver retains the production P1/TET4 CBS Step-1/2/3 discretisation.
+// Picard iteration freezes the advecting velocity in the nonlinear Step-1
+// fluxes. In physical-time mode the old accepted velocity u^n appears only in
+// the BE mass RHS and in the existing Step-2 boundary flux convention:
+//
+//   A_u(w^k) u^(n+1) + M/dt u*^(n+1) = M/dt u^n
+//   dt H p^(n+1) - B_vol u*^(n+1)     = -B_bnd u^n
+//   M/dt (u^(n+1)-u*^(n+1)) + Gp      = 0.
+//
+// Temperature is not part of this PETSc block because the present blanket case
+// has constant properties and no T -> flow feedback. The transient driver
+// advances implicit BE energy after the converged flow step at the same dt.
 //=============================================================================
 
 #include "cbs/solver/FullyImplicitFlowSolver.hpp"
@@ -69,9 +65,24 @@ namespace cbs
         {
             if (code != PETSC_SUCCESS)
             {
-                throw std::runtime_error(
-                    std::string("PETSc failure in ") + what +
-                    " (code " + std::to_string(static_cast<int>(code)) + ")");
+                // Return both the numeric code and PETSc's message. In
+                // particular, PETSC_ERR_MPI (98) is NOT a matrix preallocation
+                // error, and requires checking MPI/PETSc runtime compatibility.
+                const char* error_text = nullptr;
+                const char* detail = nullptr;
+                (void)PetscErrorMessage(code, &error_text, &detail);
+                std::ostringstream message;
+                message << "PETSc failure in " << what
+                        << " (code " << static_cast<int>(code) << ")";
+                if (error_text != nullptr)
+                {
+                    message << ": " << error_text;
+                }
+                if (detail != nullptr)
+                {
+                    message << " [" << detail << "]";
+                }
+                throw std::runtime_error(message.str());
             }
         }
 
@@ -165,11 +176,6 @@ namespace cbs
             return s.cfg.ani;
         }
 
-        Real tetra_mass(const Real volume, const Int a, const Int b)
-        {
-            return volume * (a == b ? 2.0 : 1.0) / 20.0;
-        }
-
         void set_default_option(const char* name, const char* value)
         {
             PetscBool given = PETSC_FALSE;
@@ -231,6 +237,7 @@ namespace cbs
             Real rel_p = 0.0;
             Real div_rms = 0.0;
             Real umax = 0.0;
+            Real correction_max = 0.0;
         };
 
         Metrics update_state_from_solution(
@@ -253,6 +260,7 @@ namespace cbs
             Real local_dp2 = 0.0;
             Real local_p2 = 0.0;
             Real local_umax = 0.0;
+            Real local_correction_max = 0.0;
 
             for (const Int ip : s.owned_nodes)
             {
@@ -280,6 +288,14 @@ namespace cbs
                         local_u2 += new_value * new_value;
                     }
                     s.unkno(dim, ip) = new_value;
+
+                    const Real predictor_value =
+                        static_cast<Real>(
+                            values[cursor + predictor_offset + (dim - 1)]);
+                    local_correction_max =
+                        std::max(
+                            local_correction_max,
+                            std::abs(linear_value - predictor_value));
                 }
 
                 const Real old_pressure = s.pres(ip);
@@ -357,6 +373,7 @@ namespace cbs
             Real global_div2 = 0.0;
             Real global_volume = 0.0;
             Real global_umax = 0.0;
+            Real global_correction_max = 0.0;
 
             check_mpi(MPI_Allreduce(
                 &local_du2, &global_du2, 1, MPI_DOUBLE, MPI_SUM,
@@ -379,6 +396,10 @@ namespace cbs
             check_mpi(MPI_Allreduce(
                 &local_umax, &global_umax, 1, MPI_DOUBLE, MPI_MAX,
                 MPI_COMM_WORLD), "flow Umax");
+            check_mpi(MPI_Allreduce(
+                &local_correction_max, &global_correction_max,
+                1, MPI_DOUBLE, MPI_MAX, MPI_COMM_WORLD),
+                "flow velocity correction max");
 
             Metrics m;
             m.rel_u =
@@ -396,12 +417,16 @@ namespace cbs
                     ? std::sqrt(global_div2 / global_volume)
                     : 0.0;
             m.umax = global_umax;
+            m.correction_max = global_correction_max;
             return m;
         }
     }
 
     FullyImplicitFlowSolver::Result
-    FullyImplicitFlowSolver::solve(CBSStateSI& s)
+    FullyImplicitFlowSolver::solveImpl(
+        CBSStateSI& s,
+        const bool backward_euler,
+        const Real physical_dt)
     {
         if (!s.mpi_enabled || s.mpi_size < 2)
         {
@@ -431,6 +456,13 @@ namespace cbs
 
         const double start = MPI_Wtime();
         Result result;
+
+        if (backward_euler &&
+            (!(physical_dt > 0.0) || !std::isfinite(physical_dt)))
+        {
+            throw std::runtime_error(
+                "Fully implicit CBS backward Euler needs a positive finite dt");
+        }
 
         const Real nonlinear_tol =
             env_real("CBS3D_IMPLICIT_FLOW_TOL", 1.0e-7);
@@ -639,7 +671,9 @@ namespace cbs
         if (s.mpi_rank == 0)
         {
             std::cout
-                << "Fully implicit steady CBS flow\n"
+                << (backward_euler
+                        ? "Fully implicit backward-Euler CBS flow step\n"
+                        : "Fully implicit steady CBS flow\n")
                 << "  active fluid nodes : " << global_active << "\n"
                 << "  coupled DOFs       : " << global_dofs
                 << " (u,v,w,u*,v*,w*,p)\n"
@@ -653,6 +687,12 @@ namespace cbs
                 << "  max Picard iters   : " << max_nonlinear << "\n"
                 << "  initial relaxation : "
                 << requested_relaxation << "\n";
+            if (backward_euler)
+            {
+                std::cout
+                    << "  physical BE dt     : "
+                    << physical_dt << " s\n";
+            }
         }
 
         Real relaxation = requested_relaxation;
@@ -672,39 +712,45 @@ namespace cbs
 
             mass_over_tau.fill(0.0);
 
-            // Reproduce the production solver_opt=3 timestep convention.
-            // TimeStep computes the stable candidate from the CURRENT Picard
-            // velocity; the distributed production path then uses the
-            // communicator-wide minimum for every element. This dt is a CBS
-            // numerical parameter, not physical elapsed time.
-            TimeStep::computeTimeStep(s, nonlinear);
+            Real global_tau = physical_dt;
 
-            Real local_tau = std::numeric_limits<Real>::max();
-            for (Int ie = 1; ie <= s.cfg.nelem; ++ie)
+            if (!backward_euler)
             {
-                local_tau = std::min(local_tau, s.delte(ie));
-            }
+                // Steady solve: reproduce the production pseudo-time convention.
+                // The pseudo-time is a nonlinear continuation/stabilisation
+                // parameter and is not physical elapsed time.
+                TimeStep::computeTimeStep(s, nonlinear);
 
-            Real global_tau = 0.0;
-            check_mpi(MPI_Allreduce(
-                &local_tau, &global_tau, 1, MPI_DOUBLE, MPI_MIN,
-                MPI_COMM_WORLD), "flow global CBS timestep");
+                Real local_tau = std::numeric_limits<Real>::max();
+                for (Int ie = 1; ie <= s.cfg.nelem; ++ie)
+                {
+                    local_tau = std::min(local_tau, s.delte(ie));
+                }
 
-            const Real tau_scale =
-                env_real("CBS3D_IMPLICIT_FLOW_TAU_SCALE", 1.0);
-            if (!(tau_scale > 0.0) || !std::isfinite(tau_scale))
-            {
-                throw std::runtime_error(
-                    "CBS3D_IMPLICIT_FLOW_TAU_SCALE must be positive and finite");
+                check_mpi(MPI_Allreduce(
+                    &local_tau, &global_tau, 1, MPI_DOUBLE, MPI_MIN,
+                    MPI_COMM_WORLD), "flow global CBS timestep");
+
+                const Real tau_scale =
+                    env_real("CBS3D_IMPLICIT_FLOW_TAU_SCALE", 1.0);
+                if (!(tau_scale > 0.0) || !std::isfinite(tau_scale))
+                {
+                    throw std::runtime_error(
+                        "CBS3D_IMPLICIT_FLOW_TAU_SCALE must be positive and finite");
+                }
+                global_tau *= tau_scale;
             }
-            global_tau *= tau_scale;
 
             if (!(global_tau > 0.0) || !std::isfinite(global_tau))
             {
                 throw std::runtime_error(
-                    "Fully implicit CBS obtained invalid global timestep");
+                    backward_euler
+                        ? "Fully implicit CBS obtained invalid physical BE timestep"
+                        : "Fully implicit CBS obtained invalid pseudo-timestep");
             }
 
+            // In BE mode the physical step is used consistently by all three
+            // CBS blocks. In steady mode this remains the global pseudo-time.
             for (Int ie = 1; ie <= s.cfg.nelem; ++ie)
             {
                 s.delte(ie) = global_tau;
@@ -739,6 +785,7 @@ namespace cbs
                 mass_over_tau, s.partition_metadata, MPI_COMM_WORLD);
 
             check_petsc(MatZeroEntries(A), "MatZeroEntries(flow)");
+            check_petsc(VecSet(b, 0.0), "VecSet(flow b)");
 
             // Element operators: A_u, G, B and tau H.
             for (Int ie = 1; ie <= s.cfg.nelem; ++ie)
@@ -758,37 +805,34 @@ namespace cbs
                 const Real nu = fluid_kinematic_viscosity(s, ie);
                 const Real tau = global_tau;
 
+                // Picard field w freezes the advecting velocity in the
+                // EXACT discrete Step-1 residual used by MomentumAssembly:
+                // nodal conservative flux products, CBS characteristic term,
+                // and the componentwise Laplacian diffusion.
                 Real w[5][4] = {};
-                Real div_w = 0.0;
+                Real wmean[4] = {};
+                Real q_coeff[5] = {};
+
                 for (Int a = 1; a <= 4; ++a)
                 {
                     const Int ip = s.intma(a, ie);
                     for (Int dim = 1; dim <= 3; ++dim)
                     {
                         w[a][dim] = s.unkno(dim, ip);
-                        div_w +=
-                            w[a][dim] * grad(s, ie, dim, a);
+                        wmean[dim] += 0.25 * w[a][dim];
                     }
                 }
 
-                // g_b(node) = div(w N_b) evaluated at the four vertices.
-                Real g[5][5] = {};
-                for (Int basis = 1; basis <= 4; ++basis)
+                // q_coeff[b] is the coefficient multiplying transported
+                // component u_i(b) in div(I_h(w_j u_i)):
+                //
+                //   q_b = sum_j dN_b/dx_j * w_j(b).
+                for (Int bnode = 1; bnode <= 4; ++bnode)
                 {
-                    for (Int node = 1; node <= 4; ++node)
+                    for (Int j = 1; j <= 3; ++j)
                     {
-                        Real value = 0.0;
-                        for (Int dim = 1; dim <= 3; ++dim)
-                        {
-                            value +=
-                                w[node][dim] *
-                                grad(s, ie, dim, basis);
-                        }
-                        if (node == basis)
-                        {
-                            value += div_w;
-                        }
-                        g[basis][node] = value;
+                        q_coeff[bnode] +=
+                            grad(s, ie, j, bnode) * w[bnode][j];
                     }
                 }
 
@@ -831,70 +875,60 @@ namespace cbs
 
                 for (Int a = 1; a <= 4; ++a)
                 {
+                    Real test_direction = 0.0;
+                    for (Int j = 1; j <= 3; ++j)
+                    {
+                        test_direction +=
+                            grad(s, ie, j, a) * wmean[j];
+                    }
+
                     for (Int bnode = 1; bnode <= 4; ++bnode)
                     {
-                        Real convection = 0.0;
-                        for (Int cnode = 1; cnode <= 4; ++cnode)
+                        Real grad_dot_ab = 0.0;
+                        Real row_dot_advecting_node = 0.0;
+
+                        for (Int j = 1; j <= 3; ++j)
                         {
-                            convection +=
-                                tetra_mass(volume, a, cnode) *
-                                g[bnode][cnode];
+                            grad_dot_ab +=
+                                grad(s, ie, j, a) *
+                                grad(s, ie, j, bnode);
+                            row_dot_advecting_node +=
+                                grad(s, ie, j, a) *
+                                w[bnode][j];
                         }
 
-                        Real characteristic = 0.0;
-                        for (Int cnode = 1; cnode <= 4; ++cnode)
-                        {
-                            for (Int dnode = 1; dnode <= 4; ++dnode)
-                            {
-                                characteristic +=
-                                    g[a][cnode] *
-                                    tetra_mass(volume, cnode, dnode) *
-                                    g[bnode][dnode];
-                            }
-                        }
-                        characteristic *= 0.5 * tau;
+                        // A_u = - d(r_m)/d(u_i) under Picard freezing:
+                        //
+                        // r_conv volume =
+                        //   +(V/4) grad(N_a).sum_b[w(b) u_i(b)]
+                        //
+                        // r_char volume =
+                        //   -(dt/2) V (wbar.grad N_a)
+                        //                sum_b[q_b u_i(b)]
+                        //
+                        // r_diff volume =
+                        //   -nu V grad(N_a).grad(u_i).
+                        const Real convection =
+                            -volume * 0.25 *
+                            row_dot_advecting_node;
+                        const Real characteristic =
+                            0.5 * tau * volume *
+                            test_direction * q_coeff[bnode];
+                        const Real diffusion =
+                            nu * volume * grad_dot_ab;
 
-                        // Step 1: A_u(w) u + M_dt(u* - u) = 0.
                         for (Int i = 1; i <= 3; ++i)
                         {
                             const Int row =
                                 (a - 1) * 3 + (i - 1);
+                            const Int col =
+                                (bnode - 1) * 3 + (i - 1);
 
-                            for (Int k = 1; k <= 3; ++k)
-                            {
-                                Real diffusion = 0.0;
-
-                                for (Int j = 1; j <= 3; ++j)
-                                {
-                                    if (i == k)
-                                    {
-                                        diffusion +=
-                                            grad(s, ie, j, a) *
-                                            grad(s, ie, j, bnode);
-                                    }
-                                }
-
-                                diffusion +=
-                                    grad(s, ie, k, a) *
-                                    grad(s, ie, i, bnode);
-
-                                diffusion -=
-                                    (2.0 / 3.0) *
-                                    grad(s, ie, i, a) *
-                                    grad(s, ie, k, bnode);
-
-                                diffusion *= nu * volume;
-
-                                const Int col =
-                                    (bnode - 1) * 3 + (k - 1);
-
-                                a_uu[row * 12 + col] +=
-                                    static_cast<PetscScalar>(
-                                        diffusion +
-                                        (i == k
-                                            ? convection + characteristic
-                                            : 0.0));
-                            }
+                            a_uu[row * 12 + col] +=
+                                static_cast<PetscScalar>(
+                                    convection +
+                                    characteristic +
+                                    diffusion);
                         }
 
                         // Step 2: tau H p - B_volume u* = ...
@@ -909,17 +943,9 @@ namespace cbs
                                     grad(s, ie, i, a));
                         }
 
-                        Real h_ab = 0.0;
-                        for (Int j = 1; j <= 3; ++j)
-                        {
-                            h_ab +=
-                                grad(s, ie, j, a) *
-                                grad(s, ie, j, bnode);
-                        }
-
                         h_pressure[(a - 1) * 4 + (bnode - 1)] +=
                             static_cast<PetscScalar>(
-                                tau * volume * h_ab);
+                                tau * volume * grad_dot_ab);
 
                         // Step 3: M_dt(u-u*) + Gp = 0.
                         for (Int i = 1; i <= 3; ++i)
@@ -935,7 +961,10 @@ namespace cbs
                     }
                 }
 
-                // Production Step-1 natural deviatoric traction.
+                // Exact Picard linearisation of production Step-1 boundary
+                // terms. MomentumAssembly uses the nodal conservative face
+                // flux, the CBS characteristic boundary correction and the
+                // componentwise natural diffusion flux.
                 for (Int face = 1; face <= 4; ++face)
                 {
                     if (s.fedge(face, ie) == 0)
@@ -943,56 +972,90 @@ namespace cbs
                         continue;
                     }
 
+                    Real wmean_dot_normal = 0.0;
+                    for (Int j = 1; j <= 3; ++j)
+                    {
+                        wmean_dot_normal +=
+                            wmean[j] * s.annxf(j, face, ie);
+                    }
+
                     for (Int fa = 1; fa <= 3; ++fa)
                     {
                         const Int a = s.ippn1(face, fa);
 
+                        // Diffusion and characteristic boundary terms involve
+                        // the gradient/divergence reconstructed from all four
+                        // element nodes.
                         for (Int bnode = 1; bnode <= 4; ++bnode)
                         {
+                            Real grad_dot_normal = 0.0;
+                            for (Int j = 1; j <= 3; ++j)
+                            {
+                                grad_dot_normal +=
+                                    grad(s, ie, j, bnode) *
+                                    s.annxf(j, face, ie);
+                            }
+
+                            const Real diffusion_boundary =
+                                nu * s.cfg.fdif[2] *
+                                grad_dot_normal;
+                            const Real characteristic_boundary =
+                                0.5 * tau * s.cfg.fcon[4] *
+                                wmean_dot_normal * q_coeff[bnode];
+
                             for (Int i = 1; i <= 3; ++i)
                             {
                                 const Int row =
                                     (a - 1) * 3 + (i - 1);
+                                const Int col =
+                                    (bnode - 1) * 3 + (i - 1);
 
-                                for (Int k = 1; k <= 3; ++k)
-                                {
-                                    Real traction = 0.0;
+                                // Both terms are positive in r_m at the face;
+                                // A_u = -r_m.
+                                a_uu[row * 12 + col] -=
+                                    static_cast<PetscScalar>(
+                                        diffusion_boundary +
+                                        characteristic_boundary);
+                            }
+                        }
 
-                                    for (Int j = 1; j <= 3; ++j)
-                                    {
-                                        if (i == k)
-                                        {
-                                            traction +=
-                                                grad(s, ie, j, bnode) *
-                                                s.annxf(j, face, ie);
-                                        }
-                                    }
+                        // Conservative convective boundary term:
+                        // r_conv has - integral N_a (w_j u_i) n_j.
+                        for (Int fb = 1; fb <= 3; ++fb)
+                        {
+                            const Int bnode =
+                                s.ippn1(face, fb);
 
-                                    traction +=
-                                        grad(s, ie, i, bnode) *
-                                        s.annxf(k, face, ie);
+                            Real advective_flux = 0.0;
+                            for (Int j = 1; j <= 3; ++j)
+                            {
+                                advective_flux +=
+                                    w[bnode][j] *
+                                    s.annxf(j, face, ie);
+                            }
 
-                                    traction -=
-                                        (2.0 / 3.0) *
-                                        grad(s, ie, k, bnode) *
-                                        s.annxf(i, face, ie);
+                            const Real face_mass_factor =
+                                s.cfg.fcon[2] *
+                                (a == bnode ? 2.0 : 1.0);
 
-                                    traction *= nu / 3.0;
+                            for (Int i = 1; i <= 3; ++i)
+                            {
+                                const Int row =
+                                    (a - 1) * 3 + (i - 1);
+                                const Int col =
+                                    (bnode - 1) * 3 + (i - 1);
 
-                                    const Int col =
-                                        (bnode - 1) * 3 + (k - 1);
-
-                                    // r_m has +traction, while A_u=-r_m.
-                                    a_uu[row * 12 + col] -=
-                                        static_cast<PetscScalar>(traction);
-                                }
+                                a_uu[row * 12 + col] +=
+                                    static_cast<PetscScalar>(
+                                        face_mass_factor *
+                                        advective_flux);
                             }
                         }
                     }
 
                     // Production Step 2 volume divergence uses u*, while its
-                    // boundary flux uses unkn1. At the steady fixed point
-                    // unkn1 == corrected u, hence this block couples to u.
+                    // boundary flux uses the previous physical velocity in a
+                    // transient step. At a steady fixed point u^n == u.
                     if (s.fedge(face, ie) == 1)
                     {
                         has_step2_boundary_flux = true;
@@ -1015,8 +1078,6 @@ namespace cbs
                                     const Int col =
                                         (bnode - 1) * 3 + (i - 1);
 
-                                    // tauHp - B u*=0 and B contains
-                                    // -boundary_flux, hence +flux here.
                                     b_boundary[(a - 1) * 12 + col] +=
                                         static_cast<PetscScalar>(
                                             face_mass_factor *
@@ -1056,11 +1117,39 @@ namespace cbs
 
                 if (has_step2_boundary_flux)
                 {
-                    check_petsc(MatSetValues(
-                        A, 4, pressure_rows,
-                        12, corrected_cols,
-                        b_boundary, ADD_VALUES),
-                        "MatSetValues(flow Bboundary)");
+                    if (backward_euler)
+                    {
+                        PetscScalar pressure_boundary_rhs[4] = {};
+                        for (Int a = 0; a < 4; ++a)
+                        {
+                            for (Int bnode = 1; bnode <= 4; ++bnode)
+                            {
+                                const Int ip = s.intma(bnode, ie);
+                                for (Int dim = 1; dim <= 3; ++dim)
+                                {
+                                    const Int col =
+                                        (bnode - 1) * 3 + (dim - 1);
+                                    pressure_boundary_rhs[a] -=
+                                        b_boundary[a * 12 + col] *
+                                        static_cast<PetscScalar>(
+                                            s.unkn1(dim, ip));
+                                }
+                            }
+                        }
+
+                        check_petsc(VecSetValues(
+                            b, 4, pressure_rows,
+                            pressure_boundary_rhs, ADD_VALUES),
+                            "VecSetValues(flow BE pressure boundary RHS)");
+                    }
+                    else
+                    {
+                        check_petsc(MatSetValues(
+                            A, 4, pressure_rows,
+                            12, corrected_cols,
+                            b_boundary, ADD_VALUES),
+                            "MatSetValues(flow Bboundary)");
+                    }
                 }
             }
 
@@ -1094,14 +1183,29 @@ namespace cbs
                     const PetscInt predictor_col =
                         base + predictor_offset + dim;
 
-                    check_petsc(MatSetValue(
-                        A, step1_row, u_col,
-                        -mdt, ADD_VALUES),
-                        "MatSetValue(Step1 -Mdt)");
+                    if (!backward_euler)
+                    {
+                        check_petsc(MatSetValue(
+                            A, step1_row, u_col,
+                            -mdt, ADD_VALUES),
+                            "MatSetValue(Step1 steady -Mdt)");
+                    }
+
                     check_petsc(MatSetValue(
                         A, step1_row, predictor_col,
                         mdt, ADD_VALUES),
                         "MatSetValue(Step1 +Mdt)");
+
+                    if (backward_euler)
+                    {
+                        const PetscScalar old_mass_rhs =
+                            static_cast<PetscScalar>(
+                                mdt * s.unkn1(dim + 1, ip));
+                        check_petsc(VecSetValue(
+                            b, step1_row, old_mass_rhs, ADD_VALUES),
+                            "VecSetValue(Step1 BE old-velocity RHS)");
+                    }
+
                     check_petsc(MatSetValue(
                         A, step3_row, u_col,
                         mdt, ADD_VALUES),
@@ -1122,7 +1226,6 @@ namespace cbs
 
             // Current corrected velocity is also a good initial guess for u*.
             check_petsc(VecSet(x, 0.0), "VecSet(flow x)");
-            check_petsc(VecSet(b, 0.0), "VecSet(flow b)");
 
             PetscScalar* x_values = nullptr;
             check_petsc(VecGetArray(
@@ -1221,6 +1324,7 @@ namespace cbs
             result.relative_pressure_change = metrics.rel_p;
             result.divergence_rms = metrics.div_rms;
             result.maximum_velocity = metrics.umax;
+            result.maximum_velocity_correction = metrics.correction_max;
 
             const Real tau_min = global_tau;
             const Real tau_max = global_tau;
@@ -1236,6 +1340,7 @@ namespace cbs
                     << "  RelP=" << metrics.rel_p
                     << "  DivRMS=" << metrics.div_rms
                     << "  Umax=" << metrics.umax
+                    << "  dUmax=" << metrics.correction_max
                     << "  omega=" << relaxation
                     << "  tau=[" << tau_min
                     << "," << tau_max << "]\n"
@@ -1283,6 +1388,20 @@ namespace cbs
 
         return result;
     }
+
+    FullyImplicitFlowSolver::Result
+    FullyImplicitFlowSolver::solve(CBSStateSI& s)
+    {
+        return solveImpl(s, false, 0.0);
+    }
+
+    FullyImplicitFlowSolver::Result
+    FullyImplicitFlowSolver::solveBackwardEulerStep(
+        CBSStateSI& s,
+        const Real physical_dt)
+    {
+        return solveImpl(s, true, physical_dt);
+    }
 }
 
 #else
@@ -1294,6 +1413,15 @@ namespace cbs
     {
         throw std::runtime_error(
             "Fully implicit CBS requires MPI + PETSc");
+    }
+
+    FullyImplicitFlowSolver::Result
+    FullyImplicitFlowSolver::solveBackwardEulerStep(
+        CBSStateSI&,
+        Real)
+    {
+        throw std::runtime_error(
+            "Fully implicit CBS backward Euler requires MPI + PETSc");
     }
 }
 
