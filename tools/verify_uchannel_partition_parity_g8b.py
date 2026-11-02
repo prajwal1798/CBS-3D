@@ -129,7 +129,6 @@ def write_xml_restart(file, records, fields):
 
 def make_restart(a):
     reference = owned_fields(a.reference, a.step, 2)
-    seen_owned = set()
     print(f"Source snapshot: {a.reference}, step {a.step}, {len(reference)} unique nodes")
     for rank in range(4):
         mpi = a.partitions/f"rank_{rank:04d}"/f"uchannel_rank_{rank:04d}.mpi"
@@ -137,12 +136,8 @@ def make_restart(a):
         records = mpi_nodes(mpi, rank, 4)
         missing = set(records)-set(reference)
         require(not missing, f"new partition introduces foreign IDs: {sorted(missing)[:10]}")
-        # Track actual ownership via owning rows of the .mpi file.
-        for gid in records:
-            # Every global node may occur in multiple partitions as a ghost;
-            # unique owned-coverage is independently validated below by
-            # 4-part partition_manifest.json during exporter execution.
-            pass
+        # MPI ownership and global coverage are checked against the exporter
+        # manifest; all local/ghost values derive from the same owned field.
         out = a.destination/f"uchannel_step_{a.step:08d}_rank_{rank:04d}.vtu"
         write_xml_restart(out, records, reference)
         print(f"  rank {rank}: wrote {len(records)} exact nodal fields => {out}")
