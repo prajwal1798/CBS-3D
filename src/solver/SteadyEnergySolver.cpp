@@ -537,7 +537,9 @@ namespace cbs
                           << bootstrap_iterations
                           << " Tmin=" << minimum
                           << " Tmax=" << maximum
-                          << " K (subsequent AFC residual still nonlinear)"
+                          << (low_order_only
+                                 ? " K (stationary low-order result)"
+                                 : " K (subsequent AFC residual still nonlinear)")
                           << "\n" << std::flush;
             }
             if (low_order_only)
