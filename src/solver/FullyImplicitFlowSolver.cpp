@@ -69,9 +69,24 @@ namespace cbs
         {
             if (code != PETSC_SUCCESS)
             {
-                throw std::runtime_error(
-                    std::string("PETSc failure in ") + what +
-                    " (code " + std::to_string(static_cast<int>(code)) + ")");
+                // Return both the numeric code and PETSc's message. In
+                // particular, PETSC_ERR_MPI (98) is NOT a matrix preallocation
+                // error, and requires checking MPI/PETSc runtime compatibility.
+                const char* error_text = nullptr;
+                const char* detail = nullptr;
+                (void)PetscErrorMessage(code, &error_text, &detail);
+                std::ostringstream message;
+                message << "PETSc failure in " << what
+                        << " (code " << static_cast<int>(code) << ")";
+                if (error_text != nullptr)
+                {
+                    message << ": " << error_text;
+                }
+                if (detail != nullptr)
+                {
+                    message << " [" << detail << "]";
+                }
+                throw std::runtime_error(message.str());
             }
         }
 
