@@ -216,6 +216,19 @@ namespace cbs
                 "CBS3D_STEADY_ENERGY_LOW_ORDER_ONLY=1. "
                 "High-order bounded transient AFC has NOT been implemented.");
         }
+        if (transient_be && env_flag("CBS3D_CHT_WALL_TREATMENT"))
+        {
+            throw std::runtime_error(
+                "Physical-time BE does not yet support special CHT wall "
+                "treatment. The implicit matrix uses the standard volume "
+                "energy operator only; do not silently mismatch wall physics.");
+        }
+        if (low_order_only && env_flag("CBS3D_AFC_SOLID"))
+        {
+            throw std::runtime_error(
+                "Low-order steady/physical BE currently uses graph viscosity "
+                "only in the fluid; CBS3D_AFC_SOLID is unsupported.");
+        }
 
         // EnergyAssembly's characteristic streamline diffusion uses the
         // CBS pseudo-time delte_e in tau_e = 0.5*delte_e*rhoCp*V.
