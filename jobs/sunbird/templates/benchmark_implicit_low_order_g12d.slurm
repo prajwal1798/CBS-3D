@@ -132,7 +132,7 @@ PY
     fi
 
     if [[ -f "$RUN/solver.out" ]]; then
-        grep -E '\[AFC-BOOTSTRAP\]|\[AFC\] iteration (1:|5:|10:|20:|50:|100:|150:)|Steady energy \(implicit|Krylov iterations|explicit residual|temperature range|solve time|stop reason' \
+        grep -E '\[AFC-BOOTSTRAP\]|\[LOW-ORDER\]|scheme|Krylov iterations|residual check|temperature range|solve time|stop reason' \
             "$RUN/solver.out" | tail -n 24 || true
     fi
     if [[ -f "$RUN/solver.err" ]]; then
@@ -146,4 +146,4 @@ echo "G12d arms executed: $executed / ${#arms[@]}"
 echo "G12d converged bounded arms: $success / ${#arms[@]}"
 [[ "$executed" == "${#arms[@]}" ]] || exit 2
 [[ "$success" -gt 0 ]] || { echo "G12D LOW-ORDER IMPLICIT BASELINE FAILED"; exit 1; }
-echo "G12D EXPERIMENTAL IMPLICIT AFC BOOTSTRAP CONVERGENCE PASS"
+echo "G12D EXPERIMENTAL LOW-ORDER IMPLICIT BASELINE PASS (NOT HIGH-ORDER AFC)"
