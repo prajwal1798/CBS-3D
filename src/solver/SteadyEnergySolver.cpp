@@ -1500,7 +1500,12 @@ namespace cbs
 namespace cbs
 {
     SteadyEnergySolver::Result SteadyEnergySolver::solve(
-        CBSStateSI&, const Array1D<Int>&, const Array1D<Real>&, const Array1D<Real>&)
+        CBSStateSI&,
+        const Array1D<Int>&,
+        const Array1D<Real>&,
+        const Array1D<Real>&,
+        Real,
+        Int)
     {
         throw std::runtime_error("SteadyEnergySolver needs MPI and PETSc");
     }
