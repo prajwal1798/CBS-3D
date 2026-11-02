@@ -22,8 +22,10 @@
 #                       RUN_DIR (ITS mean_velocity WHEN IT HAS ONE), SAME RANKS
 #   implicit            FROM-SCRATCH FULL L2 STEADY CHT: FULLY IMPLICIT
 #                       CBS u-v-w-u*-v*-w*-p PETSc BLOCK SOLVE, THEN IMPLICIT T
+#   fullybe [NSTEPS]    FROM-SCRATCH FULL L2 PHYSICAL TRANSIENT: FULLY
+#                       IMPLICIT BE FLOW + IMPLICIT BE CHT (DEFAULT 1 STEP)
 #   prove50k            FROM-SCRATCH FULL L2 PHYSICAL TRANSIENT: 50,000
-#                       COUPLED CBS + IMPLICIT-BE CHT STEPS ON 40 MPI RANKS
+#                       SEMI-IMPLICIT CBS FLOW + IMPLICIT-BE CHT ON 40 RANKS
 #   check [RUN_DIR]     MASS + ENERGY BALANCE AND RESIDUAL PLOT OF A RUN
 #                       (DEFAULT: THE NEWEST RUN)
 #   status              YOUR JOBS AND THE LATEST PROGRESS LINE OF EACH RUN
@@ -258,6 +260,71 @@ implicit)
 
     bash "$T/submit_auto.sh" "$DIR" "$CASE" \
         --sets "40" --time 04:00:00 \
+        --par "$PAR" --matprop "$SRC/blanket.matprop"
+    ;;
+
+# ================================
+# FULLY IMPLICIT PHYSICAL BACKWARD-EULER FLOW + CHT
+# ================================
+fullybe)
+    NSTEPS="${1:-1}"
+    [[ "$NSTEPS" =~ ^[0-9]+$ && "$NSTEPS" -ge 1 ]] || {
+        echo "ERROR: fullybe NSTEPS must be a positive integer" >&2; exit 1; }
+
+    BASE="$SRC/blanket_L2T50K.par"
+    PAR="$DIR/blanket_fullybe_${NSTEPS}.par"
+    [[ -s "$BASE" ]] || { echo "ERROR: MISSING $BASE" >&2; exit 1; }
+    [[ -d "$DIR/partitions_40" ]] || {
+        echo "ERROR: MISSING $DIR/partitions_40; run setup first" >&2; exit 1; }
+
+    # Preserve the verified physical case and change only the requested number
+    # of physical steps. The timestep remains the existing communicator-wide
+    # physical CBS timestep so the first BE comparison is apples-to-apples.
+    awk -v n="$NSTEPS" '
+        /^#/ { print; next }
+        want_ntime == 1 { $1 = n; want_ntime = 0 }
+        /ntime transient_on dtfixed dtfix iwrite/ { want_ntime = 1 }
+        { print }
+    ' "$BASE" > "$PAR"
+
+    export CBS3D_FULLY_IMPLICIT_FLOW=1
+    export CBS3D_IMPLICIT_TRANSIENT_ENERGY=1
+    export CBS3D_TEMPERATURE_AFC=1
+    export CBS3D_STEADY_ENERGY_LOW_ORDER_ONLY=1
+    export CBS3D_IMPLICIT_ENERGY_BE_MIN_TEMPERATURE=298.15
+
+    export CBS3D_IMPLICIT_FLOW_MAXIT="${CBS3D_IMPLICIT_FLOW_MAXIT:-100}"
+    export CBS3D_IMPLICIT_FLOW_RELAX="${CBS3D_IMPLICIT_FLOW_RELAX:-0.7}"
+    export CBS3D_IMPLICIT_FLOW_TOL="${CBS3D_IMPLICIT_FLOW_TOL:-1.0e-7}"
+    export CBS3D_IMPLICIT_FLOW_PRESSURE_TOL="${CBS3D_IMPLICIT_FLOW_PRESSURE_TOL:-1.0e-6}"
+    export CBS3D_IMPLICIT_FLOW_DIVERGENCE_TOL="${CBS3D_IMPLICIT_FLOW_DIVERGENCE_TOL:-1.0e-7}"
+
+    unset CBS3D_STEADY_ENERGY
+    unset CBS3D_IMPLICIT_ENERGY_BE_DT
+    unset CBS3D_IMPLICIT_ENERGY_BE_STEPS
+    unset CBS3D_IMPLICIT_FLOW_TAU_SCALE
+    unset CBS3D_RESTART
+    unset CBS3D_RESTART_FORMAT
+    unset CBS3D_RESTART_ROOT
+    unset CBS3D_RESTART_ITERATION
+    unset CBS3D_RESTART_AS_INITIAL_CONDITION
+    unset CBS3D_RESTART_VELOCITY_ARRAY
+    unset CBS3D_AVERAGE_START_TIME
+    unset CBS3D_AVERAGE_START_ITERATION
+    unset CBS3D_CHECKPOINT_EVERY
+
+    echo "CASE   : FULL 4-U-CHANNEL BLANKET SLICE, L2 WALL + NUCLEAR HEATING"
+    echo "START  : FROM SCRATCH (NO RESTART)"
+    echo "TIME   : $NSTEPS PHYSICAL BACKWARD-EULER STEP(S), GLOBAL dt"
+    echo "FLOW   : FULLY IMPLICIT CBS BE (u,v,w,u*,v*,w*,p)"
+    echo "LINEAR : PETSc FGMRES + PCFIELDSPLIT SCHUR"
+    echo "NONLIN : Picard max=$CBS3D_IMPLICIT_FLOW_MAXIT relax=$CBS3D_IMPLICIT_FLOW_RELAX"
+    echo "TOLS   : U=$CBS3D_IMPLICIT_FLOW_TOL P=$CBS3D_IMPLICIT_FLOW_PRESSURE_TOL DIV=$CBS3D_IMPLICIT_FLOW_DIVERGENCE_TOL"
+    echo "ENERGY : IMPLICIT BE, LOW-ORDER GRAPH-VISCOSITY CHT, Tmin >= 298.15 K"
+    echo "MPI    : 40 RANKS"
+
+    bash "$T/submit_auto.sh" "$DIR" "$CASE" \
+        --sets "40" --time 02:00:00 \
         --par "$PAR" --matprop "$SRC/blanket.matprop"
     ;;
 
