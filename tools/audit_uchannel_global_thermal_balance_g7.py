@@ -50,6 +50,56 @@ def area_vector(p0, p1, p2, opposite):
     return v
 
 
+def nuclear_heating_profile_from_par(path):
+    """Reproduce MeshIO optional nuclear_heating block, without reading
+    or modifying any solver state. Return (origin, normal, profiles).
+    An absent or disabled block contributes no nuclear source.
+    """
+    lines = [
+        line.strip() for line in path.read_text(encoding="utf-8").splitlines()
+        if line.strip() and not line.lstrip().startswith(("#", "!"))
+    ]
+    for i, label in enumerate(lines):
+        if "nuclear_heating" not in label.lower():
+            continue
+        insist(i+1 < len(lines), "missing nuclear_heating data line")
+        controls = lines[i+1].split()
+        insist(len(controls) >= 8, "invalid nuclear_heating header")
+        enabled = int(controls[0])
+        origin = tuple(float(x) for x in controls[1:4])
+        normal = tuple(float(x) for x in controls[4:7])
+        count = int(controls[7])
+        insist(enabled in (0, 1) and count >= 0,
+               "invalid nuclear_heating enabled/count")
+        if enabled == 0:
+            return origin, normal, {}
+        insist(all(math.isfinite(x) for x in origin+normal),
+               "nonfinite nuclear plane or normal")
+        insist(norm(normal) > 0.0, "zero nuclear-heating normal")
+        profiles = {}
+        if count:
+            insist(i+2+count < len(lines), "missing nuclear-heating profile lines")
+            for record in lines[i+3:i+3+count]:
+                tokens = record.split()
+                insist(len(tokens) >= 3, "incomplete nuclear-heating profile")
+                material = int(tokens[0])
+                amplitude, length = float(tokens[1]), float(tokens[2])
+                insist(material not in profiles and amplitude >= 0 and
+                       length > 0 and math.isfinite(amplitude) and
+                       math.isfinite(length), "invalid nuclear-heating profile")
+                profiles[material] = (amplitude, length)
+        return origin, normal, profiles
+    return (0.0, 0.0, 0.0), (0.0, 1.0, 0.0), {}
+
+
+def nuclear_element_source(mid, centroid, origin, normal, profiles):
+    if mid not in profiles:
+        return None
+    amplitude, length = profiles[mid]
+    depth = dot(vec_sub(centroid, origin), normal) / norm(normal)
+    return amplitude * math.exp(-max(0.0, depth) / length)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--output-dir", type=Path, required=True)
@@ -66,6 +116,9 @@ def main():
     insist(old.keys() == current.keys(), "node IDs disagree between steps")
     dt, _ = find_timestep(a.output_dir, a.after)
     materials = read_matprop(a.matprop)
+    nuclear_origin, nuclear_normal, nuclear_profiles = (
+        nuclear_heating_profile_from_par(a.par)
+    )
     inlet = param_after_comment(a.par, "reference and inlet/outlet data", 4)
     qwall = param_after_comment(a.par, "alpha_sf k_ratio source_solid", 3)
     qsolid = param_after_comment(a.par, "alpha_sf k_ratio source_solid", 2)
@@ -84,6 +137,7 @@ def main():
     boundary_bcs = {}                        # exact boundary faces
     total_volume = 0.0
     qvol_total = 0.0
+    qvol_by_material = defaultdict(float)
     divergent_volume = 0.0
 
     for file, piece in pieces:
@@ -123,8 +177,18 @@ def main():
             rhoCp = mat["rho_cp"]
             kappa = mat["k"]
             qvol = fluid_source(a.matprop, mid)
-            vol_source = qvol if mid==0 else (qsolid if qsolid else qvol)
+            centroid = tuple(sum(point[d] for point in p)/4 for d in range(3))
+            qnuclear = nuclear_element_source(
+                mid, centroid, nuclear_origin, nuclear_normal, nuclear_profiles
+            )
+            if qnuclear is not None:
+                insist(qvol == 0.0 and (mid == 0 or qsolid == 0.0),
+                       "nuclear-heating profile conflicts with constant source")
+                vol_source = qnuclear
+            else:
+                vol_source = qvol if mid==0 else (qsolid if qsolid else qvol)
             qvol_total += vol_source*V
+            qvol_by_material[mid] += vol_source*V
             T = [old[gid][1] for gid in ids]
             velocities = [current[gid][2] for gid in ids]
             gradT = tuple(sum(T[j]*grad[j][d] for j in range(4))
@@ -246,6 +310,9 @@ def main():
     print(f"Fixed temperature nodes     : {len(fixed)}")
     print(f"Prescribed Q_532 [W]         : {qheat:+.12e}")
     print(f"Volumetric source [W]       : {qvol_total:+.12e}")
+    print(f"Nuclear profile materials   : {sorted(nuclear_profiles)}")
+    for mid in sorted(qvol_by_material):
+        print(f"  material {mid} volumetric Q : {qvol_by_material[mid]:+.12e} W")
     print(f"Fluid boundary enthalpy [W] : {total_fluid_boundary_enthalpy:+.12e}")
     print(f"  external only [W]         : {fluid_external_enthalpy:+.12e}")
     print(f"  solid interface [W]       : {fluid_interface_enthalpy:+.12e}")
