@@ -32,6 +32,7 @@
 #include "cbs/assembly/EnergyAssembly.hpp"
 
 #include <cmath>
+#include <cstdlib>
 #include <stdexcept>
 #include <string>
 
@@ -366,6 +367,16 @@ namespace cbs
             // used to keep the first CHT port robust and deterministic.
             const Real dt = s.delte(ie);
 
+            // Physical-time backward Euler assembles its own C/dt mass and
+            // deliberately disables the unrelated CBS pseudo-time-dependent
+            // characteristic advection term. The transient solver scopes
+            // delte=0 only while assembling the BE spatial operator; other
+            // CBS paths must retain their strictly positive element dt.
+            if (dt == 0.0 &&
+                std::getenv("CBS3D_IMPLICIT_ENERGY_BE_DT") != nullptr)
+            {
+                return;
+            }
             if (dt <= 0.0 || !std::isfinite(dt))
             {
                 throw std::runtime_error(
