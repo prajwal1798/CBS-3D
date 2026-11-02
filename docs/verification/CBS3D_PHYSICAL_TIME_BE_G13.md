@@ -1,6 +1,6 @@
 # Physical-time implicit thermal CHT: G13a development note
 
-**Status (2026-11-02): IMPLEMENTED ON AUDIT BRANCH, NOT BUILT OR RUN ON SUNBIRD2.** Do not use for production data until measured convergence, energy budgets, time-step and grid sensitivity are accepted. The original executable and U-channel inputs are unchanged.
+**Status (2026-11-02, after Sunbird2 job 29868): G13a BUILT AND EXECUTED; the initial linear-solve and temperature-floor checks PASSED.** This remains experimental and is not validated for production: temporal accuracy, physical energy budgets, CHT interface-flux balance, and grid sensitivity are still open. The original executable and U-channel input files were unchanged.
 
 ## Scope and equations
 
@@ -44,6 +44,19 @@ The PVD/VTU final physical time is **relative to the imported restart temperatur
 | Finer | 0.001 s | 100 | 0.1 s |
 
 Acceptance is limited to: successful clean MPI/PETSc solve for **both** arms, independent matrix-residual tolerance on each BE step (\(<10^{-6}\)), independent owned-node final VTU temperature check (9613 nodes), **every intermediate step** satisfying \(T_\min\ge298.15\) K, and measured maximum temperature difference \(\|T_{\Delta t=0.01}-T_{\Delta t=0.001}\|_\infty\) at equal final physical time. These are *necessary, not sufficient*, for transient accuracy.
+
+### G13a observed result — Sunbird2 job 29868
+
+Candidate executable SHA256: `818bda8922bbed8085e177a0140055cf7edee32307e4f487dbd95edc8a4e2fc6`. Both 2-rank runs completed with exit code 0 on the 9,613-node mesh and reached (t=0.1\,\mathrm{s}).
+
+| Physical timestep | Steps | Max relative BE matrix residual | Temperature range (K) | Total Krylov iterations | Solve time |
+|---:|---:|---:|---:|---:|---:|
+| 0.01 s | 10 | (3.36105\times10^{-10}) | 298.15–398.250525155004 | 40 | 0.03237 s |
+| 0.001 s | 100 | (1.95743\times10^{-11}) | 298.15–398.250701137202 | 200 | 0.08001 s |
+
+Both runs passed the configured (T\geq298.15\,\mathrm{K}) check at every step. The final maximum nodal difference between the two fields was **0.620289122606 K**; the two final maximum temperatures differ by only (1.76\times10^{-4}\,\mathrm{K}). The latter is not a substitute for comparing the full fields.
+
+**Interpretation:** the physical-time BE path builds, executes, advances to the requested horizon, and solves its low-order algebraic systems to tight residual tolerance without violating the chosen temperature floor. The two-level comparison is a sensitivity measurement only; it does **not** establish first-order temporal convergence. No integrated energy budget or fluid-solid interface-flux audit was performed. The G13a script's completion message must therefore not be interpreted as a temporal-accuracy or conservation pass.
 
 ## Subsequent physical/accuracy gates (NOT completed)
 
