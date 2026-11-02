@@ -142,11 +142,14 @@ def read_result(target, lf, ls, kf, ks, q, width):
     if interface_nodes:
         ierr = max(abs(nodes[k] - interface) for k in interface_nodes)
         print("Max interface temperature error: {:.12e} K".format(ierr))
+    interface_flux_median = {}
     for material, conductivity in ((0, kf), (1, ks)):
         if gradients[material]:
             normalflux = [conductivity * grad for grad in gradients[material]]
+            flux_median = float(np.median(normalflux))
+            interface_flux_median[material] = flux_median
             print("Material {} interface-near k*dT/dy median = {:.9e} W/m2".format(
-                material, float(np.median(normalflux))))
+                material, flux_median))
 
     errors = []
     if boundary_ids != {502, 520, 530, 532}:
@@ -163,6 +166,11 @@ def read_result(target, lf, ls, kf, ks, q, width):
         errors.append("Analytical temperature error exceeds 0.5% of Ttop")
     if min(nodes.values()) < -0.005 * top:
         errors.append("Unphysical temperature undershoot for no-negative-source case")
+    for material in (0, 1):
+        if material not in interface_flux_median:
+            errors.append("Missing interface-adjacent tetrahedral gradients for material {}".format(material))
+        elif abs(interface_flux_median[material] - q) > 0.05 * q:
+            errors.append("Median interface heat-flux error exceeds 5% for material {}".format(material))
 
     for problem in errors:
         print("FAIL:", problem)
