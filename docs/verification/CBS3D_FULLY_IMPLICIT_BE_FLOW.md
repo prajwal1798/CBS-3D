@@ -131,7 +131,14 @@ For the blanket test helper:
 
 \`bash jobs/sunbird/templates/blanket.sh fullybe 1\`
 
-Then increase to 5, 20, etc. only after the one-step invariants pass.
+The optional second argument forces a global physical timestep in seconds, for
+example:
+
+\`bash jobs/sunbird/templates/blanket.sh fullybe 5 5e-4\`
+
+Without that argument the baseline communicator-wide stability timestep is used.
+Use the baseline timestep for the first correctness comparison; use fixed
+\(\Delta t\) values later for temporal-order and larger-step studies.
 
 ## Verification gates
 
