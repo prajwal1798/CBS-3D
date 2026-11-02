@@ -17,7 +17,7 @@
 | G1a | Actual Step-4 P1-tet FEM volume and surface terms vs independently evaluated quadrature | All nodal convection, conduction, characteristic, heating, Neumann contributions agree | Added C++ test; not yet executed |
 | G1b | Exact frozen-velocity element linear operator versus finite-difference residual derivative | All 16 entries agree | Added C++ test; not yet executed |
 | G1c | Lumped thermal mass and timestep diagonal | Code vs direct P1-tet reference with positive entries | PASS: Sunbird2 CTest 3/3 (2026-11-02), shared-node and material masks |
-| G2 | Actual inlet/outlet/wall/interface boundary inventory and flux sign | Every applied BC and flux accounted for | Pending |
+| G2 | Actual inlet/outlet/wall/interface boundary inventory and flux sign | Every applied BC and flux accounted for | In progress: fixed read-only VTU parser mismatch (MPI material_id vs serial mat_id); verification against Job 29706 pending |
 | G3 | Solid-only diffusion | Uniform and linear patch tests; analytical heated slab; mesh refinement | Existing slab check available; re-evaluation pending |
 | G4 | Two-material conduction | Shared interface temperature, weak flux continuity, integrated balance | Pending |
 | G5 | Prescribed-flow scalar transport | Uniform T, analytical convection-diffusion and manufactured solutions | Uniform T check added; remaining pending |
@@ -61,3 +61,7 @@ If a test fails, halt and diagnose the specific element contribution. Do not pat
 3. Reproduce independently on a smaller problem.
 4. Make a single targeted change on a separate branch; record before/after results.
 5. Re-run applicable gates, especially serial/MPI and analytical benchmarks.
+
+## G2 audit-tool compatibility
+
+The serial VTU writer outputs CellData `mat_id`; DistributedPost.cpp writes `material_id` for MPI. `tools/audit_cht_temperature_vtu.py` previously accepted only `mat_id` and therefore failed before examining the Job 29706 result. The audit now accepts both and checks conflicting dual fields. Synthetic regression tests: `python3 -m unittest discover -s tests -p test_audit_cht_temperature_vtu.py -v`. No thermal numerical operator was modified. Do not mark G2 passed until the actual boundary-face mapping, power and final field are inspected.
