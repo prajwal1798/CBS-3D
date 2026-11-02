@@ -20,7 +20,7 @@
 | G2 | Actual inlet/outlet/wall/interface boundary inventory and flux sign | Every applied BC and flux accounted for | PASS (structural): Job 29706 has only BC 511/520/530/532, 648 BC532 faces = 0.0006 m^2, 60 W applied, zero duplicate faces, zero MPI duplicate mismatch; full global energy closure remains G7 |
 | G3 | Solid-only diffusion | Uniform/linear patch tests; analytical heated slab; mesh refinement | Analytical slab and serial/MPI PASS, Job 29742; systematic mesh refinement still pending |
 | G4 | Two-material conduction | Shared interface temperature, weak flux continuity, integrated balance | PASS: Job 29749 reached thermal steady state, max analytic error 3.681e-5 K, two-sided flux 999.978/999.984 W/m², serial/MPI 1.11e-15 K, qA=0.016 W |
-| G5 | Prescribed-flow scalar transport | Uniform T, analytical convection-diffusion and manufactured solutions | Uniform T check added; remaining pending |
+| G5 | Prescribed-flow scalar transport | Uniform T, analytical convection-diffusion and manufactured solutions | G5a exact prescribed-velocity 3-grid steady transport CTest + Sunbird2 runner committed; not yet executed; full solver prescribed-flow and transient MMS pending |
 | G6 | Discrete positivity / DMP | Inspect assembled update matrix and *first* bound violation | U-channel AFC-off run: 176 cold nodes, ALL fluid-only, zero interface/solid; root mechanism and first crossing unresolved |
 | G7 | Integrated energy and mass | Sources + boundary heat = advection + storage within stated tolerance | Existing balance script; pending for U-channel |
 | G8 | Serial/MPI and restart parity | Independent solutions agree at declared tolerances | Pending |
@@ -147,3 +147,14 @@ The serial VTU writer outputs CellData `mat_id`; DistributedPost.cpp writes `mat
 - Maximum serial/MPI nodal difference 1.110223024625e-15 K. Runner reports **G4-CONFORMAL-NO-AFC PASS**.
 - Prior Job 29745 stopped at 300k iterations without steady convergence, explaining its premature comparison; no numerical production code change made.
 - Scope: G4 verifies the stationary, stagnant two-layer conformal interface for this mesh and flux. It does not verify transient accuracy, mesh-convergence order, or advection; proceed to G5.
+
+## G5a prescribed-velocity scalar-transport verification (prepared; execution pending)
+
+- C++ source: `tests/PrescribedVelocityThermalTransportVerification.cpp`; target: `cbs3d_g5_prescribed_transport_verification`; CTest: `g5_prescribed_velocity_transport`.
+- Uses **production** `EnergyAssembly::elementOperator` and `EnergyAssembly::assembleStep4Rhs` on conformal structured P1 tetrahedral meshes, **not** a rewritten element operator. Its small test-only dense partial-pivot linear solver computes the steady assembled temperature field.
+- Mathematical PDE: rhoCp U dT/dx = k d²T/dx², `U=(0.3,0,0)`, `rhoCp=1`, `k=0.1`, `x in [0,1]`, `y,z in [0,0.25]`; Dirichlet T(0)=1, T(1)=2, lateral homogeneous Neumann.
+- Exact stationary solution `T(x)=1+expm1(3*x)/expm1(3)` (Peclet 3); test imposed tau=dt/2 using `dt=0.3*h_x/U` to retain CBS characteristic diffusion. The finite-element approximation is expected to approach the physical continuum result under refinement with O(h) streamline-diffusion truncation, no claim of second-order rate.
+- Three meshes `nx=8,16,32`, with `ny=nz=2`. Expected reference max nodal errors based on independent Python matrix check ~0.01615, 0.00899, 0.00474 K; these are **predictions**, not validated C++ outputs. Acceptance: max error reduces by factors >1.3 and >1.4, finest max error <0.0075 K, nodal T remains [1,2], and production residual and uniform-field invariance check < specified tolerances.
+- Test imposes temperature Dirichlet rows algebraically, independent of production BC handling; G2 already addressed BC mapping, but G5a is not an end-to-end `.bco` run and cannot establish the correctness of real production solver time stepping, velocity update or parallel halo.
+- Job runner: `jobs/sunbird/templates/verify_g5_prescribed_transport.slurm`, which compiles only test target with MPI/PETSc disabled, runs CTest verbose and prints `G5A ISOLATED TRANSPORT PASS` only after all checks succeed. This job has **not yet executed** on Sunbird2.
+- If G5a passes, proceed to G5b: imposed flow, first-step CBS explicit positivity and time-step sensitivity (and eventually a fully coupled fluid calculation). If it fails, inspect matrix/RHS and temporal coefficient before altering production numerics.
