@@ -171,7 +171,11 @@ def node_class(materials):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--vtu-dir", type=Path, required=True)
-    parser.add_argument("--dt", type=float, required=True)
+    parser.add_argument(
+        "--dt", type=float, default=1.0,
+        help="Display scale for iteration index; 1.0 gives raw iteration units. "
+             "This is NOT elapsed physical time for pseudo-time runs.",
+    )
     parser.add_argument("--reference-temperature", type=float, default=300.0)
     parser.add_argument(
         "--steps",
@@ -216,7 +220,7 @@ def main():
     print()
     print(
         "{:>10s} {:>10s} {:>13s} {:>13s} {:>10s} {:>10s} {:>10s} {:>10s}".format(
-            "step", "time[s]", "Tmin[K]", "Tmax[K]", "N<Tref", "N<299.9", "N<295", "N<280"
+            "step", "step*scale", "Tmin[K]", "Tmax[K]", "N<Tref", "N<Tref-.1", "N<Tref-5", "N<Tref-20"
         )
     )
 
@@ -330,7 +334,7 @@ def main():
     print()
     print("=== Final-snapshot cold-region classification ===")
     print("Final step                : {}".format(final_step))
-    print("Final nominal time        : {:.9f} s".format(final_step * args.dt))
+    print("Final scaled iteration    : {:.9f} (not physical time)".format(final_step * args.dt))
     print("Cold criterion            : T < {:.9f} K".format(cold_limit))
     print("Cold owned nodes          : {}".format(len(cold_records)))
     print("Material classification   : {}".format(dict(sorted(class_counts.items()))))
