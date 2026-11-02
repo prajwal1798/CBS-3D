@@ -20,7 +20,7 @@
 | G2 | Actual inlet/outlet/wall/interface boundary inventory and flux sign | Every applied BC and flux accounted for | PASS (structural): Job 29706 has only BC 511/520/530/532, 648 BC532 faces = 0.0006 m^2, 60 W applied, zero duplicate faces, zero MPI duplicate mismatch; full global energy closure remains G7 |
 | G3 | Solid-only diffusion | Uniform/linear patch tests; analytical heated slab; mesh refinement | Analytical slab and serial/MPI PASS, Job 29742; systematic mesh refinement still pending |
 | G4 | Two-material conduction | Shared interface temperature, weak flux continuity, integrated balance | PASS: Job 29749 reached thermal steady state, max analytic error 3.681e-5 K, two-sided flux 999.978/999.984 W/m², serial/MPI 1.11e-15 K, qA=0.016 W |
-| G5 | Prescribed-flow scalar transport | Uniform T, analytical convection-diffusion and manufactured solutions | G5a exact prescribed-velocity 3-grid steady transport CTest + Sunbird2 runner committed; not yet executed; full solver prescribed-flow and transient MMS pending |
+| G5 | Prescribed-flow scalar transport | Uniform T, analytical convection-diffusion and manufactured solutions | G5a PASS: Job 29754, 3-grid Pe=3 exact steady profile and bounds; G5b explicit-update diagnostic committed but not executed; full coupled/transient MMS pending |
 | G6 | Discrete positivity / DMP | Inspect assembled update matrix and *first* bound violation | U-channel AFC-off run: 176 cold nodes, ALL fluid-only, zero interface/solid; root mechanism and first crossing unresolved |
 | G7 | Integrated energy and mass | Sources + boundary heat = advection + storage within stated tolerance | Existing balance script; pending for U-channel |
 | G8 | Serial/MPI and restart parity | Independent solutions agree at declared tolerances | Pending |
@@ -158,3 +158,21 @@ The serial VTU writer outputs CellData `mat_id`; DistributedPost.cpp writes `mat
 - Test imposes temperature Dirichlet rows algebraically, independent of production BC handling; G2 already addressed BC mapping, but G5a is not an end-to-end `.bco` run and cannot establish the correctness of real production solver time stepping, velocity update or parallel halo.
 - Job runner: `jobs/sunbird/templates/verify_g5_prescribed_transport.slurm`, which compiles only test target with MPI/PETSc disabled, runs CTest verbose and prints `G5A ISOLATED TRANSPORT PASS` only after all checks succeed. This job has **not yet executed** on Sunbird2.
 - If G5a passes, proceed to G5b: imposed flow, first-step CBS explicit positivity and time-step sensitivity (and eventually a fully coupled fluid calculation). If it fails, inspect matrix/RHS and temporal coefficient before altering production numerics.
+
+## G5a observed verification results (Job 29754, 2026-11-02)
+
+- Slurm COMPLETED 0:0 in 4 seconds. Source checkout 11f1b530a1815ddc983aada448cd61dd29fa33f2. GCC 13.5.0, MPI=OFF, PETSc=OFF.
+- Source tested includes actual `EnergyAssembly::elementOperator` and `assembleStep4Rhs` with imposed constant `U=(0.3,0,0)`, Pe=3, x in [0,1], Dirichlet temperature [1,2], insulating lateral surfaces, uniform rhocp=1 and conductivity k=0.1.
+- Measured maximum analytic nodal errors for nx 8/16/32: 0.0161499349760 K, 0.00898798833336 K, 0.00474007524202 K; error ratios 1.79683532922 and 1.89616997082.
+- Maximum steady residual across three grids <= 1.05926552252e-16, uniform-state residual 0, Tmin=1 and Tmax=2. All G5a CTest assertions PASS; job printed `G5A ISOLATED TRANSPORT PASS`.
+- Scope: the exact steady operator, not the explicit iterative update, was exercised; it does not show DMP for arbitrary fields or for the U-channel velocity field.
+
+## G5b first explicit-update positivity audit (prepared; execution pending)
+
+- C++: `tests/G5ExplicitThermalUpdateAudit.cpp`; CTest `g5_explicit_update_monotonicity_audit`; runner `jobs/sunbird/templates/verify_g5_explicit_update.slurm`.
+- Calls existing production `TimeStep::updateLhsDiagonal`, `EnergyAssembly::elementOperator` and `EnergyAssembly::assembleStep4Rhs`. All test mesh, material data and prescribed velocities are isolated, and neither solver numerical code nor production binaries are changed.
+- Multitet P1 fluid meshes nx=8/16 with 2 x 2 transverse hexahedral subdivisions (6 tetrahedra per subdivision), U=0.3, rhocp=1, k=0.1 or 0.001 -> Pe_L=3 or 300. Courant_x=0.1,0.3,0.6, using dt=Courant/(nx U). Uniform reference temperature Tref=298.15 K.
+- At each combination, independently checks production reciprocal lumped heat capacity/time diagonal against sum_e rhoCp V/(4dt), verifies uniform-temperature invariance for nonzero divergence-free velocity, assembles the linearized explicit one-step matrix B=I+diag(elcoe2p)*dR/dT, and counts negative offdiagonal entries among unconstrained interior nodes.
+- If a negative B_ij exists, use a bounded initial temperature hat T_j=Tref+25 K, all other nodes Tref. The actual production residual and explicit update must reproduce the matrix-predicted first-step undershoot to 1e-9 K. This is a **discrete maximum-principle (DMP) counterexample** for the tested unlimited stencil, but is NOT a proof of long-time instability or of identical causation in U-channel Job 29706.
+- Test PASS signifies mass/RHS/matrix/update consistency only; observed negative couplings or overshoots are reported diagnostics, not grounds to mark the numerical test executable as failing. Positivity preservation is assessed separately under G6.
+- If G5b exhibits negative offdiagonals, follow with input-specific Job 29706 first-step stencil/mesh and timestep diagnostics; do not directly change CBS stabilization without identifying their origin.
