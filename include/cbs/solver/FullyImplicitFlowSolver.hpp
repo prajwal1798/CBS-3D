@@ -37,7 +37,7 @@ namespace cbs
             Real relative_pressure_change = 0.0;
             Real divergence_rms = 0.0;
             Real maximum_velocity = 0.0;
-            Real maximum_velocity_change = 0.0;
+            Real maximum_velocity_correction = 0.0;
             Real linear_relative_residual = 0.0;
             double seconds = 0.0;
         };
