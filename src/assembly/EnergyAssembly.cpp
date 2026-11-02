@@ -372,8 +372,11 @@ namespace cbs
             // characteristic advection term. The transient solver scopes
             // delte=0 only while assembling the BE spatial operator; other
             // CBS paths must retain their strictly positive element dt.
-            if (dt == 0.0 &&
-                std::getenv("CBS3D_IMPLICIT_ENERGY_BE_DT") != nullptr)
+            const bool physical_be =
+                std::getenv("CBS3D_IMPLICIT_ENERGY_BE_DT") != nullptr ||
+                std::getenv("CBS3D_IMPLICIT_TRANSIENT_ENERGY") != nullptr;
+
+            if (dt == 0.0 && physical_be)
             {
                 return;
             }
