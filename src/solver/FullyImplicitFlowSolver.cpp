@@ -1,28 +1,24 @@
 //=============================================================================
 // CBS3D++_SI
 //
-// Fully implicit steady CBS flow solve.
+// Monolithic CBS flow solve for steady fixed points and physical backward Euler.
 //
-// The original semi-implicit CBS iteration is
-//
-//   M_dt (u* - u) = r_m(u)
-//   A_p p          = B u*
-//   M_dt (u - u*) + G p = 0
-//
-// where A_p = sum_e tau_e H_e and M_dt is the lumped momentum mass divided by
-// the same local CBS pseudo-time. Instead of marching these equations millions
-// of times, this solver treats u, u* and p as simultaneous unknowns. Picard
-// linearisation freezes the nonlinear convection/stabilisation coefficients on
-// the current corrected velocity. Every Picard iteration therefore solves the
-// exact linearised CBS Step-1/2/3 fixed-point equations in one PETSc system.
-//
-// Per active fluid node the unknown ordering is
+// Unknown ordering per active fluid node:
 //
 //   [u, v, w, u*, v*, w*, p].
 //
-// Temperature is intentionally not included: for the present constant-property
-// forced-flow blanket problem there is no T -> (u,p) feedback. The converged
-// flow is followed by the existing implicit steady CHT solve.
+// The solver retains the production P1/TET4 CBS Step-1/2/3 discretisation.
+// Picard iteration freezes the advecting velocity in the nonlinear Step-1
+// fluxes. In physical-time mode the old accepted velocity u^n appears only in
+// the BE mass RHS and in the existing Step-2 boundary flux convention:
+//
+//   A_u(w^k) u^(n+1) + M/dt u*^(n+1) = M/dt u^n
+//   dt H p^(n+1) - B_vol u*^(n+1)     = -B_bnd u^n
+//   M/dt (u^(n+1)-u*^(n+1)) + Gp      = 0.
+//
+// Temperature is not part of this PETSc block because the present blanket case
+// has constant properties and no T -> flow feedback. The transient driver
+// advances implicit BE energy after the converged flow step at the same dt.
 //=============================================================================
 
 #include "cbs/solver/FullyImplicitFlowSolver.hpp"
