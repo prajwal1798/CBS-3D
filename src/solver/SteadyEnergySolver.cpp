@@ -206,6 +206,36 @@ namespace cbs
                 "CBS3D_STEADY_ENERGY_LOW_ORDER_ONLY=1. "
                 "High-order bounded transient AFC has NOT been implemented.");
         }
+
+        // EnergyAssembly's characteristic streamline diffusion uses the
+        // CBS pseudo-time delte_e in tau_e = 0.5*delte_e*rhoCp*V.
+        // That pseudo-time has NO physical interpretation in BE. Remove
+        // that contribution *only during BE energy assembly*: the low-order
+        // graph viscosity remains the chosen spatial stabilization.
+        // Restore the original element pseudo-timesteps on every exit.
+        struct PhysicalBEOperatorGuard
+        {
+            CBSStateSI& state;
+            bool active;
+            Array1D<Real> original;
+            PhysicalBEOperatorGuard(CBSStateSI& s, bool enabled)
+                : state(s), active(enabled)
+            {
+                if (active)
+                {
+                    original = state.delte;
+                    state.delte.fill(0.0);
+                }
+            }
+            ~PhysicalBEOperatorGuard()
+            {
+                if (active)
+                {
+                    state.delte = original;
+                }
+            }
+        };
+        PhysicalBEOperatorGuard physical_be_operator(s, transient_be);
         if (low_order_only && !afc)
         {
             throw std::runtime_error(
