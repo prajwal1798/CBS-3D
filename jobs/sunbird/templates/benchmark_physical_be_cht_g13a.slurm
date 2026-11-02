@@ -77,7 +77,6 @@ export CBS3D_TEMPERATURE_AFC=1
 export CBS3D_STEADY_ENERGY=1
 export CBS3D_STEADY_ENERGY_LOW_ORDER_BOOTSTRAP=0
 export CBS3D_STEADY_ENERGY_LOW_ORDER_ONLY=1
-export CBS3D_IMPLICIT_ENERGY_BE_STEPS=10
 export CBS3D_RESTART=1
 export CBS3D_RESTART_FORMAT=legacy_vtu
 export CBS3D_RESTART_ROOT="$INPUT"
@@ -95,18 +94,19 @@ export CBS3D_STEADY_ENERGY_RELAX=0.5
 export CBS3D_AFC_LOG_EVERY=10000
 export PETSC_OPTIONS="-energy_ksp_type gmres -energy_pc_type asm -energy_sub_pc_type ilu -energy_sub_pc_factor_levels 1 -energy_ksp_rtol 1e-10 -energy_ksp_max_it 4000"
 
-arms=("be_dt_001 0.01 0" "be_dt_0001 0.001 0")
+arms=("be_dt001_n10 0.01 10" "be_dt0001_n100 0.001 100")
 success=0
 executed=0
 for arm in "${arms[@]}"; do
-    read -r label gamma anderson <<< "$arm"
+    read -r label physical_dt physical_steps <<< "$arm"
     executed=$((executed + 1))
     export CBS3D_STEADY_ENERGY_PSEUDOTIME_SHIFT=0
-    export CBS3D_IMPLICIT_ENERGY_BE_DT="$gamma"
-    export CBS3D_STEADY_ENERGY_ANDERSON_M="$anderson"
+    export CBS3D_IMPLICIT_ENERGY_BE_DT="$physical_dt"
+    export CBS3D_IMPLICIT_ENERGY_BE_STEPS="$physical_steps"
+    export CBS3D_STEADY_ENERGY_ANDERSON_M=0
     mkdir -p "$WORK/$label"
     export SLURM_SUBMIT_DIR="$WORK/$label"
-    echo "===== G13a $label dt=$gamma seconds, 10 backward-Euler steps ====="
+    echo "===== G13a $label dt=$physical_dt seconds, $physical_steps backward-Euler steps; total physical time 0.1s ====="
 
     RUN="$WORK/$label/run_uchannel_${SLURM_JOB_ID:-manual}"
     if bash "$WORK/launcher.sh" "$PART" uchannel </dev/null; then
@@ -147,5 +147,27 @@ done
 echo "G13a arms executed: $executed / ${#arms[@]}"
 echo "G13a converged bounded arms: $success / ${#arms[@]}"
 [[ "$executed" == "${#arms[@]}" ]] || exit 2
-[[ "$success" -gt 0 ]] || { echo "G13A PHYSICAL-TIME BE FAILED"; exit 1; }
-echo "G13A EXPERIMENTAL PHYSICAL-TIME LOW-ORDER BE CHT PASS (NOT HIGH-ORDER AFC)"
+[[ "$success" -eq "${#arms[@]}" ]] || { echo "G13A PHYSICAL-TIME BE: at least one arm FAILED"; exit 1; }
+# Independent time-refinement comparison on exactly the same 9613 owned nodes.
+python3 - "$CBS3D_CODE/tools" "$WORK" "${SLURM_JOB_ID:-manual}" <<'PY'
+import sys
+from pathlib import Path
+sys.path.insert(0,sys.argv[1])
+from verify_uchannel_partition_parity_g8b import owned_fields
+work=Path(sys.argv[2])
+job=sys.argv[3]
+def read(label):
+    p=work/label/("run_uchannel_"+job)/"output"/"uchannel"
+    d=owned_fields(p,50001,2)
+    assert len(d)==9613
+    return d
+coarse=read("be_dt001_n10")
+fine=read("be_dt0001_n100")
+assert coarse.keys()==fine.keys()
+delta=max(abs(coarse[i]["temperature"][0]-fine[i]["temperature"][0])
+          for i in coarse)
+print("G13a physical dt-refinement: same final t=0.1 s,"
+      " max nodal |T(dt=0.01)-T(dt=0.001)|=%.12g K" % delta)
+assert delta>=0.0 and delta<1e10
+PY
+echo "G13A EXPERIMENTAL PHYSICAL-TIME LOW-ORDER BE CHT PASSED TWO DT TESTS (NOT HIGH-ORDER AFC)"
