@@ -114,7 +114,7 @@ for arm in "${arms[@]}"; do
     if bash "$WORK/launcher.sh" "$PART" uchannel </dev/null; then
         echo "G13a $label physical BE stepper returned success"
         if python3 - "$CBS3D_CODE/tools" "$RUN/output/uchannel" <<'PY'
-import sys
+import sys, math
 from pathlib import Path
 sys.path.insert(0,sys.argv[1])
 from verify_uchannel_partition_parity_g8b import owned_fields
@@ -168,8 +168,8 @@ fine=read("be_dt0001_n100")
 assert coarse.keys()==fine.keys()
 delta=max(abs(coarse[i]["temperature"][0]-fine[i]["temperature"][0])
           for i in coarse)
-print("G13a physical dt-refinement: same final t=0.1 s,"
+print("G13a physical dt-sensitivity (NOT a convergence test): same final t=0.1 s,"
       " max nodal |T(dt=0.01)-T(dt=0.001)|=%.12g K" % delta)
-assert delta>=0.0 and delta<1e10
+assert math.isfinite(delta)
 PY
-echo "G13A EXPERIMENTAL PHYSICAL-TIME LOW-ORDER BE CHT PASSED TWO DT TESTS (NOT HIGH-ORDER AFC)"
+echo "G13A LINEAR-SOLVE AND TEMPERATURE-FLOOR CHECKS PASSED; TEMPORAL ACCURACY AND ENERGY CONSERVATION NOT ASSESSED"
