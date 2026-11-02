@@ -1181,6 +1181,8 @@ namespace cbs
         ThermalBoundaryState thermal_boundary(s_.cfg.npoin);
         PetscPersistentDistributedPressureSystem pressure_system;
         DistributedSymmetryProjector symmetry_projector;
+        const bool fully_implicit_flow =
+            environment_flag_enabled("CBS3D_FULLY_IMPLICIT_FLOW");
 
         {
             const ScopedStdoutSilence setup_stdout(
@@ -1268,12 +1270,22 @@ namespace cbs
                 s_,
                 first_global_iteration);
 
-            pressure_system.initialise(s_);
+            if (!fully_implicit_flow)
+            {
+                pressure_system.initialise(s_);
 
-            // initialise() assembled the operator from the field established
-            // immediately above, so that initial refresh has already been
-            // consumed and must not trigger a redundant AMG rebuild at iter 1.
-            s_.lts_operator_stale = false;
+                // initialise() assembled the operator from the field established
+                // immediately above, so that initial refresh has already been
+                // consumed and must not trigger a redundant AMG rebuild at iter 1.
+                s_.lts_operator_stale = false;
+            }
+            else
+            {
+                // The monolithic u-u*-p path owns its PETSc matrix and Schur
+                // preconditioner. Do not keep the legacy pressure AMG hierarchy
+                // resident at the same time on the production blanket mesh.
+                s_.lts_operator_stale = false;
+            }
         }
 
         double local_setup_seconds = MPI_Wtime() - setup_start;
@@ -1379,7 +1391,7 @@ namespace cbs
         // PETSc block system. With constant properties/no buoyancy, temperature
         // is one-way coupled, so solve it once after the converged flow.
         // ================================
-        if (environment_flag_enabled("CBS3D_FULLY_IMPLICIT_FLOW"))
+        if (fully_implicit_flow)
         {
             if (s_.cfg.transient_on > 0)
             {
