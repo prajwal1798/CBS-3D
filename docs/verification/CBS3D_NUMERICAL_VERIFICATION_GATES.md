@@ -16,7 +16,7 @@
 | G0 | Baseline provenance: commit, binary SHA256, mesh, boundary data, materials, timestep flags | Reproducible case snapshot | Commit and Job 29706 identified; full case archive pending |
 | G1a | Actual Step-4 P1-tet FEM volume and surface terms vs independently evaluated quadrature | All nodal convection, conduction, characteristic, heating, Neumann contributions agree | Added C++ test; not yet executed |
 | G1b | Exact frozen-velocity element linear operator versus finite-difference residual derivative | All 16 entries agree | Added C++ test; not yet executed |
-| G1c | Lumped thermal mass and timestep diagonal | Code vs direct P1-tet reference with positive entries | New two-material interface test added; execution pending |
+| G1c | Lumped thermal mass and timestep diagonal | Code vs direct P1-tet reference with positive entries | PASS: Sunbird2 CTest 3/3 (2026-11-02), shared-node and material masks |
 | G2 | Actual inlet/outlet/wall/interface boundary inventory and flux sign | Every applied BC and flux accounted for | Pending |
 | G3 | Solid-only diffusion | Uniform and linear patch tests; analytical heated slab; mesh refinement | Existing slab check available; re-evaluation pending |
 | G4 | Two-material conduction | Shared interface temperature, weak flux continuity, integrated balance | Pending |
@@ -50,7 +50,7 @@ cmake --build build/verification --target cbs3d_step4_operator_verification cbs3
 (cd build/verification && ctest --output-on-failure -R '^step4_')
 ~~~
 
-Expected: three CTests pass. G1a/G1b already passed on Sunbird2 (2/2 tests, 2026-11-02). G1c is newly added and has not yet been executed; it checks the production inverse thermal diagonal and fluid-only momentum/pressure masks at a shared solid-fluid node.
+Expected: three CTests pass. G1a/G1b already passed on Sunbird2 (2/2 tests, 2026-11-02). G1c PASSED on Sunbird2 on 2026-11-02 (3/3 CTests). It checks the production inverse thermal diagonal and fluid-only momentum/pressure masks at a shared solid-fluid node. Full interface heat-flux continuity remains G4.
 
 If a test fails, halt and diagnose the specific element contribution. Do not patch production code before an independent reproduction.
 
