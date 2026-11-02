@@ -129,3 +129,9 @@ The serial VTU writer outputs CellData `mat_id`; DistributedPost.cpp writes `mat
 - Trial estimate from relative residual 299,600 to 300,000 gives a characteristic decay of order 160k iterations; this is a local fit, NOT an extrapolation guarantee.
 - The exact binary/matprop/mesh and CFL settings remain unchanged. Separate case input cases/two_layer_conduction/cht2_convergence.par raises only ntime to 2,500,000, retains 1e-10 temperature convergence threshold. G4 runner now points to that .par and requires explicit 'steady-state convergence reached' in BOTH solver logs before interpreting numerical temperature/flux accuracy.
 - No changes to fluid/solid FEM, interface coupling, Neumann integration, pressure equation, or AFC implementation. G4 not passed; require rerun results.
+
+## G4 rerun intermediate evidence — Job 29749 (2026-11-02)
+
+- User-reported serial stage has terminated with **steady-state convergence reached**, final RelT=9.999981e-11 (target 1e-10). The analytic output error and interface flux check are not yet available in the main G4 summary.
+- Four-rank MPI stage still running at iteration 1,535,000/2,500,000; RelT=3.57e-9, Tmax=1.75486 K, Umax=0, T_min=0. The exact stationary top temperature is 1.756172084 K: top-temperature difference at this intermediate step is ~0.001312 K (0.0747%).
+- MPI residual is decaying consistently; no claim of complete G4 PASS until MPI reaches thermal steady convergence and both numerical fields satisfy nodal temperature and two-sided interface heat-flux checks.
