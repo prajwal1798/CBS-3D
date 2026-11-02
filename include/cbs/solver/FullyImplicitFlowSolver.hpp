@@ -5,16 +5,17 @@
 //
 // Fully implicit steady incompressible flow solver.
 //
-// The nonlinear Navier-Stokes problem is linearised by Picard/Oseen iteration.
-// Each nonlinear iteration solves velocity and kinematic pressure in one
-// distributed PETSc block system:
+// The nonlinear CBS fixed point is linearised by Picard/Oseen iteration.
+// Predictor velocity is retained as an auxiliary unknown so the monolithic
+// solve reproduces the existing Step-1/Step-2/Step-3 algebra:
 //
-//     [ A_Oseen(u^k)   G ] [ u^(k+1) ] = [ 0 ]
-//     [   -D         tau H] [ p^(k+1) ]   [ 0 ]
+//     M_dt (u* - u) = r_m(u)
+//     tau H p        = B u*
+//     M_dt (u - u*) + G p = 0
 //
-// The pressure-Laplacian block tau H is the existing CBS equal-order pressure
-// stabilisation; this deliberately retains the solver's P1/P1 spatial
-// formulation rather than introducing an unstabilised saddle-point method.
+// Per fluid node the unknowns are [u,v,w,u*,v*,w*,p]. The pressure Laplacian
+// tau H is the existing CBS equal-order stabilisation; no unstabilised P1/P1
+// saddle-point discretisation is introduced.
 //
 // Strong velocity and pressure conditions are imposed algebraically. PETSc
 // FGMRES + PCFIELDSPLIT/Schur is the default linear solution strategy.
