@@ -199,6 +199,16 @@ namespace cbs
                 "steps must be an integer in [1,100000]");
         }
         const Int be_steps = static_cast<Int>(be_steps_input);
+        const bool be_check_floor =
+            std::getenv("CBS3D_IMPLICIT_ENERGY_BE_MIN_TEMPERATURE") != nullptr;
+        const Real be_floor = be_check_floor
+            ? env_real("CBS3D_IMPLICIT_ENERGY_BE_MIN_TEMPERATURE", 0.0)
+            : 0.0;
+        if (be_check_floor && !std::isfinite(be_floor))
+        {
+            throw std::runtime_error(
+                "Implicit BE minimum temperature check must be finite");
+        }
         if (transient_be && !low_order_only)
         {
             throw std::runtime_error(
@@ -668,6 +678,15 @@ namespace cbs
                 result.t_min = -global_max(-local_minimum);
                 result.t_max = global_max(local_maximum);
                 last_storage_rate = global_sum(local_storage_rate);
+                if (be_check_floor &&
+                    result.t_min < be_floor -
+                        1.0e-10 * std::max(1.0, std::abs(be_floor)))
+                {
+                    throw std::runtime_error(
+                        "Implicit BE temperature fell below the requested "
+                        "physical verification floor at step " +
+                        std::to_string(step));
+                }
                 if (s.mpi_rank == 0 &&
                     (step <= 3 || step == be_steps || step % 10 == 0))
                 {
