@@ -792,19 +792,40 @@ namespace cbs
                     }
                 }
 
-                PetscInt rows[28] = {};
-                PetscInt cols[28] = {};
-                PetscScalar values[28 * 28] = {};
+                PetscInt corrected_rows[12] = {};
+                PetscInt corrected_cols[12] = {};
+                PetscInt predictor_rows[12] = {};
+                PetscInt predictor_cols[12] = {};
+                PetscInt pressure_rows[4] = {};
+                PetscInt pressure_cols[4] = {};
+
+                PetscScalar a_uu[12 * 12] = {};
+                PetscScalar b_volume[4 * 12] = {};
+                PetscScalar h_pressure[4 * 4] = {};
+                PetscScalar g_pressure[12 * 4] = {};
+                PetscScalar b_boundary[4 * 12] = {};
+                bool has_step2_boundary_flux = false;
 
                 for (Int a = 1; a <= 4; ++a)
                 {
                     const PetscInt base =
                         static_cast<PetscInt>(
                             base_dof(s.intma(a, ie)));
-                    for (Int q = 0; q < dofs_per_active_node; ++q)
+
+                    pressure_rows[a - 1] = base + pressure_offset;
+                    pressure_cols[a - 1] = base + pressure_offset;
+
+                    for (Int i = 1; i <= 3; ++i)
                     {
-                        rows[(a - 1) * 7 + q] = base + q;
-                        cols[(a - 1) * 7 + q] = base + q;
+                        const Int q = (a - 1) * 3 + (i - 1);
+                        corrected_rows[q] =
+                            base + corrected_offset + (i - 1);
+                        corrected_cols[q] =
+                            base + corrected_offset + (i - 1);
+                        predictor_rows[q] =
+                            base + predictor_offset + (i - 1);
+                        predictor_cols[q] =
+                            base + predictor_offset + (i - 1);
                     }
                 }
 
@@ -813,37 +834,36 @@ namespace cbs
                     for (Int bnode = 1; bnode <= 4; ++bnode)
                     {
                         Real convection = 0.0;
-                        for (Int c = 1; c <= 4; ++c)
+                        for (Int cnode = 1; cnode <= 4; ++cnode)
                         {
                             convection +=
-                                tetra_mass(volume, a, c) *
-                                g[bnode][c];
+                                tetra_mass(volume, a, cnode) *
+                                g[bnode][cnode];
                         }
 
                         Real characteristic = 0.0;
-                        for (Int c = 1; c <= 4; ++c)
+                        for (Int cnode = 1; cnode <= 4; ++cnode)
                         {
-                            for (Int d = 1; d <= 4; ++d)
+                            for (Int dnode = 1; dnode <= 4; ++dnode)
                             {
                                 characteristic +=
-                                    g[a][c] *
-                                    tetra_mass(volume, c, d) *
-                                    g[bnode][d];
+                                    g[a][cnode] *
+                                    tetra_mass(volume, cnode, dnode) *
+                                    g[bnode][dnode];
                             }
                         }
                         characteristic *= 0.5 * tau;
 
-                        // Step 1 equation:
-                        // A_u(w) u + M_dt(u* - u) = 0.
+                        // Step 1: A_u(w) u + M_dt(u* - u) = 0.
                         for (Int i = 1; i <= 3; ++i)
                         {
                             const Int row =
-                                (a - 1) * 7 +
-                                corrected_offset + (i - 1);
+                                (a - 1) * 3 + (i - 1);
 
                             for (Int k = 1; k <= 3; ++k)
                             {
                                 Real diffusion = 0.0;
+
                                 for (Int j = 1; j <= 3; ++j)
                                 {
                                     if (i == k)
@@ -857,40 +877,33 @@ namespace cbs
                                 diffusion +=
                                     grad(s, ie, k, a) *
                                     grad(s, ie, i, bnode);
+
                                 diffusion -=
                                     (2.0 / 3.0) *
                                     grad(s, ie, i, a) *
                                     grad(s, ie, k, bnode);
+
                                 diffusion *= nu * volume;
 
                                 const Int col =
-                                    (bnode - 1) * 7 +
-                                    corrected_offset + (k - 1);
+                                    (bnode - 1) * 3 + (k - 1);
 
-                                values[row * 28 + col] +=
+                                a_uu[row * 12 + col] +=
                                     static_cast<PetscScalar>(
                                         diffusion +
                                         (i == k
-                                            ? convection +
-                                              characteristic
+                                            ? convection + characteristic
                                             : 0.0));
                             }
                         }
 
-                        // Step 2 equation:
-                        // tau H p - B u* = 0.
-                        const Int pressure_row =
-                            (a - 1) * 7 + pressure_offset;
-
+                        // Step 2: tau H p - B_volume u* = ...
                         for (Int i = 1; i <= 3; ++i)
                         {
-                            const Int predictor_col =
-                                (bnode - 1) * 7 +
-                                predictor_offset + (i - 1);
+                            const Int col =
+                                (bnode - 1) * 3 + (i - 1);
 
-                            values[
-                                pressure_row * 28 +
-                                predictor_col] -=
+                            b_volume[(a - 1) * 12 + col] -=
                                 static_cast<PetscScalar>(
                                     volume * 0.25 *
                                     grad(s, ie, i, a));
@@ -904,25 +917,17 @@ namespace cbs
                                 grad(s, ie, j, bnode);
                         }
 
-                        const Int pressure_col =
-                            (bnode - 1) * 7 + pressure_offset;
-                        values[
-                            pressure_row * 28 +
-                            pressure_col] +=
+                        h_pressure[(a - 1) * 4 + (bnode - 1)] +=
                             static_cast<PetscScalar>(
                                 tau * volume * h_ab);
 
-                        // Step 3 equation pressure gradient:
-                        // M_dt(u-u*) + G p = 0.
+                        // Step 3: M_dt(u-u*) + Gp = 0.
                         for (Int i = 1; i <= 3; ++i)
                         {
-                            const Int correction_row =
-                                (a - 1) * 7 +
-                                predictor_offset + (i - 1);
+                            const Int row =
+                                (a - 1) * 3 + (i - 1);
 
-                            values[
-                                correction_row * 28 +
-                                pressure_col] +=
+                            g_pressure[row * 4 + (bnode - 1)] +=
                                 static_cast<PetscScalar>(
                                     volume * 0.25 *
                                     grad(s, ie, i, bnode));
@@ -947,8 +952,7 @@ namespace cbs
                             for (Int i = 1; i <= 3; ++i)
                             {
                                 const Int row =
-                                    (a - 1) * 7 +
-                                    corrected_offset + (i - 1);
+                                    (a - 1) * 3 + (i - 1);
 
                                 for (Int k = 1; k <= 3; ++k)
                                 {
@@ -976,26 +980,26 @@ namespace cbs
                                     traction *= nu / 3.0;
 
                                     const Int col =
-                                        (bnode - 1) * 7 +
-                                        corrected_offset + (k - 1);
+                                        (bnode - 1) * 3 + (k - 1);
 
-                                    // r_m contains + traction; A_u=-r_m.
-                                    values[row * 28 + col] -=
+                                    // r_m has +traction, while A_u=-r_m.
+                                    a_uu[row * 12 + col] -=
                                         static_cast<PetscScalar>(traction);
                                 }
                             }
                         }
                     }
 
-                    // Production Step-2 weak divergence boundary term:
-                    // B u* = volume term - boundary flux.
+                    // Production Step 2 volume divergence uses u*, while its
+                    // boundary flux uses unkn1. At the steady fixed point
+                    // unkn1 == corrected u, hence this block couples to u.
                     if (s.fedge(face, ie) == 1)
                     {
+                        has_step2_boundary_flux = true;
+
                         for (Int fa = 1; fa <= 3; ++fa)
                         {
                             const Int a = s.ippn1(face, fa);
-                            const Int pressure_row =
-                                (a - 1) * 7 + pressure_offset;
 
                             for (Int fb = 1; fb <= 3; ++fb)
                             {
@@ -1006,22 +1010,14 @@ namespace cbs
                                     s.cfg.fcon[2] *
                                     (a == bnode ? 2.0 : 1.0);
 
-                                // Production Step 2 is deliberately
-                                // mixed at the boundary: its volume divergence
-                                // uses the predictor u*, while the face flux
-                                // uses unkn1 (the previous corrected velocity).
-                                // At the steady fixed point unkn1 == u, so the
-                                // monolithic equation must couple this boundary
-                                // term to corrected u, not to u*.
                                 for (Int i = 1; i <= 3; ++i)
                                 {
-                                    const Int corrected_col =
-                                        (bnode - 1) * 7 +
-                                        corrected_offset + (i - 1);
+                                    const Int col =
+                                        (bnode - 1) * 3 + (i - 1);
 
-                                    values[
-                                        pressure_row * 28 +
-                                        corrected_col] +=
+                                    // tauHp - B u*=0 and B contains
+                                    // -boundary_flux, hence +flux here.
+                                    b_boundary[(a - 1) * 12 + col] +=
                                         static_cast<PetscScalar>(
                                             face_mass_factor *
                                             s.annxf(i, face, ie));
@@ -1031,9 +1027,41 @@ namespace cbs
                     }
                 }
 
+                // Insert only the mathematical nonzero blocks. Avoiding the
+                // former dense 28x28 structural insertion is essential on the
+                // multi-million-tetrahedron production blanket.
                 check_petsc(MatSetValues(
-                    A, 28, rows, 28, cols, values, ADD_VALUES),
-                    "MatSetValues(fully implicit CBS element)");
+                    A, 12, corrected_rows,
+                    12, corrected_cols,
+                    a_uu, ADD_VALUES),
+                    "MatSetValues(flow Auu)");
+
+                check_petsc(MatSetValues(
+                    A, 4, pressure_rows,
+                    12, predictor_cols,
+                    b_volume, ADD_VALUES),
+                    "MatSetValues(flow Bvolume)");
+
+                check_petsc(MatSetValues(
+                    A, 4, pressure_rows,
+                    4, pressure_cols,
+                    h_pressure, ADD_VALUES),
+                    "MatSetValues(flow Hpressure)");
+
+                check_petsc(MatSetValues(
+                    A, 12, predictor_rows,
+                    4, pressure_cols,
+                    g_pressure, ADD_VALUES),
+                    "MatSetValues(flow Gpressure)");
+
+                if (has_step2_boundary_flux)
+                {
+                    check_petsc(MatSetValues(
+                        A, 4, pressure_rows,
+                        12, corrected_cols,
+                        b_boundary, ADD_VALUES),
+                        "MatSetValues(flow Bboundary)");
+                }
             }
 
             // Add the assembled lumped M_dt coupling exactly once per owned
