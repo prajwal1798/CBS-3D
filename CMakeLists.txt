@@ -54,6 +54,7 @@ set(CBS3D_CORE_SOURCES
     src/solver/SolverDistributedStep2.cpp
     src/solver/SolverDistributedStep3.cpp
     src/solver/SteadyEnergySolver.cpp
+    src/solver/FullyImplicitFlowSolver.cpp
     src/solver/SolverDistributedLoop.cpp
     src/solver/SolverDistributedProductionLoopRestartAfc.cpp
     src/solver/SolverDistributedWallAudit.cpp
