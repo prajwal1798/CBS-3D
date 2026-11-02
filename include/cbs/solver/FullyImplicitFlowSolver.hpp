@@ -1,24 +1,26 @@
-#pragma once
-
 //=============================================================================
 // CBS3D++_SI
 //
-// Fully implicit steady incompressible flow solver.
+// Monolithic CBS flow solver for both:
+//   1. steady pseudo-time fixed points, and
+//   2. one physical backward-Euler timestep.
 //
-// The nonlinear CBS fixed point is linearised by Picard/Oseen iteration.
-// Predictor velocity is retained as an auxiliary unknown so the monolithic
-// solve reproduces the existing Step-1/Step-2/Step-3 algebra:
+// Per fluid node the unknowns are [u,v,w,u*,v*,w*,p].  The same production
+// P1/TET4 Step-1, Step-2 and Step-3 operators are retained.  Picard/Oseen
+// iteration freezes only the advecting velocity in the nonlinear Step-1 flux.
 //
-//     M_dt (u* - u) = r_m(u)
-//     tau H p        = B u*
-//     M_dt (u - u*) + G p = 0
+// Physical BE mode solves:
 //
-// Per fluid node the unknowns are [u,v,w,u*,v*,w*,p]. The pressure Laplacian
-// tau H is the existing CBS equal-order stabilisation; no unstabilised P1/P1
-// saddle-point discretisation is introduced.
+//   A_u(w^k) u^(n+1) + M/dt u*^(n+1) = M/dt u^n
+//   dt H p^(n+1) - B u*^(n+1)         = boundary_flux(u^n)
+//   M/dt (u^(n+1)-u*^(n+1)) + Gp      = 0
 //
-// Strong velocity and pressure conditions are imposed algebraically. PETSc
-// FGMRES + PCFIELDSPLIT/Schur is the default linear solution strategy.
+// so the first and third rows combine to the backward-Euler momentum balance
+//
+//   M/dt (u^(n+1)-u^n) + A_u(w^k)u^(n+1) + Gp^(n+1) = 0.
+//
+// The pressure Laplacian dt H is the existing CBS equal-order stabilisation.
+// PETSc FGMRES + PCFIELDSPLIT/Schur is the default linear strategy.
 //=============================================================================
 
 #include "cbs/core/CBSStateSI.hpp"
