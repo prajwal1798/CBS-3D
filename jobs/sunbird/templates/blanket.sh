@@ -20,6 +20,8 @@
 #   energy RUN_DIR [L1|L2]  IMPLICIT STEADY ENERGY (WATER + STEEL, ONE PETSc
 #                       SOLVE, SteadyEnergySolver) ON THE LAST FLOW FIELD OF
 #                       RUN_DIR (ITS mean_velocity WHEN IT HAS ONE), SAME RANKS
+#   implicit            FROM-SCRATCH FULL L2 STEADY CHT: FULLY IMPLICIT
+#                       CBS u-v-w-u*-v*-w*-p PETSc BLOCK SOLVE, THEN IMPLICIT T
 #   prove50k            FROM-SCRATCH FULL L2 PHYSICAL TRANSIENT: 50,000
 #                       COUPLED CBS + IMPLICIT-BE CHT STEPS ON 40 MPI RANKS
 #   check [RUN_DIR]     MASS + ENERGY BALANCE AND RESIDUAL PLOT OF A RUN
@@ -94,9 +96,10 @@ newest_run() {
 }
 
 progress() {
-    # LAST "it=" PROGRESS LINE OF A solver.out, WITHOUT COLOURS
+    # LAST ORDINARY CBS OR FULLY-IMPLICIT PICARD PROGRESS LINE.
     sed 's/\x1b\[[0-9;]*m//g' "$1" 2>/dev/null | tr '\r' '\n' |
-        grep -oE "(it=|Iteration )[0-9]+/[0-9]+.*" | tail -1
+        grep -E "(it=|Iteration )[0-9]+/[0-9]+|\[IMPLICIT-FLOW\] Picard" |
+        tail -1 || true
 }
 
 case "$CMD" in
@@ -203,6 +206,59 @@ run)
         echo "         THE RUN MUST USE THE SAME RANK COUNT (PASS --sets N)"
     fi
     bash "$T/submit_auto.sh" "$DIR" "$CASE" --time 24:00:00 "$@" --par "$PAR" --matprop "$MAT"
+    ;;
+
+# ================================
+# FROM-SCRATCH FULLY IMPLICIT STEADY L2 CHT
+# ================================
+implicit)
+    PAR="$SRC/blanket_L2.par"
+    [[ -s "$PAR" ]] || { echo "ERROR: MISSING $PAR" >&2; exit 1; }
+    [[ -d "$DIR/partitions_40" ]] || {
+        echo "ERROR: MISSING $DIR/partitions_40; run setup first" >&2; exit 1; }
+
+    # Pin the experiment. The flow solve is the fully implicit CBS fixed-point
+    # system (u,v,w,u*,v*,w*,p); temperature is solved once afterwards because
+    # the present constant-property forced-flow case has no T -> flow coupling.
+    export CBS3D_FULLY_IMPLICIT_FLOW=1
+    export CBS3D_TEMPERATURE_AFC=1
+    export CBS3D_STEADY_ENERGY_LOW_ORDER_ONLY=1
+
+    export CBS3D_IMPLICIT_FLOW_MAXIT="${CBS3D_IMPLICIT_FLOW_MAXIT:-100}"
+    export CBS3D_IMPLICIT_FLOW_RELAX="${CBS3D_IMPLICIT_FLOW_RELAX:-0.7}"
+    export CBS3D_IMPLICIT_FLOW_TOL="${CBS3D_IMPLICIT_FLOW_TOL:-1.0e-7}"
+    export CBS3D_IMPLICIT_FLOW_PRESSURE_TOL="${CBS3D_IMPLICIT_FLOW_PRESSURE_TOL:-1.0e-6}"
+    export CBS3D_IMPLICIT_FLOW_DIVERGENCE_TOL="${CBS3D_IMPLICIT_FLOW_DIVERGENCE_TOL:-1.0e-7}"
+    export CBS3D_IMPLICIT_FLOW_TAU_SCALE="${CBS3D_IMPLICIT_FLOW_TAU_SCALE:-1.0}"
+
+    unset CBS3D_STEADY_ENERGY
+    unset CBS3D_IMPLICIT_TRANSIENT_ENERGY
+    unset CBS3D_IMPLICIT_ENERGY_BE_DT
+    unset CBS3D_IMPLICIT_ENERGY_BE_STEPS
+    unset CBS3D_IMPLICIT_ENERGY_BE_MIN_TEMPERATURE
+    unset CBS3D_RESTART
+    unset CBS3D_RESTART_FORMAT
+    unset CBS3D_RESTART_ROOT
+    unset CBS3D_RESTART_ITERATION
+    unset CBS3D_RESTART_AS_INITIAL_CONDITION
+    unset CBS3D_RESTART_VELOCITY_ARRAY
+    unset CBS3D_AVERAGE_START_TIME
+    unset CBS3D_AVERAGE_START_ITERATION
+    unset CBS3D_CHECKPOINT_EVERY
+
+    echo "CASE   : FULL 4-U-CHANNEL BLANKET SLICE, L2 WALL + NUCLEAR HEATING"
+    echo "START  : FROM SCRATCH (NO RESTART)"
+    echo "FLOW   : FULLY IMPLICIT CBS u-v-w-u*-v*-w*-p"
+    echo "LINEAR : PETSc FGMRES + PCFIELDSPLIT SCHUR"
+    echo "NONLIN : Picard max=$CBS3D_IMPLICIT_FLOW_MAXIT relax=$CBS3D_IMPLICIT_FLOW_RELAX"
+    echo "TOLS   : U=$CBS3D_IMPLICIT_FLOW_TOL P=$CBS3D_IMPLICIT_FLOW_PRESSURE_TOL DIV=$CBS3D_IMPLICIT_FLOW_DIVERGENCE_TOL"
+    echo "ENERGY : STEADY IMPLICIT LOW-ORDER MONOTONE CHT AFTER FLOW CONVERGES"
+    echo "MAT    : PHYSICAL blanket.matprop"
+    echo "MPI    : 40 RANKS"
+
+    bash "$T/submit_auto.sh" "$DIR" "$CASE" \
+        --sets "40" --time 04:00:00 \
+        --par "$PAR" --matprop "$SRC/blanket.matprop"
     ;;
 
 # ================================
