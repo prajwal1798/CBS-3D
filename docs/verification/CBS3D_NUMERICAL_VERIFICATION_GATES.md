@@ -14,12 +14,12 @@
 | Gate | Required verification | Pass criterion | Status |
 | --- | --- | --- | --- |
 | G0 | Baseline provenance: commit, binary SHA256, mesh, boundary data, materials, timestep flags | Reproducible case snapshot | Commit and Job 29706 identified; full case archive pending |
-| G1a | Actual Step-4 P1-tet FEM volume and surface terms vs independently evaluated quadrature | All nodal convection, conduction, characteristic, heating, Neumann contributions agree | Added C++ test; not yet executed |
-| G1b | Exact frozen-velocity element linear operator versus finite-difference residual derivative | All 16 entries agree | Added C++ test; not yet executed |
+| G1a | Actual Step-4 P1-tet FEM volume and surface terms vs independently evaluated quadrature | All nodal convection, conduction, characteristic, heating, Neumann contributions agree | PASS: Sunbird2 Step-4 operator verification CTest, 2026-11-02 |
+| G1b | Exact frozen-velocity element linear operator versus finite-difference residual derivative | All 16 entries agree | PASS: Sunbird2 Step-4 operator verification CTest, 2026-11-02 |
 | G1c | Lumped thermal mass and timestep diagonal | Code vs direct P1-tet reference with positive entries | PASS: Sunbird2 CTest 3/3 (2026-11-02), shared-node and material masks |
 | G2 | Actual inlet/outlet/wall/interface boundary inventory and flux sign | Every applied BC and flux accounted for | PASS (structural): Job 29706 has only BC 511/520/530/532, 648 BC532 faces = 0.0006 m^2, 60 W applied, zero duplicate faces, zero MPI duplicate mismatch; full global energy closure remains G7 |
 | G3 | Solid-only diffusion | Uniform/linear patch tests; analytical heated slab; mesh refinement | Analytical slab and serial/MPI PASS, Job 29742; systematic mesh refinement still pending |
-| G4 | Two-material conduction | Shared interface temperature, weak flux continuity, integrated balance | INCONCLUSIVE: Job 29745 hit 300,000 iteration limit with RelT=1.5201e-6 > 1e-10; longer benchmark-only 2.5M cap prepared; rerun pending |
+| G4 | Two-material conduction | Shared interface temperature, weak flux continuity, integrated balance | PASS: Job 29749 reached thermal steady state, max analytic error 3.681e-5 K, two-sided flux 999.978/999.984 W/m², serial/MPI 1.11e-15 K, qA=0.016 W |
 | G5 | Prescribed-flow scalar transport | Uniform T, analytical convection-diffusion and manufactured solutions | Uniform T check added; remaining pending |
 | G6 | Discrete positivity / DMP | Inspect assembled update matrix and *first* bound violation | U-channel AFC-off run: 176 cold nodes, ALL fluid-only, zero interface/solid; root mechanism and first crossing unresolved |
 | G7 | Integrated energy and mass | Sources + boundary heat = advection + storage within stated tolerance | Existing balance script; pending for U-channel |
@@ -135,3 +135,15 @@ The serial VTU writer outputs CellData `mat_id`; DistributedPost.cpp writes `mat
 - User-reported serial stage has terminated with **steady-state convergence reached**, final RelT=9.999981e-11 (target 1e-10). The analytic output error and interface flux check are not yet available in the main G4 summary.
 - Four-rank MPI stage still running at iteration 1,535,000/2,500,000; RelT=3.57e-9, Tmax=1.75486 K, Umax=0, T_min=0. The exact stationary top temperature is 1.756172084 K: top-temperature difference at this intermediate step is ~0.001312 K (0.0747%).
 - MPI residual is decaying consistently; no claim of complete G4 PASS until MPI reaches thermal steady convergence and both numerical fields satisfy nodal temperature and two-sided interface heat-flux checks.
+
+## G4 verified evidence — Job 29749 (2026-11-02)
+
+- Job 29749: Slurm COMPLETED 0:0, 00:10:08; checkout 4b58dad, with AFC=0, LTS monotone=0, restart=0, implicit steady solver=0.
+- Existing serial binary SHA256 2bc843a610a18d9e166cbb0b859c0b72d67e427ef01c162e938aef42730c393a; MPI binary SHA256 96ca7134f6affc2cd17cdfb6b14ba70bbda9f243d7041ba196d70a00bc1c16fa.
+- Both runs reached 'steady-state convergence reached' (serial final RelT=9.999981e-11; MPI stop criterion enforced by runner; final MPI residual value not pasted).
+- 337 unique nodes, 354 fluid and 763 solid tetrahedra, 58 conformal shared interface nodes. BC502 and BC532 each have area 1.6e-5 m². Exact applied power qA=0.016 W; both solver outputs print 0.016 W.
+- Analytical temperatures: T_interface=1.650165017 K, T_top=1.756172084 K; numerical Tmax=1.756135305 K. Max nodal error 3.680762630642e-5 K (0.00210% of analytic top). Max interface T error 3.581702319710e-5 K.
+- Reconstructed median interface-adjacent conductive k*dT/dy flux: fluid=999.9783086 W/m²; solid=999.9835883 W/m²; exact=1000 W/m². Zero fluid speed.
+- Maximum serial/MPI nodal difference 1.110223024625e-15 K. Runner reports **G4-CONFORMAL-NO-AFC PASS**.
+- Prior Job 29745 stopped at 300k iterations without steady convergence, explaining its premature comparison; no numerical production code change made.
+- Scope: G4 verifies the stationary, stagnant two-layer conformal interface for this mesh and flux. It does not verify transient accuracy, mesh-convergence order, or advection; proceed to G5.
