@@ -31,6 +31,7 @@
 #include "cbs/solver/SteadyEnergySolver.hpp"
 #include "cbs/solver/FullyImplicitFlowSolver.hpp"
 #include "cbs/linalg/PetscPersistentDistributedPressureSystem.hpp"
+#include "cbs/linalg/PetscHeaders.hpp"
 #include "cbs/parallel/Coloring.hpp"
 #include "cbs/parallel/HaloExchange.hpp"
 #include "cbs/preprocess/Preprocess.hpp"
@@ -57,6 +58,60 @@ namespace cbs
     namespace
     {
         constexpr Real residual_epsilon = 1.0e-30;
+
+        class ScopedPetscInitialisation final
+        {
+        public:
+            explicit ScopedPetscInitialisation(const bool enable)
+            {
+                if (!enable)
+                {
+                    return;
+                }
+
+                PetscBool initialised = PETSC_FALSE;
+                const PetscErrorCode query = PetscInitialized(&initialised);
+                if (query != PETSC_SUCCESS)
+                {
+                    throw std::runtime_error(
+                        "PetscInitialized failed before fully implicit flow");
+                }
+
+                if (initialised == PETSC_FALSE)
+                {
+                    const PetscErrorCode init = PetscInitializeNoArguments();
+                    if (init != PETSC_SUCCESS)
+                    {
+                        throw std::runtime_error(
+                            "PetscInitializeNoArguments failed before fully implicit flow");
+                    }
+                    started_here_ = true;
+                }
+            }
+
+            ~ScopedPetscInitialisation() noexcept
+            {
+                if (!started_here_)
+                {
+                    return;
+                }
+
+                PetscBool finalised = PETSC_FALSE;
+                if (PetscFinalized(&finalised) == PETSC_SUCCESS &&
+                    finalised == PETSC_FALSE)
+                {
+                    (void)PetscFinalize();
+                }
+            }
+
+            ScopedPetscInitialisation(
+                const ScopedPetscInitialisation&) = delete;
+            ScopedPetscInitialisation& operator=(
+                const ScopedPetscInitialisation&) = delete;
+
+        private:
+            bool started_here_ = false;
+        };
 
         class NullStreamBuffer final : public std::streambuf
         {
@@ -1183,6 +1238,13 @@ namespace cbs
         DistributedSymmetryProjector symmetry_projector;
         const bool fully_implicit_flow =
             environment_flag_enabled("CBS3D_FULLY_IMPLICIT_FLOW");
+
+        // The legacy persistent pressure object used to initialise PETSc as a
+        // side effect. Fully implicit mode intentionally skips constructing
+        // that pressure matrix, so it must own the PETSc lifecycle explicitly.
+        // Keep the session alive through BOTH the implicit flow solve and the
+        // subsequent implicit steady CHT solve.
+        ScopedPetscInitialisation petsc_session(fully_implicit_flow);
 
         {
             const ScopedStdoutSilence setup_stdout(
