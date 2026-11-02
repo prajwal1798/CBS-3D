@@ -22,7 +22,9 @@
 #include <cmath>
 #include <cstdlib>
 #include <iostream>
+#include <iomanip>
 #include <limits>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -260,8 +262,9 @@ namespace cbs
         if (low_order_only && env_flag("CBS3D_AFC_SOLID"))
         {
             throw std::runtime_error(
-                "Low-order steady/physical BE currently uses graph viscosity "
-                "only in the fluid; CBS3D_AFC_SOLID is unsupported.");
+                "CBS3D_AFC_SOLID is not a separate switch for the low-order "
+                "physical-BE operator. Transient low-order CHT applies its "
+                "monotonicity graph correction to every material automatically.");
         }
 
         // EnergyAssembly's characteristic streamline diffusion uses the
@@ -394,9 +397,13 @@ namespace cbs
         // 3. MATRIX  A = -(M + D) + gamma * diag(1/elcoe2p) (FREE ROWS),
         //    IDENTITY (DIRICHLET ROWS). gamma=0 is the original steady form.
         //    Positive gamma adds implicit pseudo-transient heat capacity.
-        //    D = GRAPH VISCOSITY OF THE FLUID ELEMENTS WHEN AFC IS ON
-        //    (d_ab = max(0, -M_ab, -M_ba), AS IN TemperatureAFC.cpp), WHICH
-        //    MAKES THE LOW-ORDER OFF-DIAGONALS l_ab = M_ab + d_ab >= 0.
+        //    D = ALGEBRAIC GRAPH VISCOSITY. For the physical low-order BE
+        //    operator it is applied to EVERY material, not only the advective
+        //    fluid region. This is required for a mesh-independent discrete
+        //    maximum principle because P1 diffusion on a general tetrahedral
+        //    solid mesh is not automatically an M-matrix. The correction
+        //    d_ab = max(0, -M_ab, -M_ba) makes the corrected residual-operator
+        //    off-diagonals l_ab = M_ab + d_ab >= 0 while preserving row sums.
         //    The matrix is used only as a fixed defect-correction preconditioner.
         // ================================
         Mat A = nullptr;
@@ -414,7 +421,10 @@ namespace cbs
             Real M[5][5];
             EnergyAssembly::elementOperator(s, ie, M);
 
-            if (afc && s.mat_elem(ie) == 0)
+            const bool apply_graph_viscosity =
+                afc &&
+                (s.mat_elem(ie) == 0 || (transient_be && low_order_only));
+            if (apply_graph_viscosity)
             {
                 for (Int k = 0; k < 6; ++k)
                 {
@@ -726,14 +736,20 @@ namespace cbs
                 result.t_min = -global_max(-local_minimum);
                 result.t_max = global_max(local_maximum);
                 last_storage_rate = global_sum(local_storage_rate);
+                const Real floor_tolerance =
+                    1.0e-10 * std::max(1.0, std::abs(be_floor));
                 if (be_check_floor &&
-                    result.t_min < be_floor -
-                        1.0e-10 * std::max(1.0, std::abs(be_floor)))
+                    result.t_min < be_floor - floor_tolerance)
                 {
-                    throw std::runtime_error(
-                        "Implicit BE temperature fell below the requested "
-                        "physical verification floor at step " +
-                        std::to_string(step));
+                    std::ostringstream message;
+                    message << std::setprecision(17)
+                            << "Implicit BE temperature fell below the requested "
+                            << "physical verification floor at step " << step
+                            << ": Tmin=" << result.t_min
+                            << " K, floor=" << be_floor
+                            << " K, undershoot=" << (be_floor - result.t_min)
+                            << " K, tolerance=" << floor_tolerance << " K";
+                    throw std::runtime_error(message.str());
                 }
                 if (!physical_be_override &&
                     s.mpi_rank == 0 &&
