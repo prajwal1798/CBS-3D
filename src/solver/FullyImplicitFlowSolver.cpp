@@ -1017,17 +1017,22 @@ namespace cbs
                                     s.cfg.fcon[2] *
                                     (a == bnode ? 2.0 : 1.0);
 
-                                // Step-2 equation is tauHp - B u*=0,
-                                // hence + boundary flux here.
+                                // Production Step 2 is deliberately
+                                // mixed at the boundary: its volume divergence
+                                // uses the predictor u*, while the face flux
+                                // uses unkn1 (the previous corrected velocity).
+                                // At the steady fixed point unkn1 == u, so the
+                                // monolithic equation must couple this boundary
+                                // term to corrected u, not to u*.
                                 for (Int i = 1; i <= 3; ++i)
                                 {
-                                    const Int predictor_col =
+                                    const Int corrected_col =
                                         (bnode - 1) * 7 +
-                                        predictor_offset + (i - 1);
+                                        corrected_offset + (i - 1);
 
                                     values[
                                         pressure_row * 28 +
-                                        predictor_col] +=
+                                        corrected_col] +=
                                         static_cast<PetscScalar>(
                                             face_mass_factor *
                                             s.annxf(i, face, ie));
