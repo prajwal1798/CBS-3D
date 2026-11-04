@@ -102,7 +102,7 @@ namespace cbs
 
             for (const Int ip : s.owned_nodes)
             {
-                s.rhs1(ip) += heat_flux_load(ip);
+                s.rhs1(ip) += s.heat_source_scale * heat_flux_load(ip);
             }
         }
 

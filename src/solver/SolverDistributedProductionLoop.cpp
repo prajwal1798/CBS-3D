@@ -27,6 +27,8 @@
 #include "cbs/boundary/DistributedSymmetry.hpp"
 #include "cbs/io/DistributedPost.hpp"
 #include "cbs/io/TimeAverage.hpp"
+#include "cbs/io/PointSampler.hpp"
+#include "cbs/assembly/HeatPulse.hpp"
 #include "cbs/solver/SteadyEnergySolver.hpp"
 #include "cbs/linalg/PetscPersistentDistributedPressureSystem.hpp"
 #include "cbs/parallel/Coloring.hpp"
@@ -1314,6 +1316,11 @@ namespace cbs
 
         DistributedPost::initialise(s_, case_name_);
 
+        // PLASMA PULSE f(t) (CBS3D_HEAT_PULSE_FILE) AND POINT SAMPLING
+        // (CBS3D_PROBE_FILE, CBS3D_GRID_DIMS); BOTH OFF UNLESS REQUESTED.
+        HeatPulse::initialise(s_);
+        PointSampler::initialise(s_, distributed_case_name);
+
         // ================================
         // IMPLICIT STEADY ENERGY FOR THE CURRENT (FROZEN) VELOCITY INSTEAD OF
         // THE ITERATION LOOP: CBS3D_STEADY_ENERGY=1 (SteadyEnergySolver.hpp).
@@ -1411,6 +1418,9 @@ namespace cbs
             {
                 s_.cfg.rtime += global_dt;
             }
+
+            // PLASMA-POWER FACTOR AT THE NEW TIME LEVEL (1 WITHOUT A PULSE)
+            HeatPulse::update(s_);
 
             if (s_.lts_operator_stale)
             {
@@ -1575,6 +1585,7 @@ namespace cbs
                 for (const Int ip : s_.owned_nodes)
                 {
                     s_.rhs1(ip) +=
+                        s_.heat_source_scale *
                         thermal_boundary.heat_flux_load(ip);
 
                     s_.temperature(ip) =
@@ -1597,6 +1608,9 @@ namespace cbs
             // ADD THIS STEP TO THE TIME AVERAGES (BEFORE THE CHECKPOINT AND
             // VTU OF THIS ITERATION). ALL LOCAL NODES ARE CURRENT HERE.
             TimeAverage::accumulate(s_, global_iteration, global_dt);
+
+            // PROBE TRACES AND REGULAR-GRID SAMPLES DUE AT THIS TIME
+            PointSampler::sample(s_, distributed_case_name, global_iteration);
 
             const IterationMetrics metrics =
                 evaluate_global_convergence(

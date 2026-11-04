@@ -258,6 +258,11 @@ namespace cbs
         Array1D<Real> alpha_e;
         Array1D<Real> Qvol_e;
 
+        // PLASMA-POWER FACTOR f(t) MULTIPLYING ALL PRESCRIBED HEATING (BC 532
+        // FLUX AND VOLUMETRIC SOURCES); 1 UNLESS CBS3D_HEAT_PULSE_FILE IS SET
+        // (HeatPulse.hpp).
+        Real heat_source_scale = 1.0;
+
 
         // --------------------------------------------------------------------
         // Spalart-Allmaras turbulence state

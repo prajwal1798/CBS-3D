@@ -39,6 +39,7 @@ set(CBS3D_CORE_SOURCES
     src/io/DistributedPost.cpp
     src/io/RestartIO.cpp
     src/io/TimeAverage.cpp
+    src/io/PointSampler.cpp
 
     src/preprocess/Preprocess.cpp
     src/preprocess/NuclearHeating.cpp
@@ -54,6 +55,7 @@ set(CBS3D_CORE_SOURCES
     src/solver/SolverDistributedStep2.cpp
     src/solver/SolverDistributedStep3.cpp
     src/solver/SteadyEnergySolver.cpp
+    src/assembly/HeatPulse.cpp
     src/solver/SolverDistributedLoop.cpp
     src/solver/SolverDistributedProductionLoopRestartAfc.cpp
     src/solver/SolverDistributedWallAudit.cpp

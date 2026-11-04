@@ -587,7 +587,7 @@ namespace cbs
                 return;
             }
 
-            const Real source = qvol * s.detJ(ie) * s.cfg.mass_factor;
+            const Real source = qvol * s.heat_source_scale * s.detJ(ie) * s.cfg.mass_factor;
 
             for (Int a = 1; a <= s.cfg.nep; ++a)
             {
@@ -652,7 +652,7 @@ namespace cbs
                 }
 
                 const Real contribution =
-                    s.cfg.heat_flux_bc * area / static_cast<Real>(s.cfg.nsidp);
+                    s.heat_source_scale * s.cfg.heat_flux_bc * area / static_cast<Real>(s.cfg.nsidp);
 
                 for (Int in = 1; in <= s.cfg.nsidp; ++in)
                 {
