@@ -1,0 +1,34 @@
+# ================================
+# PROBES FOR THE BLANKET SLICE (CBS3D_PROBE_FILE), "name x y z" IN METRES.
+# COORDINATES AS IN BlanketSlice_CHT.geo: x = 0 ON THE CENTRE LINE,
+# y = 0 ON THE BACK FACE (FIRST WALL AT y = 0.28), z = 0.015 IS THE
+# MID-PLANE OF EVERY CHANNEL. INLETS ARE THE LEFT LEGS (x < 0), OUTLETS
+# THE RIGHT LEGS. EACH PROBE RECORDS T, u, v, w, p AND THE VORTICITY.
+# ================================
+# STEEL: FIRST WALL (10 mm BETWEEN THE HEATED FACE AND CHANNEL 1)
+FW_surf_C        0.000   0.2795  0.015
+FW_mid_C         0.000   0.2750  0.015
+FW_mid_L        -0.100   0.2750  0.015
+FW_mid_R         0.100   0.2750  0.015
+FW_corner_L     -0.140   0.2750  0.015
+FW_corner_R      0.140   0.2750  0.015
+FW_mid_C_zface   0.000   0.2750  0.002
+# STEEL: BETWEEN CHANNELS AND AT THE BACK
+S_c1c2_C         0.000   0.2375  0.015
+S_back_C         0.000   0.0500  0.015
+# COOLANT, CHANNEL 1 (15 mm): LEG -> FRONT RUN -> LEG
+C1_in           -0.1457  0.0200  0.015
+C1_leg_L        -0.1300  0.2000  0.015
+C1_run_L        -0.0900  0.2625  0.015
+C1_run_C         0.000   0.2625  0.015
+C1_run_C_wall    0.000   0.2690  0.015
+C1_run_R         0.0900  0.2625  0.015
+C1_leg_R         0.1300  0.2000  0.015
+C1_out           0.1457  0.0200  0.015
+# COOLANT, CHANNELS 2-4: FRONT-RUN CENTRE AND OUTLET LEG
+C2_run_C         0.000   0.2150  0.015
+C2_out           0.1032  0.0200  0.015
+C3_run_C         0.000   0.1450  0.015
+C3_out           0.0632  0.0200  0.015
+C4_run_C         0.000   0.0975  0.015
+C4_out           0.0357  0.0200  0.015

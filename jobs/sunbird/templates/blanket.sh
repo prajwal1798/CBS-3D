@@ -20,6 +20,17 @@
 #   energy RUN_DIR [L1|L2]  IMPLICIT STEADY ENERGY (WATER + STEEL, ONE PETSc
 #                       SOLVE, SteadyEnergySolver) ON THE LAST FLOW FIELD OF
 #                       RUN_DIR (ITS mean_velocity WHEN IT HAS ONE), SAME RANKS
+#   pulse RUN_DIR [OPTS]  TRANSIENT L2 RUN WITH A PLASMA PULSE (STAGE L2P),
+#                       STARTING FROM THE LAST VTU OF RUN_DIR (A CONVERGED L2
+#                       ENERGY RUN, E.G. run_blanket_30102) AT t = 0, SAME
+#                       RANKS. HEATING x f(t) FROM CBS3D_HEAT_PULSE_FILE
+#                       [$SRC/pulse_600s.txt]; PROBES CBS3D_PROBE_FILE
+#                       [$SRC/blanket_probes.txt] EVERY CBS3D_PROBE_DT [0.01] s;
+#                       GRID CBS3D_GRID_DIMS ["176 140 15"] EVERY CBS3D_GRID_DT
+#                       [0.1] s; VTU EVERY 5 s; CHECKPOINT EVERY
+#                       CBS3D_CHECKPOINT_EVERY [50000] ITERATIONS
+#   pulse-resume RUN_DIR [OPTS]  CONTINUE AN INTERRUPTED pulse RUN FROM ITS
+#                       NEWEST CHECKPOINT (SAME PULSE, PROBES, GRID)
 #   check [RUN_DIR]     MASS + ENERGY BALANCE AND RESIDUAL PLOT OF A RUN
 #                       (DEFAULT: THE NEWEST RUN)
 #   status              YOUR JOBS AND THE LATEST PROGRESS LINE OF EACH RUN
@@ -71,7 +82,7 @@ shift
 # ================================
 stage_par() {
     local f="$SRC/blanket_$1.par"
-    [[ -s "$f" ]] || { echo "ERROR: UNKNOWN STAGE '$1' (NO $f); USE L0, L1, L1T OR L2" >&2; exit 1; }
+    [[ -s "$f" ]] || { echo "ERROR: UNKNOWN STAGE '$1' (NO $f); USE L0, L1, L1T, L2 OR L2P" >&2; exit 1; }
     echo "$f"
 }
 
@@ -225,6 +236,45 @@ energy)
     bash "$T/submit_auto.sh" "$DIR" "$CASE" --sets "$NR" --time 01:00:00 "$@" \
         --par "$(stage_par "$STAGE")" --matprop "$(run_matprop)"
     echo "THEN   : bash $T/blanket.sh status ; bash $T/blanket.sh check"
+    ;;
+
+# ================================
+# TRANSIENT RUN WITH A PLASMA PULSE, FROM A CONVERGED FIELD OR A CHECKPOINT
+# ================================
+pulse|pulse-resume)
+    RUN="$(readlink -f "${1:?USAGE: blanket.sh $CMD RUN_DIR [OPTS]}")"
+    shift
+    NR=$(ls -d "$RUN"/partitions/rank_* | wc -l)
+    export CBS3D_RESTART=1
+    if [[ "$CMD" == pulse ]]; then
+        LAST="$(ls -1 "$RUN"/output/"$CASE"/"$CASE"_step_*.pvtu 2>/dev/null | sort | tail -1)"
+        [[ -n "$LAST" ]] || { echo "ERROR: NO .pvtu IN $RUN/output/$CASE" >&2; exit 1; }
+        ITER="$(basename "$LAST" .pvtu | sed 's/.*_step_0*//')"
+        export CBS3D_RESTART_FORMAT=legacy_vtu CBS3D_RESTART_AS_INITIAL_CONDITION=1
+        export CBS3D_RESTART_ROOT="$RUN/output/$CASE" CBS3D_RESTART_ITERATION="$ITER"
+        export CBS3D_RESTART_VELOCITY_ARRAY=velocity
+        echo "START  : $LAST (ITERATION $ITER, $NR RANKS) AS THE FIELD AT t = 0"
+    else
+        CK="$(ls -1d "$RUN"/output/"$CASE"/restart/step_* 2>/dev/null | sort | tail -1)"
+        [[ -n "$CK" ]] || { echo "ERROR: NO CHECKPOINT IN $RUN/output/$CASE/restart" >&2; exit 1; }
+        export CBS3D_RESTART_FORMAT=native CBS3D_RESTART_ROOT="$CK"
+        unset CBS3D_RESTART_ITERATION CBS3D_RESTART_AS_INITIAL_CONDITION CBS3D_RESTART_VELOCITY_ARRAY
+        echo "RESUME : $CK ($(grep physical_time "$CK/restart_manifest.txt" 2>/dev/null))"
+    fi
+    unset CBS3D_STEADY_ENERGY CBS3D_AVERAGE_START_TIME CBS3D_AVERAGE_START_ITERATION
+    export CBS3D_HEAT_PULSE_FILE="${CBS3D_HEAT_PULSE_FILE:-$SRC/pulse_600s.txt}"
+    export CBS3D_PROBE_FILE="${CBS3D_PROBE_FILE:-$SRC/blanket_probes.txt}"
+    export CBS3D_PROBE_DT="${CBS3D_PROBE_DT:-0.01}"
+    export CBS3D_GRID_DIMS="${CBS3D_GRID_DIMS:-176 140 15}"
+    export CBS3D_GRID_DT="${CBS3D_GRID_DT:-0.1}"
+    export CBS3D_CHECKPOINT_EVERY="${CBS3D_CHECKPOINT_EVERY:-50000}"
+    echo "PULSE  : $CBS3D_HEAT_PULSE_FILE"
+    echo "PROBES : $CBS3D_PROBE_FILE EVERY $CBS3D_PROBE_DT s"
+    echo "GRID   : $CBS3D_GRID_DIMS EVERY $CBS3D_GRID_DT s"
+    echo "STAGE  : L2P ($(stage_par L2P)); AFC $CBS3D_TEMPERATURE_AFC; CHECKPOINT EVERY $CBS3D_CHECKPOINT_EVERY"
+    bash "$T/submit_auto.sh" "$DIR" "$CASE" --sets "$NR" --time 24:00:00 "$@" \
+        --par "$(stage_par L2P)" --matprop "$(run_matprop)"
+    echo "THEN   : bash $T/blanket.sh status   (PROBES: output/$CASE/${CASE}_probes.csv IN THE RUN FOLDER)"
     ;;
 
 # ================================
