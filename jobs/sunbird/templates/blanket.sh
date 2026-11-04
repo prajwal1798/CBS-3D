@@ -127,9 +127,19 @@ update)
         B="$1"
         git bundle verify "$B" > /dev/null || { echo "ERROR: $B IS NOT A VALID BUNDLE FOR THIS REPOSITORY" >&2; exit 1; }
         HEAD_REF="$(git bundle list-heads "$B" | awk 'NR == 1 { print $2 }')"
-        git fetch "$B" "+$HEAD_REF:refs/heads/claude/blanket"
-        git checkout claude/blanket
-        echo "BRANCH : claude/blanket FROM $B ($HEAD_REF); YOUR PREVIOUS BRANCH IS UNCHANGED"
+        # FETCH INTO A SIDE REF (git REFUSES TO FETCH INTO THE CHECKED-OUT
+        # BRANCH), THEN FAST-FORWARD claude/blanket; STOP IF IT HAS DIVERGED
+        git fetch "$B" "+$HEAD_REF:refs/remotes/bundle/latest"
+        if [[ "$(git rev-parse --abbrev-ref HEAD)" == claude/blanket ]]; then
+            git merge --ff-only bundle/latest || {
+                echo "ERROR: claude/blanket HAS COMMITS THAT ARE NOT IN $B:" >&2
+                git log --oneline bundle/latest..HEAD >&2
+                exit 1; }
+        else
+            git branch -f claude/blanket bundle/latest
+            git checkout claude/blanket
+        fi
+        echo "BRANCH : claude/blanket FROM $B ($HEAD_REF)"
     elif [[ "$#" -gt 0 ]]; then
         for p in "$@"; do
             [[ -s "$p" ]] || { echo "ERROR: NO PATCH FILE $p" >&2; exit 1; }
