@@ -580,6 +580,25 @@ python3 $CBS3D_CODE/tools/probe_vtu.py $CBS3D_SCRATCH/cases/blanket_slice_h4/run
 - **31524 ≈ 30102** (≈ 361 K): the flow unsteadiness (u′T′) is the cause, which is a physical result. Confirm it with the u′T′ covariance accumulated by `TimeAverage` (version-2 rank files) in a transient window.
 - Also check that 31524 printed a sane `t_max`, `converged`, and `residual_check` ≈ 1e-12.
 
+**Sign argument (added 2026-11-06).** Unsteady transport ⟨u′T′⟩ is, on the whole, down-gradient: it acts as extra diffusion and *improves* wall-to-coolant heat transfer. A steady solve on the mean flow omits it and should therefore be *hotter* at the wall than the transient, yet 30102 is ~40 K *cooler*. Hypothesis 2 has the wrong sign to explain the gap. The trend with numerical diffusion has the right sign: Tmax 429.3 K (h5, LTS τ) < 437.1 K (h4, LTS τ) < 450.3 K (h4, transient, small τ); every step that removes streamline diffusion makes the wall hotter. The CBS energy stabilisation in `EnergyAssembly` is −(Δt_e/2)∫ρc_p(u·∇N_a)(u·∇T): advective part only, not the full residual, so it does not vanish at steady state. With LTS, Δt_e ≈ c·h/|u|, which gives a streamwise artificial conductivity ≈ c·Pe_h/2 times k_f (cell Péclet in the hundreds). Expect 31524 ≈ 31157.
+
+### 9.8 Model-validity audit (2026-11-06): what the paper must state or fix
+
+Physics (the model is the forced-convection, constant-property, single-phase limit):
+- **Buoyancy is neglected but not negligible at these loads.** Wall-to-bulk ΔT ≈ 90 K at U ≈ 0.11 m/s gives Gr = gβΔT D_h³/ν² ≈ 1e9 and Ri = Gr/Re² ≈ 10²–10³ in channel 1 (mixed-convection threshold ≈ 0.1; Metais & Eckert 1964; laminar mixed convection raises Nu several-fold, Morcos & Bergles 1975). DEMO flows are turbulent at ~2 m/s, so Ri ≪ 1 there; that justification does not carry over to this laminar case.
+- **Constant properties**: μ of water falls ≈ 4× from 298 K to ≈ 410 K (wall); the Sieder–Tate factor (μ_b/μ_w)^0.14 ≈ 1.2.
+- **Boiling**: coolant-wall temperatures of ≈ 390–410 K exceed T_sat at 1 bar. State a system pressure (≥ ~4 bar) or no single-phase claim holds.
+- **Defence and fix**: T is linear in the loads for a given flow, so every result is exactly the small-load forced-convection limit scaled up. Report θ = (T − T_in)·k/(q″·L) and Nu, not absolute kelvin. Otherwise lower the loads (ΔT_wall ≲ 10 K), or add Boussinesq buoyancy + μ(T) (this breaks one-way coupling and the linearity used for the FNO ensemble).
+
+Numerics:
+- Δt-dependent, non-residual energy stabilisation (§9.7). The steady result carries an O(h) streamline-diffusion error.
+- **CBS equal-order (P1/P1) pressure stabilisation ∝ Δt** (Codina 2001). With the global Δt ≈ 4.4e-4 s against h/|u| ≈ 0.02 s in core cells, it is ~40× weaker than an h/|u|-scaled value. The momentum Step-1 stabilisation is equally small (cell Re ≈ 250). Check mid-plane p and element div(u) for node-to-node oscillation. Show that the unsteadiness (St, amplitude) is independent of mesh and Δt before calling it physical.
+- **Mesh**: h5 → h4 moved Tmax by +7.8 K (6 % of the rise above inlet); the thermal boundary layer has 1–2 cells. Wall T, h and Nu are not mesh-converged until h3 (GCI, Celik et al. 2008).
+- **BCs**: the uniform inlet velocity in every port imposes the flow split (area-weighted), so it is not computed. Outlet backflow is clipped (BC 520); measure the fraction of outlet faces that would back-flow.
+- **Pulse start**: 31157 began from the steady state, not the transient equilibrium. The +13 K Tmax drift is not pulse physics (see §15, item 6).
+
+What is sound: monolithic conforming CHT; conservative advective form (energy closes 0.7 % over 550–600 s and exactly when steady); AFC keeps T bounded; one-way coupling is consistent with the stated assumptions; physical-time stepping is explicit with CFL ≪ 1; unsteadiness at Re ≈ 1870 is plausible (Pothérat & Zhang, sharp 180° bend: unsteady from Re ≈ 800).
+
 ---
 
 ## 10. Tools, post-processing and visualisation

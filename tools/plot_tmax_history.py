@@ -16,7 +16,7 @@
 #
 # USAGE     : python3 tools/plot_tmax_history.py Tmax_history.csv
 #                 [--pulse cases/blanket_slice/pulse_600s.txt]
-#                 [--t-steady 437.06] [--t-inlet 300] [--out figures/tmax]
+#                 [--t-steady 437.06] [--t-inlet 298.15] [--out figures/tmax]
 #
 # OUTPUT    : <out>_history.pdf/.png, <out>_time_constants.pdf/.png,
 #             <out>_summary.txt (NUMBERS QUOTED IN THE FIGURES)
@@ -153,7 +153,7 @@ def figure_history(t, T, pulse, cool, heat, T_steady, T_inlet, out):
              ha="left", va="bottom", fontsize=8, color=INK2)
     ax1.text(t_end - 4, plateau + 2.0, "pulsed-run plateau, %.0f K" % plateau,
              ha="right", va="bottom", fontsize=8, color=INK2)
-    ax1.text(t_end - 4, T_inlet + 1.5, "coolant inlet, %.0f K" % T_inlet,
+    ax1.text(t_end - 4, T_inlet + 1.5, "coolant inlet, %.2f K" % T_inlet,
              ha="right", va="bottom", fontsize=8, color=INK2)
 
     # COLDEST POINT OF THE DWELL
@@ -239,7 +239,7 @@ def main():
     ap.add_argument("--pulse", default=os.path.join(here, "..", "cases", "blanket_slice", "pulse_600s.txt"))
     ap.add_argument("--t-steady", type=float, default=None,
                     help="T_max OF THE STARTING STEADY STATE [K] (DEFAULT: FIRST SAMPLE)")
-    ap.add_argument("--t-inlet", type=float, default=300.0)
+    ap.add_argument("--t-inlet", type=float, default=298.15)
     ap.add_argument("--out", default="tmax")
     args = ap.parse_args()
 
