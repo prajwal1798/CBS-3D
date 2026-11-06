@@ -682,6 +682,7 @@ $CBS3D_SCRATCH/{meanconv.py, diffsnap.py, ...}             helpers
 - dims (nx, ny, nz) = (176, 140, 15) over the mesh box x ∈ [−0.175, 0.175], y ∈ [0, 0.28], z ∈ [0, 0.03] (≈ 2 mm spacing; verify the box in `grid.json`).
 - 369,600 points × 8 fields × float32 = 11.8 MB per sample.
 - Fields `T, u, v, w, p, omega_x, omega_y, omega_z`. Mask int8: −1 outside the mesh, 0 water, 1 steel.
+- **Pressure units (inferred 2026-11-06, not yet confirmed in code)**: the stored `p` is gauge (outlet = 0) and appears to be kinematic, p/ρ [m²/s²]. Probe means over 5–39 s of 31157: C1_in 0.0384, C1_out 0.0005. ×997 gives 38 Pa across channel 1, which matches a hand estimate (developing laminar friction plus two bends ≈ 20–35 Pa); read as Pa, it would be ~1000× too small. Multiply by ρ = 997 for Pa. `docs/CBS3Dpp_SI_Full_Solver_Audit.md` also flags the pressure convention as unstated; add a unit test.
 
 Loader:
 ```python
