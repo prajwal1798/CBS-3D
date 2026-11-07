@@ -119,22 +119,32 @@ def main():
         matplotlib.use("Agg")
         import matplotlib.pyplot as plt
 
-        fig, ax = plt.subplots(figsize=(7.0, 2.8))
+        # ================================
+        # LAYOUT OF LIU (2006) FIG. 4(b) / THESIS FIG. 8.3: EACH PROFILE
+        # SHIFTED BY ITS OFFSET, AXES 0..14 x 0..3, TITLE Re = 3025
+        # ================================
+        plt.rcParams.update({"font.family": "serif", "mathtext.fontset": "dejavuserif", "font.size": 10})
+        fig, ax = plt.subplots(figsize=(7.2, 3.2))
         for k, off in enumerate(OFFSETS):
             ms, me = ks == k, ke == k
             y_line = np.linspace(ys_s[ms].min(), 3.0, 301)
-            ax.plot(off + u_at(xh_s[ms][0], y_line), y_line, color="#2a78d6", lw=1.4,
-                    label="CBS3D SA" if k == 0 else None)
-            ax.plot(off + us_s[ms], ys_s[ms], color="#1a1a1a", lw=0.9, ls=(0, (4, 2)),
-                    label="Liu (2006) SA" if k == 0 else None)
-            ax.plot(off + us_e[me], ys_e[me], "s", ms=3, mfc="none", mec="#55554f",
-                    label="Denham et al. (1975)" if k == 0 else None)
-            ax.text(off, 3.08, "x/h = %g" % xh_s[ms][0], fontsize=7, ha="left")
-        ax.set_xlim(-0.5, 14)
-        ax.set_ylim(0, 3.3)
-        ax.set_xlabel("u/U$_0$ + station offset")
-        ax.set_ylabel("y/h")
-        ax.legend(loc="center right", fontsize=7, frameon=False)
+            ax.plot(off + us_e[me], ys_e[me], "s", ms=3.2, mfc="none", mec="k", mew=0.7,
+                    label="Exp. (Denham et al.)" if k == 0 else None, zorder=3)
+            ax.plot(off + us_s[ms], ys_s[ms], color="k", lw=0.9, ls=(0, (4, 2)),
+                    label="SA, Liu (2006)" if k == 0 else None, zorder=2)
+            ax.plot(off + u_at(xh_s[ms][0], y_line), y_line, color="#c0392b", lw=1.3,
+                    label="SA, CBS3D" if k == 0 else None, zorder=4)
+            ax.text(off + 0.05, 3.06, "x/h = %g" % xh_s[ms][0], fontsize=7.5, ha="left", va="bottom")
+        ax.set_xlim(0, 14)
+        ax.set_ylim(0, 3)
+        ax.set_xticks(range(0, 15, 2))
+        ax.set_yticks([0, 0.5, 1, 1.5, 2, 2.5, 3])
+        ax.set_xlabel("Horizontal velocity")
+        ax.set_ylabel("Vertical Distance")
+        ax.set_title("Re = 3025", fontsize=10, pad=14)
+        # LEGEND IN THE EMPTY GAP BETWEEN THE x/h = 6 AND 8 PROFILES
+        ax.legend(loc="center", bbox_to_anchor=(10.95 / 14.0, 0.5), fontsize=7.5, frameon=False,
+                  handlelength=1.8, borderaxespad=0.0)
         fig.savefig(args.plot, dpi=300, bbox_inches="tight")
 
 

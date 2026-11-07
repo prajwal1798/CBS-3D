@@ -196,7 +196,7 @@ def main():
                 rate = "%+.2f" % (1000.0 * s) if s is not None else "-"
                 if target is None:
                     st, c = "", D
-                elif v[-1] <= target:
+                elif v[-1] <= target * 1.005:          # PRINT ROUNDING AT THE STOP
                     st, c = "MET", G
                 else:
                     st, c = "%.1f dec to go" % math.log10(v[-1] / target), Y
