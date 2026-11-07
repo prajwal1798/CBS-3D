@@ -57,10 +57,16 @@ _CACHE = {}
 def _locator(X, tets):
     key = (id(X), id(tets), len(tets))
     if key not in _CACHE:
-        from scipy.spatial import cKDTree
         P = X[tets]
+        try:
+            from scipy.spatial import cKDTree
+            tree = cKDTree(P.mean(axis=1))
+        except ImportError:
+            tree = None
+            print("NOTE   : scipy NOT INSTALLED (python3 -m pip install scipy); "
+                  "BRUTE-FORCE POINT LOCATION, SLOW ON LARGE MESHES", file=sys.stderr)
         _CACHE.clear()
-        _CACHE[key] = (cKDTree(P.mean(axis=1)), P.min(axis=1), P.max(axis=1))
+        _CACHE[key] = (tree, P.min(axis=1), P.max(axis=1))
     return _CACHE[key]
 
 
@@ -72,11 +78,12 @@ def _weights(X, tet, p):
 def locate_weights(X, tets, p, k=48):
     # (ELEMENT INDEX, BARYCENTRIC WEIGHTS) OF THE TETRAHEDRON CONTAINING p, OR (None, None)
     tree, lo, hi = _locator(X, tets)
-    _d, cand = tree.query(p, k=min(k, len(tets)))
-    for e in np.atleast_1d(cand):
-        w = _weights(X, tets[e], p)
-        if w.min() >= -1e-9:
-            return e, w
+    if tree is not None:
+        _d, cand = tree.query(p, k=min(k, len(tets)))
+        for e in np.atleast_1d(cand):
+            w = _weights(X, tets[e], p)
+            if w.min() >= -1e-9:
+                return e, w
     size = (hi - lo).max(axis=1)
     tol = 1e-9 * size
     for e in np.where(np.all(lo <= p + tol[:, None], axis=1) & np.all(hi >= p - tol[:, None], axis=1))[0]:
