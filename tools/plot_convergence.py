@@ -77,7 +77,11 @@ def main():
         print("%-40s %8d iterations, final %s = %.3e" % (label, int(it[-1]), args.column, r[-1]))
 
     if args.target:
-        ax.axhline(args.target, color="k", lw=0.6, ls=(0, (1, 2)))
+        exp = int(np.floor(np.log10(args.target)))
+        mant = args.target / 10.0 ** exp
+        txt = r"$10^{%d}$" % exp if abs(mant - 1.0) < 1e-9 else r"$%g\times10^{%d}$" % (mant, exp)
+        ax.axhline(args.target, color="k", lw=0.7, ls=(0, (1, 2)),
+                   label="convergence tolerance (" + txt + ")")
     ax.set_xlabel("No. time steps")
     ax.set_ylabel(r"$\Vert e \Vert$ (velocity residual)" if args.column == "velocity_rel_max" else args.column)
     ax.set_title(args.title, fontsize=10)
