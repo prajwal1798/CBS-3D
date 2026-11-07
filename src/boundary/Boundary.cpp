@@ -13,6 +13,7 @@
 //=============================================================================
 
 #include "cbs/boundary/Boundary.hpp"
+#include "cbs/boundary/BfsInletProfile.hpp"
 
 #include <cmath>
 #include <stdexcept>
@@ -152,21 +153,13 @@ namespace cbs
         }
 
         //-------------------------------------------------------------------------
-        // Legacy backward-facing-step inlet profile:
-        //
-        //     u(y) = 0.6624 y^6 - 7.5547 y^5 + 33.9 y^4
-        //          - 75.283 y^3 + 83.368 y^2 - 37.793 y + 2.6959
+        // Backward-facing-step inlet profile (BC 507): the legacy CBS2D++_SI
+        // polynomial, or the table of CBS3D_BFS_INLET_PROFILE
+        // (BfsInletProfile.hpp).
         //-------------------------------------------------------------------------
         Real bfs_profile_u(Real y)
         {
-            return
-                0.6624 * std::pow(y, 6)
-                - 7.5547 * std::pow(y, 5)
-                + 33.9 * std::pow(y, 4)
-                - 75.283 * std::pow(y, 3)
-                + 83.368 * std::pow(y, 2)
-                - 37.793 * y
-                + 2.6959;
+            return BfsInletProfile::u(y);
         }
 
         //-------------------------------------------------------------------------

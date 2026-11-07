@@ -11,6 +11,7 @@
 //=============================================================================
 
 #include "cbs/preprocess/Preprocess.hpp"
+#include "cbs/boundary/BfsInletProfile.hpp"
 
 #ifdef CBS3D_USE_MPI
 #include "cbs/parallel/HaloExchange.hpp"
@@ -1973,16 +1974,15 @@ namespace cbs
             return count;
         };
 
+        // BC 507: LEGACY POLYNOMIAL OR CBS3D_BFS_INLET_PROFILE TABLE.
+        // EVERY RANK LOADS THE TABLE HERE, NOT ONLY THE RANKS THAT OWN
+        // INLET NODES: A BAD FILE THEN FAILS ON ALL RANKS (NO HANG IN A LATER
+        // COLLECTIVE) AND RANK 0 REPORTS IT.
+        (void) BfsInletProfile::tabulated();
+
         const auto bfs_profile = [](Real y) -> Real
         {
-            return
-                0.6624 * std::pow(y, 6)
-                - 7.5547 * std::pow(y, 5)
-                + 33.9 * std::pow(y, 4)
-                - 75.283 * std::pow(y, 3)
-                + 83.368 * std::pow(y, 2)
-                - 37.793 * y
-                + 2.6959;
+            return BfsInletProfile::u(y);
         };
 
         const auto rectangular_profile = [](Real y) -> Real

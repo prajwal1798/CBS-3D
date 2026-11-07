@@ -25,13 +25,18 @@
 //   z = 0, z = 1    SYMMETRY (2D-EQUIVALENT; LIU REPORTS IDENTICAL 2D AND 3D
 //                   RESULTS, SO THE SIDE FACES DO NOT ACT AS WALLS)  -> 506
 //
-// MESH SIZE (FREE TETRAHEDRA, BACKGROUND FIELD; POINT SIZES ARE IGNORED):
-//   lc_far     EVERYWHERE OUTSIDE THE RECIRCULATION BOX
+// MESH SIZE (FREE TETRAHEDRA, BACKGROUND FIELD = MIN OF THREE FIELDS;
+// POINT SIZES ARE IGNORED):
+//   lc_far     EVERYWHERE ELSE
 //   lc_fine    INSIDE THE RECIRCULATION BOX x = x_box0 .. x_box1
 //   lc_lip     AROUND THE STEP LIP (4, 1), WHERE THE SHEAR LAYER STARTS
-//   ESTIMATE FOR THE DEFAULTS: ~ 0.3 M TETRAHEDRA, THE SAME ORDER AS LIU'S
-//   297,054. GMSH PRINTS THE TRUE COUNT; MATCH IT WITH -clscale.
-//   MESH STUDY: -clscale 1.0 (L1), 0.79 (L2, ~2x), 0.63 (L3, ~4x).
+//   lc_wall    AT THE NO-SLIP WALLS, GROWING LINEARLY TO lc_far AT d_wall
+//              FROM THE WALL. NEEDED TWICE: SA INTEGRATES TO THE WALL (NO
+//              WALL FUNCTION), AND THE MEASURED INLET PROFILE IS STEEP AT
+//              THE WALLS (u = 0.35 AT 0.016 h): WITH NODES 0.25 APART THE
+//              DISCRETE INLET FLUX IS ~7 % LOW, WITH 0.03 IT IS < 1 % LOW.
+//   GMSH PRINTS THE TETRAHEDRON COUNT; SCALE ALL SIZES WITH -clscale.
+//   MESH STUDY: -clscale 1.26 (COARSE), 1.0 (MEDIUM), 0.79 (FINE, ~2x).
 //
 // MESH:   gmsh bfs3d_liu.geo -3 -format msh22 -o bfs3d_liu.msh
 // ============================================================================
@@ -49,6 +54,8 @@ span     = 1.0*L;   // EXTRUSION IN z
 lc_far   = 0.25;
 lc_fine  = 0.12;
 lc_lip   = 0.05;
+lc_wall  = 0.03;
+d_wall   = 0.30;
 x_box0   = 3.5;
 x_box1   = 16.0;
 
@@ -103,9 +110,20 @@ Field[2].YMin = L - 0.3;       Field[2].YMax = L + 0.3;
 Field[2].ZMin = -1.0;          Field[2].ZMax = span + 1.0;
 Field[2].Thickness = 0.6;
 
-Field[3] = Min;
-Field[3].FieldsList = {1, 2};
-Background Field = 3;
+Field[3] = Distance;
+Field[3].SurfacesList = {out[2], out[3], out[4], out[6]};
+Field[3].Sampling = 200;
+
+Field[4] = Threshold;
+Field[4].InField = 3;
+Field[4].SizeMin = lc_wall;
+Field[4].SizeMax = lc_far;
+Field[4].DistMin = 0.0;
+Field[4].DistMax = d_wall;
+
+Field[5] = Min;
+Field[5].FieldsList = {1, 2, 4};
+Background Field = 5;
 
 Mesh.MeshSizeExtendFromBoundary = 0;
 Mesh.MeshSizeFromPoints = 0;

@@ -1,0 +1,142 @@
+#!/usr/bin/env python3
+# ================================
+# FILE      : bfs_profiles.py
+# PURPOSE   : BACKWARD-FACING STEP, Re = 3025: COMPARE A CBS3D RESULT WITH
+#             LIU'S SA SOLUTION AND DENHAM'S MEASUREMENTS
+#             (cases/backward_facing_step/reference, FROM
+#             tools/digitise_liu2006_bfs.py).
+#
+#             AT EACH STATION x/h = 0, 1, 2, 4, 6, 8 DOWNSTREAM OF THE STEP,
+#             u/U0 IS SAMPLED (P1 INTERPOLATION, MID-SPAN z) AT THE y OF EVERY
+#             REFERENCE POINT, AND
+#               rms_liu, max_liu   AGAINST LIU'S SA CURVE
+#               rms_exp            AGAINST DENHAM'S DATA (WALL POINTS EXCLUDED)
+#               Q                  INT u dy OVER THE SECTION (LIU SA: 1.93-1.96)
+#             ARE PRINTED. THE REATTACHMENT LENGTH x_r/h IS THE LAST SIGN
+#             CHANGE (- TO +) OF u ALONG THE FLOOR AT HEIGHT --y-wall, WITHIN
+#             20 h OF THE STEP (DENHAM: ABOUT 6 h).
+#
+# USAGE     : python3 tools/bfs_profiles.py RESULT [--x-step 4] [--h 1]
+#                 [--z 0.5] [--y-wall 0.02] [--velocity velocity]
+#                 [--csv out.csv] [--plot out.png]
+#             RESULT = .pvtu / .vtu / FOLDER (LATEST .pvtu UNDER IT)
+#             --plot WRITES A FIGURE IN THE LAYOUT OF LIU (2006) FIG. 4(b)
+# ================================
+
+from __future__ import print_function
+
+import argparse
+import os
+import sys
+
+import numpy as np
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from heat_transfer_coefficient import read_mesh  # noqa: E402
+from probe_vtu import sample  # noqa: E402
+
+OFFSETS = [0.0, 2.0, 4.0, 6.0, 8.0, 12.0]       # PLOT SHIFTS OF LIU FIG. 4(b)
+
+
+def read_ref(path):
+    # "#" COMMENT LINES, THEN THE HEADER station,x_over_h,y,u, THEN DATA
+    rows = [ln for ln in open(path) if ln.strip() and not ln.startswith("#")]
+    d = np.array([[float(v) for v in ln.split(",")] for ln in rows[1:]])
+    return d[:, 0].astype(int), d[:, 1], d[:, 2], d[:, 3]
+
+
+def main():
+    here = os.path.dirname(os.path.abspath(__file__))
+    ref = os.path.join(here, "..", "cases", "backward_facing_step", "reference")
+    ap = argparse.ArgumentParser()
+    ap.add_argument("result")
+    ap.add_argument("--x-step", type=float, default=4.0, help="x OF THE STEP FACE IN THE MESH")
+    ap.add_argument("--h", type=float, default=1.0, help="STEP HEIGHT")
+    ap.add_argument("--z", type=float, default=0.5, help="SAMPLING PLANE (MID-SPAN)")
+    ap.add_argument("--y-wall", type=float, default=0.02, help="HEIGHT OF THE REATTACHMENT LINE [h]")
+    ap.add_argument("--velocity", default="velocity")
+    ap.add_argument("--ref", default=ref)
+    ap.add_argument("--csv", default=None)
+    ap.add_argument("--plot", default=None)
+    args = ap.parse_args()
+
+    path, X, _T, U, _used, tets, _mats, _bt, _bc = read_mesh(args.result, args.velocity, None)
+    print("READ   : %s (%d nodes, %d tetrahedra)" % (path, len(X) , len(tets)), file=sys.stderr)
+
+    ks, xh_s, ys_s, us_s = read_ref(os.path.join(args.ref, "liu2006_fig4b_sa.csv"))
+    ke, xh_e, ys_e, us_e = read_ref(os.path.join(args.ref, "liu2006_fig4b_exp.csv"))
+
+    def u_at(xh, y):
+        # A STATION ON THE STEP FACE (x/h = 0) IS SAMPLED A HAIR DOWNSTREAM
+        x = args.x_step + args.h * max(xh, 1.0e-6)
+        pts = np.c_[np.full(len(y), x), args.h * np.asarray(y), np.full(len(y), args.z)]
+        return sample(X, U[:, 0:1], tets, pts)[:, 0]
+
+    rows = []
+    print("%-6s %8s %8s %8s %8s %8s %6s" % ("x/h", "rms_liu", "max_liu", "rms_exp", "Q_cbs", "Q_liu", "n_nan"))
+    for k in range(len(OFFSETS)):
+        ms, me = ks == k, ke == k
+        xh = xh_s[ms][0]
+        u_s = u_at(xh, ys_s[ms])
+        u_e = u_at(xh, ys_e[me])
+        inner = (ys_e[me] > ys_e[me].min() + 1e-3) & (ys_e[me] < 3.0 - 1e-3)
+        dl = u_s - us_s[ms]
+        de = (u_e - us_e[me])[inner]
+        y_line = np.linspace(ys_s[ms].min(), ys_s[ms].max(), 301)
+        q_cbs = np.trapezoid(np.nan_to_num(u_at(xh, y_line)), y_line)
+        q_liu = np.trapezoid(us_s[ms], ys_s[ms])
+        nn = int(np.isnan(u_s).sum() + np.isnan(u_e).sum())
+        print("%-6g %8.4f %8.4f %8.4f %8.4f %8.4f %6d" % (
+            xh, np.sqrt(np.nanmean(dl ** 2)), np.nanmax(np.abs(dl)), np.sqrt(np.nanmean(de ** 2)),
+            q_cbs, q_liu, nn))
+        for y, a, b in zip(ys_s[ms], u_s, us_s[ms]):
+            rows.append((xh, "liu_sa", y, a, b))
+        for y, a, b in zip(ys_e[me], u_e, us_e[me]):
+            rows.append((xh, "denham", y, a, b))
+
+    # ================================
+    # REATTACHMENT: LAST - TO + SIGN CHANGE OF u ALONG THE FLOOR
+    # ================================
+    xs = args.x_step + args.h * np.linspace(0.01, 20.0, 2000)
+    pts = np.c_[xs, np.full(len(xs), args.y_wall * args.h), np.full(len(xs), args.z)]
+    uw = sample(X, U[:, 0:1], tets, pts)[:, 0]
+    up = np.where((uw[:-1] < 0.0) & (uw[1:] >= 0.0))[0]
+    if len(up):
+        i = up[-1]
+        xr = xs[i] - uw[i] * (xs[i + 1] - xs[i]) / (uw[i + 1] - uw[i])
+        print("x_r/h  : %.3f   (u = 0 AT y = %g h; DENHAM ~6)" % ((xr - args.x_step) / args.h, args.y_wall))
+    else:
+        print("x_r/h  : NO REVERSED FLOW FOUND AT y = %g h" % args.y_wall)
+
+    if args.csv:
+        with open(args.csv, "w") as f:
+            f.write("x_over_h,reference,y,u_cbs,u_reference\n")
+            for r in rows:
+                f.write("%g,%s,%.5f,%.6f,%.6f\n" % r)
+
+    if args.plot:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+
+        fig, ax = plt.subplots(figsize=(7.0, 2.8))
+        for k, off in enumerate(OFFSETS):
+            ms, me = ks == k, ke == k
+            y_line = np.linspace(ys_s[ms].min(), 3.0, 301)
+            ax.plot(off + u_at(xh_s[ms][0], y_line), y_line, color="#2a78d6", lw=1.4,
+                    label="CBS3D SA" if k == 0 else None)
+            ax.plot(off + us_s[ms], ys_s[ms], color="#1a1a1a", lw=0.9, ls=(0, (4, 2)),
+                    label="Liu (2006) SA" if k == 0 else None)
+            ax.plot(off + us_e[me], ys_e[me], "s", ms=3, mfc="none", mec="#55554f",
+                    label="Denham et al. (1975)" if k == 0 else None)
+            ax.text(off, 3.08, "x/h = %g" % xh_s[ms][0], fontsize=7, ha="left")
+        ax.set_xlim(-0.5, 14)
+        ax.set_ylim(0, 3.3)
+        ax.set_xlabel("u/U$_0$ + station offset")
+        ax.set_ylabel("y/h")
+        ax.legend(loc="center right", fontsize=7, frameon=False)
+        fig.savefig(args.plot, dpi=300, bbox_inches="tight")
+
+
+if __name__ == "__main__":
+    main()

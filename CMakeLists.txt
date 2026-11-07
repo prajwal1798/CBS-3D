@@ -44,6 +44,7 @@ set(CBS3D_CORE_SOURCES
     src/preprocess/Preprocess.cpp
     src/preprocess/NuclearHeating.cpp
     src/boundary/Boundary.cpp
+    src/boundary/BfsInletProfile.cpp
     src/timestep/TimeStep.cpp
 
     src/solver/Convergence.cpp
@@ -437,6 +438,13 @@ if (CBS3D_BUILD_TESTS)
     #--------------------------------------------------------------------------
     # Turbulence and wall-model kernels
     #--------------------------------------------------------------------------
+    cbs3d_add_verification(bfs_inlet_profile_verification
+        TEST_NAME bfs_inlet_profile
+        SOURCES
+            tests/BfsInletProfileVerification.cpp
+            src/boundary/BfsInletProfile.cpp
+    )
+
     cbs3d_add_verification(wall_distance_verification
         TEST_NAME wall_distance_exactness
         ARGS 60 40 20

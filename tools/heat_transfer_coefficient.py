@@ -122,7 +122,7 @@ def read_mesh(path, velocity_name, temperature_name="temperature"):
             bcs.append(_array(text, "bc_id").astype(np.int64)[tri])
         xs.append(x)
         gids.append(gid)
-        ts.append(_array(text, temperature_name))
+        ts.append(_array(text, temperature_name) if temperature_name else np.zeros(len(x)))
         us.append(_array(text, velocity_name).reshape(-1, 3))
     gid = np.concatenate(gids)
     n = gid.max() + 1

@@ -28,6 +28,7 @@
 #include "cbs/io/DistributedPost.hpp"
 #include "cbs/io/TimeAverage.hpp"
 #include "cbs/io/PointSampler.hpp"
+#include "cbs/boundary/BfsInletProfile.hpp"
 #include "cbs/assembly/HeatPulse.hpp"
 #include "cbs/solver/SteadyEnergySolver.hpp"
 #include "cbs/linalg/PetscPersistentDistributedPressureSystem.hpp"
@@ -1320,6 +1321,11 @@ namespace cbs
         // (CBS3D_PROBE_FILE, CBS3D_GRID_DIMS); BOTH OFF UNLESS REQUESTED.
         HeatPulse::initialise(s_);
         PointSampler::initialise(s_, distributed_case_name);
+
+        if (s_.mpi_rank == 0 && BfsInletProfile::tabulated())
+        {
+            std::cout << "BC 507 INLET : " << BfsInletProfile::summary() << "\n";
+        }
 
         // ================================
         // IMPLICIT STEADY ENERGY FOR THE CURRENT (FROZEN) VELOCITY INSTEAD OF

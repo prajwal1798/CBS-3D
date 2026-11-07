@@ -769,6 +769,7 @@ All points were checked against a gmsh mesh of the `.geo` for the right material
 
 ## 14. Open tasks, prioritised
 
+0. **SA validation, turbulent backward-facing step, Re = 3025** (Nithiarasu & Liu 2006 Fig. 4(b); Denham et al. 1975). Case ready in `cases/backward_facing_step` (README: set-up, evidence for the stations x/h = 0, 1, 2, 4, 6, 8, commands). BC 507 takes Denham's measured inlet via `CBS3D_BFS_INLET_PROFILE`; SA treats 507 as an inlet (ν̃ = 0.05, `sa_inlet_ratio` 151.25). Reference data extracted exactly from the paper's vector graphics (`tools/digitise_liu2006_bfs.py`); comparison with `tools/bfs_profiles.py`. Run `--clscale 1.0` (≈ 0.35 M tets), then 1.26 / 0.79 for the mesh study.
 1. ~~Read the result of job 31524~~ (done 2026-11-07: τ is not the cause). **Run `blanket.sh hold` on 31157, then `blanket.sh energy` on the hold run, and compare** (§9.7): is the 40 K gap a short-averaging artefact or genuine mean-flow failure? *(About a day of queue time.)*
 2. **Make the steady and transient stabilisation consistent**, behind a switch, with the default bit-identical. Verify on the U-channel and the slab, then recompute L2 on h4.
 3. **Third mesh**, near-wall refined (owner meshes), then the mesh study on wall T, Tmax and Nu (h5/h4/h3), with paper-style plots:
