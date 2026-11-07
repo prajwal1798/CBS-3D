@@ -45,21 +45,53 @@ def read_probes(path):
     return names, np.array(xyz)
 
 
-def sample(X, field, tets, points):
-    lo = X[tets].min(axis=1)
-    hi = X[tets].max(axis=1)
+# ================================
+# POINT LOCATION: A k-d TREE OF ELEMENT CENTROIDS GIVES THE k NEAREST
+# CANDIDATES; THE BARYCENTRIC TEST PICKS THE CONTAINING ONE. A POINT NOT
+# FOUND AMONG THEM (RARE: VERY ELONGATED ELEMENTS) FALLS BACK TO THE
+# BRUTE-FORCE BOUNDING-BOX SEARCH. THE TREE IS BUILT ONCE PER MESH.
+# ================================
+_CACHE = {}
+
+
+def _locator(X, tets):
+    key = (id(X), id(tets), len(tets))
+    if key not in _CACHE:
+        from scipy.spatial import cKDTree
+        P = X[tets]
+        _CACHE.clear()
+        _CACHE[key] = (cKDTree(P.mean(axis=1)), P.min(axis=1), P.max(axis=1))
+    return _CACHE[key]
+
+
+def _weights(X, tet, p):
+    A = np.vstack([np.ones(4), X[tet].T])
+    return np.linalg.solve(A, np.r_[1.0, p])
+
+
+def locate_weights(X, tets, p, k=48):
+    # (ELEMENT INDEX, BARYCENTRIC WEIGHTS) OF THE TETRAHEDRON CONTAINING p, OR (None, None)
+    tree, lo, hi = _locator(X, tets)
+    _d, cand = tree.query(p, k=min(k, len(tets)))
+    for e in np.atleast_1d(cand):
+        w = _weights(X, tets[e], p)
+        if w.min() >= -1e-9:
+            return e, w
     size = (hi - lo).max(axis=1)
+    tol = 1e-9 * size
+    for e in np.where(np.all(lo <= p + tol[:, None], axis=1) & np.all(hi >= p - tol[:, None], axis=1))[0]:
+        w = _weights(X, tets[e], p)
+        if w.min() >= -1e-9:
+            return e, w
+    return None, None
+
+
+def sample(X, field, tets, points):
     out = np.full((len(points),) + field.shape[1:], np.nan)
     for i, p in enumerate(points):
-        tol = 1e-9 * size
-        cand = np.where(np.all(lo <= p + tol[:, None], axis=1) & np.all(hi >= p - tol[:, None], axis=1))[0]
-        for e in cand:
-            n = tets[e]
-            A = np.vstack([np.ones(4), X[n].T])
-            w = np.linalg.solve(A, np.r_[1.0, p])
-            if w.min() >= -1e-9:
-                out[i] = np.tensordot(w, field[n], axes=1)
-                break
+        e, w = locate_weights(X, tets, p)
+        if e is not None:
+            out[i] = np.tensordot(w, field[tets[e]], axes=1)
     return out
 
 

@@ -42,7 +42,7 @@ import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from heat_transfer_coefficient import read_mesh  # noqa: E402
-from probe_vtu import sample  # noqa: E402
+from probe_vtu import locate_weights, sample  # noqa: E402
 
 OFFSETS = [0.0, 2.0, 4.0, 6.0, 8.0, 12.0]       # PLOT SHIFTS OF LIU FIG. 4(b)
 
@@ -164,15 +164,8 @@ def main():
 
 
 def locate(X, tets, p):
-    # INDEX OF THE TETRAHEDRON CONTAINING p (BARYCENTRIC TEST), OR None
-    P = X[tets]
-    cand = np.where(np.all(P.min(axis=1) <= p + 1e-12, axis=1) & np.all(P.max(axis=1) >= p - 1e-12, axis=1))[0]
-    for e in cand:
-        A = np.vstack([np.ones(4), X[tets[e]].T])
-        w = np.linalg.solve(A, np.r_[1.0, p])
-        if w.min() >= -1e-9:
-            return e
-    return None
+    # INDEX OF THE TETRAHEDRON CONTAINING p, OR None (k-d TREE, probe_vtu.py)
+    return locate_weights(X, tets, p)[0]
 
 
 def wall_law(args, X, U, tets):
