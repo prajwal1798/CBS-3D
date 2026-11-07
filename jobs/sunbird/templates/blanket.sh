@@ -31,6 +31,15 @@
 #                       CBS3D_CHECKPOINT_EVERY [50000] ITERATIONS
 #   pulse-resume RUN_DIR [OPTS]  CONTINUE AN INTERRUPTED pulse RUN FROM ITS
 #                       NEWEST CHECKPOINT (SAME PULSE, PROBES, GRID)
+#   hold RUN_DIR [OPTS]   TRANSIENT L2 RUN AT CONSTANT FULL POWER (NO PULSE)
+#                       FROM THE LAST VTU OF RUN_DIR AT t = 0, WITH TIME
+#                       AVERAGES (mean_velocity, mean_temperature, u'T') FROM
+#                       HOLD_AVERAGE_START [10] s TO HOLD_END [110] s; PROBES
+#                       AS pulse; VTU EVERY HOLD_VTU_DT [25] s. THEN
+#                       energy ON THIS RUN SOLVES THE STEADY ENERGY ON ITS
+#                       mean_velocity, FOR A LIKE-WITH-LIKE COMPARISON
+#   hold-resume RUN_DIR [OPTS]  CONTINUE A hold RUN FROM ITS NEWEST CHECKPOINT
+#                       (THE AVERAGING WINDOW CONTINUES)
 #   check [RUN_DIR]     MASS + ENERGY BALANCE AND RESIDUAL PLOT OF A RUN
 #                       (DEFAULT: THE NEWEST RUN)
 #   status              YOUR JOBS AND THE LATEST PROGRESS LINE OF EACH RUN
@@ -59,7 +68,7 @@
 # ================================
 
 set -euo pipefail
-usage() { sed -n '2,48p' "$0" | sed 's/^# \{0,1\}//'; exit 1; }
+usage() { sed -n '2,57p' "$0" | sed 's/^# \{0,1\}//'; exit 1; }
 [[ "$#" -ge 1 ]] || usage
 
 source "$HOME/cbs3d_env.sh"
@@ -285,6 +294,53 @@ pulse|pulse-resume)
     bash "$T/submit_auto.sh" "$DIR" "$CASE" --sets "$NR" --time 24:00:00 "$@" \
         --par "$(stage_par L2P)" --matprop "$(run_matprop)"
     echo "THEN   : bash $T/blanket.sh status   (PROBES: output/$CASE/${CASE}_probes.csv IN THE RUN FOLDER)"
+    ;;
+
+# ================================
+# TRANSIENT RUN AT CONSTANT FULL POWER WITH TIME AVERAGES
+# ================================
+hold|hold-resume)
+    RUN="$(readlink -f "${1:?USAGE: blanket.sh $CMD RUN_DIR [OPTS]}")"
+    shift
+    NR=$(ls -d "$RUN"/partitions/rank_* | wc -l)
+    HOLD_END="${HOLD_END:-110}"
+    HOLD_VTU_DT="${HOLD_VTU_DT:-25}"
+    export CBS3D_AVERAGE_START_TIME="${HOLD_AVERAGE_START:-10}"
+    export CBS3D_RESTART=1
+    if [[ "$CMD" == hold ]]; then
+        LAST="$(ls -1 "$RUN"/output/"$CASE"/"$CASE"_step_*.pvtu 2>/dev/null | sort | tail -1)"
+        [[ -n "$LAST" ]] || { echo "ERROR: NO .pvtu IN $RUN/output/$CASE" >&2; exit 1; }
+        ITER="$(basename "$LAST" .pvtu | sed 's/.*_step_0*//')"
+        export CBS3D_RESTART_FORMAT=legacy_vtu CBS3D_RESTART_AS_INITIAL_CONDITION=1
+        export CBS3D_RESTART_ROOT="$RUN/output/$CASE" CBS3D_RESTART_ITERATION="$ITER"
+        export CBS3D_RESTART_VELOCITY_ARRAY=velocity
+        echo "START  : $LAST (ITERATION $ITER, $NR RANKS) AS THE FIELD AT t = 0"
+    else
+        CK="$(ls -1d "$RUN"/output/"$CASE"/restart/step_* 2>/dev/null | sort | tail -1)"
+        [[ -n "$CK" ]] || { echo "ERROR: NO CHECKPOINT IN $RUN/output/$CASE/restart" >&2; exit 1; }
+        export CBS3D_RESTART_FORMAT=native CBS3D_RESTART_ROOT="$CK"
+        unset CBS3D_RESTART_ITERATION CBS3D_RESTART_AS_INITIAL_CONDITION CBS3D_RESTART_VELOCITY_ARRAY
+        echo "RESUME : $CK ($(grep physical_time "$CK/restart_manifest.txt" 2>/dev/null))"
+    fi
+    # L2P WITH end_rtime = HOLD_END AND A VTU EVERY HOLD_VTU_DT SECONDS
+    PAR="$DIR/hold_L2.par"
+    awk -v e="$HOLD_END" -v v="$HOLD_VTU_DT" '/^#/ { print; next }
+         want == 1 { $4 = e; want = 0 }
+         want == 2 { $7 = v; want = 0 }
+         /end_rtime/ { want = 1 }
+         /vtu_output_every_sim_time/ { want = 2 }
+         { print }' "$(stage_par L2P)" > "$PAR"
+    unset CBS3D_STEADY_ENERGY CBS3D_HEAT_PULSE_FILE CBS3D_AVERAGE_START_ITERATION
+    unset CBS3D_GRID_DIMS CBS3D_GRID_DT
+    export CBS3D_PROBE_FILE="${CBS3D_PROBE_FILE:-$SRC/blanket_probes.txt}"
+    export CBS3D_PROBE_DT="${CBS3D_PROBE_DT:-0.01}"
+    export CBS3D_CHECKPOINT_EVERY="${CBS3D_CHECKPOINT_EVERY:-50000}"
+    echo "HEATING: CONSTANT FULL POWER (NO PULSE FILE)"
+    echo "AVERAGE: FROM $CBS3D_AVERAGE_START_TIME s TO $HOLD_END s; VTU EVERY $HOLD_VTU_DT s"
+    echo "STAGE  : L2P WITH end_rtime $HOLD_END ($PAR); AFC $CBS3D_TEMPERATURE_AFC"
+    bash "$T/submit_auto.sh" "$DIR" "$CASE" --sets "$NR" --time 24:00:00 "$@" \
+        --par "$PAR" --matprop "$(run_matprop)"
+    echo "THEN   : bash $T/blanket.sh status ; WHEN DONE: bash $T/blanket.sh energy <THIS RUN> L2"
     ;;
 
 # ================================

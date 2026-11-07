@@ -14,6 +14,9 @@
 #                 [--probes cases/blanket_slice/blanket_probes.txt]
 #                 [--velocity velocity] [--csv out.csv]
 #             RESULT = .pvtu / .vtu / FOLDER (LATEST FILE UNDER IT)
+#             RESULT:mean  READS mean_temperature AND mean_velocity (THE TIME
+#                          AVERAGES OF A RUN WITH CBS3D_AVERAGE_START_TIME)
+#                          INSTEAD OF THE INSTANTANEOUS FIELDS
 #
 # STATUS    : NUMPY ONLY (READER SHARED WITH heat_transfer_coefficient.py).
 # ================================
@@ -71,16 +74,22 @@ def main():
 
     names, pts = read_probes(args.probes)
     cols = []
+    label = []
     for r in args.results:
-        path, X, T, U, _used, tets, _mats, _bt, _bc = read_mesh(r, args.velocity)
+        tname, vname, tag = "temperature", args.velocity, ""
+        if r.endswith(":mean"):
+            r, tname, vname, tag = r[:-5], "mean_temperature", "mean_velocity", "_mean"
+        path, X, T, U, _used, tets, _mats, _bt, _bc = read_mesh(r, vname, tname)
         both = np.c_[T, np.linalg.norm(U, axis=1)]
         cols.append((path, sample(X, both, tets, pts)))
-        print("READ  : %s" % path, file=sys.stderr)
+        label.append((os.path.basename(os.path.dirname(os.path.dirname(os.path.dirname(path)))) or path) + tag)
+        print("READ  : %s (%s, %s)" % (path, tname, vname), file=sys.stderr)
 
-    label = [os.path.basename(os.path.dirname(os.path.dirname(os.path.dirname(c[0])))) or c[0] for c in cols]
-    print("%-16s" % "probe" + "".join("%22s" % ("T [K] " + l[-12:]) for l in label))
+    print("%-16s" % "probe" + "".join("%22s" % ("T [K] " + l[-14:]) for l in label)
+          + "".join("%20s" % ("|u| " + l[-14:]) for l in label))
     for i, n in enumerate(names):
-        print("%-16s" % n + "".join("%22.3f" % c[1][i, 0] for c in cols))
+        print("%-16s" % n + "".join("%22.3f" % c[1][i, 0] for c in cols)
+              + "".join("%20.5f" % c[1][i, 1] for c in cols))
     if args.csv:
         with open(args.csv, "w") as f:
             f.write("probe," + ",".join("T_%s,speed_%s" % (l, l) for l in label) + "\n")

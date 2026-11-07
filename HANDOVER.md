@@ -489,7 +489,7 @@ Iso-levels are a fraction f of the 99.5th percentile of the positive values in t
 | **30102** | h4 | **L2 steady energy** on the 30082 mean flow (`ilots = 1`, LTS τ) | **Tmax 437.06 K** (+7.8 K vs h5); Q balance exact; outlets 314.11 / 310.07 / 304.51 / 307.35 K. **Step 159055** = converged result (`velocity` = mean flow); step 159054 in the same folder = unsolved initial state, do not use |
 | 31156 | — | self-check of `39e2bdb` | PASS (heat in rel. err 7.97e-5) |
 | **31157** | h4 | **L2P pulse**, 600 s, from 30102 step 159055 at t = 0, AFC on, global Δt ≈ 4.34e-4 s | COMPLETED 4 Nov 22:28 after 9 h 10 min; 1,367,004 iterations (global iterations 159055 → **1526059**); stop reason "transient end time reached". 23 probes every 0.01 s; FNO grid 176×140×15 every 0.1 s (~6001 samples); VTU every 5 s (~121); checkpoints every 50k (~27). Final Tmax 450.26 K |
-| **31524** | h4 | **L2G diagnostic**: steady energy on the 30082 mean flow with `ilots = 0` (global Δt τ); par `blanket_L2G.par` (untracked) | **pending**: compare with `probe_vtu.py` (§9.7) |
+| **31524** | h4 | **L2G diagnostic**: steady energy on the 30082 mean flow with `ilots = 0` (global Δt τ); par `blanket_L2G.par` (untracked) | **done**: FW_mid 360.7 K vs 361.1 K (30102): τ is not the cause (§9.7) |
 
 **Mesh independence, h5 → h4** (steady, LTS τ):
 - Outlet temperatures agree to ≤ 0.2 K.
@@ -580,7 +580,29 @@ python3 $CBS3D_CODE/tools/probe_vtu.py $CBS3D_SCRATCH/cases/blanket_slice_h4/run
 - **31524 ≈ 30102** (≈ 361 K): the flow unsteadiness (u′T′) is the cause, which is a physical result. Confirm it with the u′T′ covariance accumulated by `TimeAverage` (version-2 rank files) in a transient window.
 - Also check that 31524 printed a sane `t_max`, `converged`, and `residual_check` ≈ 1e-12.
 
-**Sign argument (added 2026-11-06).** Unsteady transport ⟨u′T′⟩ is, on the whole, down-gradient: it acts as extra diffusion and *improves* wall-to-coolant heat transfer. A steady solve on the mean flow omits it and should therefore be *hotter* at the wall than the transient, yet 30102 is ~40 K *cooler*. Hypothesis 2 has the wrong sign to explain the gap. The trend with numerical diffusion has the right sign: Tmax 429.3 K (h5, LTS τ) < 437.1 K (h4, LTS τ) < 450.3 K (h4, transient, small τ); every step that removes streamline diffusion makes the wall hotter. The CBS energy stabilisation in `EnergyAssembly` is −(Δt_e/2)∫ρc_p(u·∇N_a)(u·∇T): advective part only, not the full residual, so it does not vanish at steady state. With LTS, Δt_e ≈ c·h/|u|, which gives a streamwise artificial conductivity ≈ c·Pe_h/2 times k_f (cell Péclet in the hundreds). Expect 31524 ≈ 31157.
+**Sign argument (2026-11-06) — refuted by 31524.** It argued that ⟨u′T′⟩ should make the transient *cooler*, so the gap had to be numerical diffusion from the LTS τ, and predicted 31524 ≈ 31157. The prediction was wrong (below).
+
+**Result of 31524 (read 2026-11-07).** COMPLETED in 47 s; global Δt confirmed (the timestep is set before the `CBS3D_STEADY_ENERGY` branch, so `ilots 0` gives δt_e = global minimum for τ).
+
+| Probe | 30102 (LTS τ) | 31524 (global τ) | 31157 (transient, t = 600 s) |
+|---|---|---|---|
+| FW_surf_C | 378.56 | 378.18 | 416.67 |
+| FW_mid_C | 361.08 | 360.70 | 400.27 |
+| FW_mid_R | 388.37 | 387.70 | 427.64 |
+| FW_corner_R | 411.76 | 411.15 | 424.67 |
+| S_c1c2_C | 321.85 | 321.66 | 338.82 |
+| C1_run_C_wall (water, 1 mm from wall) | 313.01 | 312.95 | 331.70 |
+| C1_run_C (water, channel centre) | 303.34 | 303.37 | 301.98 |
+
+- **τ (LTS against global Δt) changes the steady result by < 1 K: hypothesis 1 is eliminated.** The steady and explicit operators agree at steady state (residual check), so the 40 K gap comes from the **velocity field**, not the energy discretisation.
+- The pattern is specific: in the transient, the water next to the channel-1 front wall is ~19 K hotter and the channel centre ~1 K cooler. Heat stays near the wall instead of being carried into the core. The time-averaged (30082) flow mixes the wall heat into the core more effectively than the actual flow does.
+- Two explanations remain:
+  - **(a) The 30082 mean flow is not representative.** It was averaged over only 30–70 s, starting from rest; 31157's flow has run 600 s further.
+  - **(b) The mean flow is a poor transport model for this unsteady flow.** A time average can contain secondary-flow structures that never exist at any instant (a flapping or switching flow averages to a steady vortex pattern), so ⟨u′T′⟩ can act *counter*-gradient against the mean-flow prediction. This would be physics, and would mean the steady-on-mean-flow method is invalid here.
+- **Decisive test: `blanket.sh hold`.** Constant full power from 31157's final state, with time averages over 10–110 s (`mean_velocity`, `mean_temperature`, `covariance_velocity_temperature`). Then `blanket.sh energy <hold run> L2` solves the steady energy on that run's own mean flow. Compare with `probe_vtu.py <hold run>:mean <energy run> <30102>`:
+  - steady-on-own-mean ≈ hold `mean_temperature` (≈ 400 K at FW_mid): (a); the steady method is fine but needs a longer, later averaging window;
+  - steady-on-own-mean ≈ 361 K: (b); the transient is the reference, and the u′T′ covariance near the channel-1 front wall shows the mechanism.
+- Until this is settled, quote the transient (31157) temperatures, and state that the steady mean-flow method under-predicts the first-wall temperature by ~40 K for this flow.
 
 ### 9.8 Model-validity audit (2026-11-06): what the paper must state or fix
 
@@ -592,7 +614,7 @@ Physics (the model is the forced-convection, constant-property, single-phase lim
 - **Defence and fix**: T is linear in the loads for a given flow, so every result is exactly the small-load forced-convection limit scaled up. Report θ = (T − T_in)·k/(q″·L) and Nu, not absolute kelvin. Otherwise lower the loads (ΔT_wall ≲ 10 K), or add Boussinesq buoyancy + μ(T) (this breaks one-way coupling and the linearity used for the FNO ensemble).
 
 Numerics:
-- Δt-dependent, non-residual energy stabilisation (§9.7). The steady result carries an O(h) streamline-diffusion error.
+- Δt-dependent, non-residual energy stabilisation. In principle the steady result depends on Δt; in practice 31524 shows < 1 K between LTS and global τ on h4 (§9.7), so this is not a significant error here.
 - **CBS equal-order (P1/P1) pressure stabilisation ∝ Δt** (Codina 2001). With the global Δt ≈ 4.4e-4 s against h/|u| ≈ 0.02 s in core cells, it is ~40× weaker than an h/|u|-scaled value. The momentum Step-1 stabilisation is equally small (cell Re ≈ 250). Check mid-plane p and element div(u) for node-to-node oscillation. Show that the unsteadiness (St, amplitude) is independent of mesh and Δt before calling it physical.
 - **Mesh**: h5 → h4 moved Tmax by +7.8 K (6 % of the rise above inlet); the thermal boundary layer has 1–2 cells. Wall T, h and Nu are not mesh-converged until h3 (GCI, Celik et al. 2008).
 - **BCs**: the uniform inlet velocity in every port imposes the flow split (area-weighted), so it is not computed. Outlet backflow is clipped (BC 520); measure the fraction of outlet faces that would back-flow.
@@ -747,7 +769,7 @@ All points were checked against a gmsh mesh of the `.geo` for the right material
 
 ## 14. Open tasks, prioritised
 
-1. **Read the result of job 31524** and run the `probe_vtu.py` comparison (§9.7). Decide on the stabilisation fix. *(Hours.)*
+1. ~~Read the result of job 31524~~ (done 2026-11-07: τ is not the cause). **Run `blanket.sh hold` on 31157, then `blanket.sh energy` on the hold run, and compare** (§9.7): is the 40 K gap a short-averaging artefact or genuine mean-flow failure? *(About a day of queue time.)*
 2. **Make the steady and transient stabilisation consistent**, behind a switch, with the default bit-identical. Verify on the U-channel and the slab, then recompute L2 on h4.
 3. **Third mesh**, near-wall refined (owner meshes), then the mesh study on wall T, Tmax and Nu (h5/h4/h3), with paper-style plots:
    - T through the first wall at Tmax and along the channel-1 heated wall;

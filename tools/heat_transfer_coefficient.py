@@ -93,7 +93,7 @@ def latest(path):
     return max(found)[1]
 
 
-def read_mesh(path, velocity_name):
+def read_mesh(path, velocity_name, temperature_name="temperature"):
     path = latest(path)
     if path.endswith(".pvtu"):
         with open(path) as handle:
@@ -122,7 +122,7 @@ def read_mesh(path, velocity_name):
             bcs.append(_array(text, "bc_id").astype(np.int64)[tri])
         xs.append(x)
         gids.append(gid)
-        ts.append(_array(text, "temperature"))
+        ts.append(_array(text, temperature_name))
         us.append(_array(text, velocity_name).reshape(-1, 3))
     gid = np.concatenate(gids)
     n = gid.max() + 1
