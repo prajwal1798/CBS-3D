@@ -21,10 +21,16 @@ namespace cbs
                 || bc == s.cfg.bc_cht_interface;
         }
 
+        // ================================
+        // SA INLETS: EVERY PRESCRIBED-VELOCITY INFLOW FACE. BC 507 (THE LEGACY
+        // BACKWARD-FACING-STEP PROFILE, AS IN CBS2D++_SI) IS AN INLET TOO;
+        // WITHOUT IT nu_tilde THERE WOULD BE LEFT TO THE TRANSPORT UPDATE.
+        // ================================
         bool is_inlet_bc(const CBSStateSI& s, Int bc)
         {
             return bc == s.cfg.bc_velocity_temperature_inlet
-                || bc == s.cfg.bc_massflow_temperature_inlet;
+                || bc == s.cfg.bc_massflow_temperature_inlet
+                || bc == s.cfg.bc_bfs_parabolic_inlet;
         }
 
         //=====================================================================

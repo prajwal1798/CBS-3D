@@ -16,7 +16,9 @@
 //   SPAN              z = 0 .. 1   (THE 2D SECTION EXTRUDED BY UNIT LENGTH)
 //
 // BOUNDARY CODES (THE PHYSICAL-GROUP NUMBER IS THE CBS BOUNDARY CODE):
-//   x = 0           INLET, MEASURED u(y), v = w = 0      -> 512 (PROFILE INLET)
+//   x = 0           INLET, MEASURED u(y), v = w = 0      -> 507 (LEGACY BFS
+//                   PROFILE, AS IN CBS2D++_SI: A 6TH-ORDER POLYNOMIAL ON
+//                   y = 1..3, ZERO AT BOTH WALLS, MEAN 1.03, MAX 1.38)
 //   x = 40          OUTLET, p = 0                        -> 520
 //   ALL WALLS       NO-SLIP (TOP, UPSTREAM FLOOR, STEP FACE, DOWNSTREAM FLOOR)
 //                                                        -> 530
@@ -76,7 +78,7 @@ Plane Surface(1) = {1};
 // ================================
 out[] = Extrude {0, 0, span} { Surface{1}; };
 
-Physical Surface("inlet_profile_512", 512) = {out[7]};
+Physical Surface("inlet_bfs_507", 507)     = {out[7]};
 Physical Surface("outlet_520", 520)        = {out[5]};
 Physical Surface("walls_530", 530)         = {out[2], out[3], out[4], out[6]};
 Physical Surface("symmetry_506", 506)      = {1, out[0]};
