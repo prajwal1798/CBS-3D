@@ -21,6 +21,15 @@
 #                 [--csv out.csv] [--plot out.png]
 #             RESULT = .pvtu / .vtu / FOLDER (LATEST .pvtu UNDER IT)
 #             --plot WRITES A FIGURE IN THE LAYOUT OF LIU (2006) FIG. 4(b)
+#
+#             WALL LAW (--wall-law FILE.png): u+ = u/u_tau AGAINST
+#             y+ = y u_tau/nu AT ATTACHED STATIONS (--wall-stations, DEFAULT
+#             x/h = -2 FLOOR AND ROOF, 12, 20, 30 FLOOR, 30 ROOF; NOT INSIDE
+#             THE RECIRCULATION, WHERE u_tau -> 0). u_tau FROM THE EXACT P1
+#             WALL GRADIENT: nu_t = 0 AT THE WALL, SO tau_w = mu du/dn, AND u
+#             IS LINEAR IN THE FIRST ELEMENT: du/dn = u(delta)/delta. ALSO
+#             PRINTS Re_tau (HALF CHANNEL) AND y+ OF THE NEAREST OFF-WALL NODE.
+#             REFERENCE LINES AS LIU: u+ = y+, u+ = (1/0.418) ln y+ + 5.5.
 # ================================
 
 from __future__ import print_function
@@ -58,6 +67,9 @@ def main():
     ap.add_argument("--ref", default=ref)
     ap.add_argument("--csv", default=None)
     ap.add_argument("--plot", default=None)
+    ap.add_argument("--wall-law", default=None, help="FIGURE FILE FOR u+ AGAINST y+")
+    ap.add_argument("--wall-stations", default="-2:floor,-2:roof,12:floor,20:floor,30:floor,30:roof")
+    ap.add_argument("--mu", type=float, default=1.0 / 3025.0, help="MOLECULAR VISCOSITY (rho = 1)")
     args = ap.parse_args()
 
     path, X, _T, U, _used, tets, _mats, _bt, _bc = read_mesh(args.result, args.velocity, None)
@@ -108,6 +120,9 @@ def main():
     else:
         print("x_r/h  : NO REVERSED FLOW FOUND AT y = %g h" % args.y_wall)
 
+    if args.wall_law:
+        wall_law(args, X, U, tets)
+
     if args.csv:
         with open(args.csv, "w") as f:
             f.write("x_over_h,reference,y,u_cbs,u_reference\n")
@@ -146,6 +161,77 @@ def main():
         ax.legend(loc="center", bbox_to_anchor=(10.95 / 14.0, 0.5), fontsize=7.5, frameon=False,
                   handlelength=1.8, borderaxespad=0.0)
         fig.savefig(args.plot, dpi=300, bbox_inches="tight")
+
+
+def locate(X, tets, p):
+    # INDEX OF THE TETRAHEDRON CONTAINING p (BARYCENTRIC TEST), OR None
+    P = X[tets]
+    cand = np.where(np.all(P.min(axis=1) <= p + 1e-12, axis=1) & np.all(P.max(axis=1) >= p - 1e-12, axis=1))[0]
+    for e in cand:
+        A = np.vstack([np.ones(4), X[tets[e]].T])
+        w = np.linalg.solve(A, np.r_[1.0, p])
+        if w.min() >= -1e-9:
+            return e
+    return None
+
+
+def wall_law(args, X, U, tets):
+    # ================================
+    # u+ AGAINST y+ AT ATTACHED STATIONS
+    # ================================
+    nu = args.mu
+    curves = []
+    print("\n%-6s %-6s %10s %8s %8s %10s" % ("x/h", "wall", "u_tau", "Re_tau", "y1+_elem", "note"))
+    for item in args.wall_stations.split(","):
+        xs, wall = item.split(":")
+        xh = float(xs)
+        x = args.x_step + args.h * xh
+        floor = args.h if x < args.x_step else 0.0
+        roof = 3.0 * args.h
+        y_w, sgn = (floor, 1.0) if wall == "floor" else (roof, -1.0)
+        half = 0.5 * (roof - floor)
+
+        def u_n(d):
+            pts = np.c_[np.full(len(d), x), y_w + sgn * np.asarray(d), np.full(len(d), args.z)]
+            return sample(X, U[:, 0:1], tets, pts)[:, 0]
+
+        delta = 1.0e-5 * args.h
+        dudn = u_n(np.array([delta]))[0] / delta
+        # FIRST-ELEMENT HEIGHT: THE WALL-ADJACENT TETRAHEDRON CONTAINING THE
+        # POINT delta ABOVE THE WALL; ITS HIGHEST NODE ABOVE THE WALL
+        e = locate(X, tets, np.array([x, y_w + sgn * delta, args.z]))
+        dist = sgn * (X[tets[e], 1] - y_w) if e is not None else np.array([])
+        if not np.isfinite(dudn) or dudn <= 0.0:
+            print("%-6g %-6s %10s %8s %8s %10s" % (xh, wall, "-", "-", "-", "REVERSED"))
+            continue
+        u_tau = np.sqrt(nu * dudn)
+        y1p = dist.max() * u_tau / nu if len(dist) else float("nan")
+        yp = np.logspace(-0.3, np.log10(half * u_tau / nu), 240)
+        up = u_n(yp * nu / u_tau) / u_tau
+        curves.append((xh, wall, yp, up))
+        print("%-6g %-6s %10.5f %8.1f %8.2f %10s" % (xh, wall, u_tau, half * u_tau / nu, y1p, ""))
+
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    plt.rcParams.update({"font.family": "serif", "mathtext.fontset": "dejavuserif", "font.size": 10})
+    fig, ax = plt.subplots(figsize=(6.4, 4.2))
+    yl = np.logspace(0, 3, 200)
+    ax.plot(yl[yl < 15], yl[yl < 15], color="k", lw=0.8, ls=(0, (1, 2)), label="$u^+ = y^+$")
+    ax.plot(yl[yl > 5], np.log(yl[yl > 5]) / 0.418 + 5.5, color="k", lw=0.8, ls=(0, (5, 3)),
+            label="$u^+ = (1/0.418)\\ln y^+ + 5.5$")
+    colors = ["#2a78d6", "#eb6834", "#1baa7a", "#8e5bd0", "#c0392b", "#7a7a72"]
+    for i, (xh, wall, yp, up) in enumerate(curves):
+        ax.plot(yp, up, color=colors[i % len(colors)], lw=1.4, label="x/h = %g, %s" % (xh, wall))
+    ax.set_xscale("log")
+    ax.set_xlim(1, 1000)
+    ax.set_ylim(0, 25)
+    ax.set_xlabel("$y^+$")
+    ax.set_ylabel("$u^+$")
+    ax.set_title("Re = 3025; Spalart-Allmaras model", fontsize=10)
+    ax.grid(True, which="major", color="#d8d8d4", lw=0.5)
+    ax.legend(loc="upper left", fontsize=7.5, frameon=False)
+    fig.savefig(args.wall_law, dpi=300, bbox_inches="tight")
 
 
 if __name__ == "__main__":

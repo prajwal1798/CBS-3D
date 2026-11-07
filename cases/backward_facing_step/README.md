@@ -45,15 +45,27 @@ profile and Denham's is at 30 mm (2h); 15 mm is weaker (−0.12); 60 and 90 mm a
 
 ## Mesh
 
-Gmsh with the background size field of `bfs3d_liu.geo` (recirculation box,
-step lip, and wall refinement lc_wall = 0.03 growing to lc_far over 0.3h).
-Trial counts: `--clscale 3` 22.9k, `2.5` 34.9k, `1.5` 122.7k tetrahedra, so
-**`--clscale 1` ≈ 0.35 M** (Liu: 297,054). Mesh study: 1.26 / 1.0 / 0.79.
+Gmsh with the background size field of `bfs3d_liu.geo`: recirculation box,
+step lip, and wall refinement by one Box field per planar wall (lc_wall = 0.03h
+at the wall, growing linearly to lc_far over d_wall = 1.0h, a size gradient
+of ~0.2).
+
+| `--clscale` | Tetrahedra | First-element height (measured) | Use |
+|---|---|---|---|
+| 1.75 | 281,457 | 0.056–0.075 h (y⁺ ≈ 4–5) | Liu-sized (297,054) |
+| 1.25 | — | ~0.04 h | mesh study |
+| 1.0 | — | ~0.03 h (y⁺ ≈ 2) | mesh study |
+
+History (do not repeat): a Gmsh `Distance` field with `Sampling = 200` on the
+40h-long walls places its samples 0.2h apart, so it overestimates the
+distance and under-refines the walls; a steep gradient (d_wall = 0.3, gradient
+0.7) made the first element 2–3.5 times thicker than lc_wall. Job 33994
+(338,050 tets) used that earlier version.
 
 Wall refinement is required. The measured inlet profile reaches u = 0.35 at
 0.016h from the wall; with the wall nodes at u = 0, a 0.25 node spacing loses
-~7 % of the inlet flux (a 2-rank trial without it: ∫u dy = 1.55 against 1.917).
-At `--clscale 2.5` the loss is 1.5–2 %; at 1.0, below 1 %.
+~7 % of the inlet flux (a 2-rank trial without refinement: ∫u dy = 1.55
+against 1.917).
 
 ## Commands (SUNBIRD2)
 
@@ -62,9 +74,9 @@ source ~/cbs3d_env.sh
 cd $CBS3D_CODE
 bash tools/cbs_case.sh cases/backward_facing_step/bfs3d_liu.geo \
     cases/backward_facing_step/bfs3d_liu.par cases/backward_facing_step/bfs3d_liu.matprop \
-    $CBS3D_SCRATCH/cases/bfs3d_liu --parts 16 --clscale 1.0
+    $CBS3D_SCRATCH/cases/bfs3d_liu_c175 --parts 16 --clscale 1.75
 export CBS3D_BFS_INLET_PROFILE=$CBS3D_CODE/cases/backward_facing_step/reference/inlet_denham_station0.txt
-bash jobs/sunbird/templates/submit_auto.sh $CBS3D_SCRATCH/cases/bfs3d_liu bfs3d_liu --sets 16 --time 12:00:00
+bash jobs/sunbird/templates/submit_auto.sh $CBS3D_SCRATCH/cases/bfs3d_liu_c175 bfs3d_liu --sets 16 --time 12:00:00
 ```
 
 The solver log must show `BC 507 INLET : TABLE ... (17 points, ...)`.
@@ -72,13 +84,15 @@ The solver log must show `BC 507 INLET : TABLE ... (17 points, ...)`.
 ## Comparison
 
 ```bash
-python3 $CBS3D_CODE/tools/bfs_profiles.py $CBS3D_SCRATCH/cases/bfs3d_liu
+python3 $CBS3D_CODE/tools/bfs_profiles.py $CBS3D_SCRATCH/cases/bfs3d_liu_c175 --plot profiles.png --wall-law wall_law.png
 ```
 
 (The folder argument takes the newest `.pvtu` under it.) Prints, per station,
 the RMS and maximum difference from Liu's SA curve, the RMS difference from
 Denham's data, the section flux ∫u dy (Liu: 1.93–1.96), and the reattachment
-length x_r/h. Liu's SA curves reverse at 2h and are ≈ 0 at 4h, so his x_r is
+length x_r/h. `--wall-law` adds u⁺ against y⁺ at attached stations (x/h = −2,
+12, 20, 30) with u_τ from the exact P1 wall gradient, and prints u_τ, Re_τ and
+the first-element y⁺. Liu's SA curves reverse at 2h and are ≈ 0 at 4h, so his x_r is
 2h–4h; Denham reports about 6h. `--plot FILE.png` writes the Fig. 4(b) layout.
 
 Verified on a 2-rank `--clscale 2.5` trial (35k tetrahedra): the log shows the

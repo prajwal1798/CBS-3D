@@ -35,8 +35,13 @@
 //              WALL FUNCTION), AND THE MEASURED INLET PROFILE IS STEEP AT
 //              THE WALLS (u = 0.35 AT 0.016 h): WITH NODES 0.25 APART THE
 //              DISCRETE INLET FLUX IS ~7 % LOW, WITH 0.03 IT IS < 1 % LOW.
-//   GMSH PRINTS THE TETRAHEDRON COUNT; SCALE ALL SIZES WITH -clscale.
-//   MESH STUDY: -clscale 1.26 (COARSE), 1.0 (MEDIUM), 0.79 (FINE, ~2x).
+//              d_wall = 1.0 KEEPS THE SIZE GRADIENT AT ~0.2 (ABOUT 20 %
+//              GROWTH PER LAYER); WITH d_wall = 0.3 (GRADIENT 0.7) THE FIRST
+//              ELEMENT CAME OUT 2-3.5x THICKER THAN lc_wall.
+//   GMSH PRINTS THE TETRAHEDRON COUNT; SCALE ALL SIZES WITH -clscale:
+//     -clscale 1.75   281,457 TETS, FIRST ELEMENT 0.056-0.075 h (LIU: 297,054)
+//     -clscale 1.25   FINER (MESH STUDY)
+//     -clscale 1.0    FINEST, FIRST ELEMENT ~0.03 h (y+ ~ 2)
 //
 // MESH:   gmsh bfs3d_liu.geo -3 -format msh22 -o bfs3d_liu.msh
 // ============================================================================
@@ -55,7 +60,7 @@ lc_far   = 0.25;
 lc_fine  = 0.12;
 lc_lip   = 0.05;
 lc_wall  = 0.03;
-d_wall   = 0.30;
+d_wall   = 1.00;
 x_box0   = 3.5;
 x_box1   = 16.0;
 
@@ -110,20 +115,37 @@ Field[2].YMin = L - 0.3;       Field[2].YMax = L + 0.3;
 Field[2].ZMin = -1.0;          Field[2].ZMax = span + 1.0;
 Field[2].Thickness = 0.6;
 
-Field[3] = Distance;
-Field[3].SurfacesList = {out[2], out[3], out[4], out[6]};
-Field[3].Sampling = 200;
+// WALL REFINEMENT: ONE BOX PER PLANAR WALL, PLACED JUST OUTSIDE THE FLUID.
+// THE SIZE IS lc_wall AT THE WALL AND GROWS LINEARLY TO lc_far OVER d_wall.
+// (EXACT; A Distance FIELD SAMPLES THE 40 h-LONG WALLS TOO SPARSELY AND
+// OVERESTIMATES THE DISTANCE, I.E. UNDER-REFINES THE WALLS.)
+Field[3] = Box;                                   // UPSTREAM FLOOR y = L
+Field[3].VIn = lc_wall;  Field[3].VOut = lc_far;  Field[3].Thickness = d_wall;
+Field[3].XMin = -1.0;    Field[3].XMax = x_step;
+Field[3].YMin = L - 1.0; Field[3].YMax = L;
+Field[3].ZMin = -1.0;    Field[3].ZMax = span + 1.0;
 
-Field[4] = Threshold;
-Field[4].InField = 3;
-Field[4].SizeMin = lc_wall;
-Field[4].SizeMax = lc_far;
-Field[4].DistMin = 0.0;
-Field[4].DistMax = d_wall;
+Field[4] = Box;                                   // STEP FACE x = x_step
+Field[4].VIn = lc_wall;  Field[4].VOut = lc_far;  Field[4].Thickness = d_wall;
+Field[4].XMin = x_step - 1.0; Field[4].XMax = x_step;
+Field[4].YMin = -1.0;    Field[4].YMax = L;
+Field[4].ZMin = -1.0;    Field[4].ZMax = span + 1.0;
 
-Field[5] = Min;
-Field[5].FieldsList = {1, 2, 4};
-Background Field = 5;
+Field[5] = Box;                                   // DOWNSTREAM FLOOR y = 0
+Field[5].VIn = lc_wall;  Field[5].VOut = lc_far;  Field[5].Thickness = d_wall;
+Field[5].XMin = x_step;  Field[5].XMax = x_out + 1.0;
+Field[5].YMin = -1.0;    Field[5].YMax = 0.0;
+Field[5].ZMin = -1.0;    Field[5].ZMax = span + 1.0;
+
+Field[6] = Box;                                   // ROOF y = L + h_in
+Field[6].VIn = lc_wall;  Field[6].VOut = lc_far;  Field[6].Thickness = d_wall;
+Field[6].XMin = -1.0;    Field[6].XMax = x_out + 1.0;
+Field[6].YMin = L + h_in; Field[6].YMax = L + h_in + 1.0;
+Field[6].ZMin = -1.0;    Field[6].ZMax = span + 1.0;
+
+Field[7] = Min;
+Field[7].FieldsList = {1, 2, 3, 4, 5, 6};
+Background Field = 7;
 
 Mesh.MeshSizeExtendFromBoundary = 0;
 Mesh.MeshSizeFromPoints = 0;
