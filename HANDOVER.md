@@ -812,6 +812,8 @@ All points were checked against a gmsh mesh of the `.geo` for the right material
 7. **Do not waste cluster hours**: never start a long run that cannot answer a specific question.
 8. **Respect the owner's style**: classic C++, ALL-CAPS banners, formal and humble tone, plain-language explanations.
 9. **Keep GitHub the source of truth**, and update this file at the end of every session.
+10. **Standard run monitor** (owner's standard, 2026-11-07): watch every run with `python3 $CBS3D_CODE/tools/watch_run.py RUN_DIR` (or `blanket.sh watch [RUN_DIR]`); `submit_mpi.sh` prints this command for each job. Give the owner this, not `tail -f`.
+11. **Owner's answer style**: short and precise; no plots, figures or diagrams unless asked (give the plotting script instead); insights only when asked.
 
 ---
 

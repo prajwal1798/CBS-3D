@@ -14,7 +14,9 @@
 #             THE LAST QUARTER OF THE HISTORY); CONTINUITY, CG, max|u|, SA.
 #
 # USAGE     : python3 tools/watch_run.py RUN_DIR [--every 5] [--u-target 1e-7]
-#                 [--sa-target 1e-6] [--ascii] [--no-color] [--once]
+#                 [--sa-target 1e-6] [--unicode] [--no-color] [--once]
+#             (--unicode DRAWS THE HISTORY WITH BLOCK CHARACTERS; PuTTY'S
+#             DEFAULT FONT SHOWS THEM AS BOXES, SO ASCII IS THE DEFAULT)
 #             RUN_DIR = THE run_<case>_<job> FOLDER. Ctrl+C STOPS WATCHING
 #             (THE JOB CONTINUES).
 # ================================
@@ -31,7 +33,7 @@ import sys
 import time
 
 BLOCKS_UNI = "▁▂▃▄▅▆▇█"
-BLOCKS_ASC = "_.-~=+*#"
+BLOCKS_ASC = "_.,-~=+*#"
 
 
 class Csv(object):
@@ -142,7 +144,7 @@ def main():
     ap.add_argument("--every", type=float, default=5.0)
     ap.add_argument("--u-target", type=float, default=1.0e-7)
     ap.add_argument("--sa-target", type=float, default=1.0e-6)
-    ap.add_argument("--ascii", action="store_true")
+    ap.add_argument("--unicode", action="store_true")
     ap.add_argument("--no-color", action="store_true")
     ap.add_argument("--once", action="store_true")
     args = ap.parse_args()
@@ -157,7 +159,7 @@ def main():
         sys.exit("NO RESIDUAL FILE UNDER %s/output" % run)
 
     csv = Csv(found[0])
-    blocks = BLOCKS_ASC if args.ascii else BLOCKS_UNI
+    blocks = BLOCKS_UNI if args.unicode else BLOCKS_ASC
     color = sys.stdout.isatty() and not args.no_color
     G, Y, R, B, D, N = (("\033[32m", "\033[33m", "\033[31m", "\033[1m", "\033[2m", "\033[0m")
                         if color else ("",) * 6)
@@ -236,9 +238,9 @@ def main():
                 last("maximum_velocity_correction")))
             lines.append("pressure   CG %s its, rel %s" % (last("cg_iterations", "%d"), last("cg_relative_l2")))
             if csv.col("sa_rel"):
-                lines.append("SA         nu~ [%s, %s]   max nu_t %s   max chi %s   max mu_t %s" % (
+                lines.append("SA         nu~ [%s, %s]   max nu_t %s   max chi %s" % (
                     last("sa_nu_tilde_min"), last("sa_nu_tilde_max"), last("sa_nu_t_max"),
-                    last("sa_chi_max", "%.1f"), last("sa_mu_t_max")))
+                    last("sa_chi_max", "%.1f")))
         else:
             lines.append("NO ITERATIONS YET (%s)" % csv.path)
 

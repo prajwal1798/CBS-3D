@@ -70,4 +70,4 @@ case "$MODE" in
         echo "ERROR: MODE MUST BE nodes OR any" >&2; exit 1 ;;
 esac
 
-echo "WATCH      : squeue -u \$USER ; tail -f $CASE_DIR/run_${CASE}_${RJOB}/solver.out"
+echo "WATCH      : python3 $CBS3D_CODE/tools/watch_run.py $CASE_DIR/run_${CASE}_${RJOB}"

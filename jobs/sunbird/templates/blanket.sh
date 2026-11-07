@@ -43,6 +43,8 @@
 #   check [RUN_DIR]     MASS + ENERGY BALANCE AND RESIDUAL PLOT OF A RUN
 #                       (DEFAULT: THE NEWEST RUN)
 #   status              YOUR JOBS AND THE LATEST PROGRESS LINE OF EACH RUN
+#   watch [RUN_DIR]     LIVE MONITOR (tools/watch_run.py) OF A RUN
+#                       (DEFAULT: THE NEWEST RUN)
 #
 # SETTINGS  : ENVIRONMENT VARIABLES (DEFAULTS IN BRACKETS)
 #   BLANKET_DIR   CASE FOLDER          [$CBS3D_SCRATCH/cases/blanket_slice]
@@ -68,7 +70,7 @@
 # ================================
 
 set -euo pipefail
-usage() { sed -n '2,57p' "$0" | sed 's/^# \{0,1\}//'; exit 1; }
+usage() { sed -n '2,59p' "$0" | sed 's/^# \{0,1\}//'; exit 1; }
 [[ "$#" -ge 1 ]] || usage
 
 source "$HOME/cbs3d_env.sh"
@@ -382,6 +384,16 @@ status)
         echo "$(basename "$r"): $(progress "$r/solver.out")"
         grep -h "ERROR\|FATAL" "$r/solver.out" "$r/solver.err" 2>/dev/null | head -3 || true
     done
+    ;;
+
+# ================================
+# LIVE MONITOR
+# ================================
+watch)
+    RUN="${1:-$(newest_run)}"
+    [[ -n "$RUN" && -d "$RUN" ]] || { echo "ERROR: NO RUN FOLDER IN $DIR" >&2; exit 1; }
+    shift || true
+    python3 "$CBS3D_CODE/tools/watch_run.py" "$(readlink -f "$RUN")" "$@"
     ;;
 
 *)
